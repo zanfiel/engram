@@ -1,0 +1,15 @@
+[Unit]
+Description=MegaMind persistent memory server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/zan/zanmemory-opencode
+ExecStart=/home/zan/.bun/bin/bun run server.ts
+Restart=on-failure
+RestartSec=5
+Environment=ZANMEMORY_PORT=4200
+Environment=ZANMEMORY_HOST=0.0.0.0
+
+[Install]
+WantedBy=default.target
