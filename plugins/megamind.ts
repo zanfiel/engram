@@ -2,21 +2,19 @@ import { type Plugin, tool } from "@opencode-ai/plugin";
 import { hostname } from "os";
 
 /**
- * MegaMind — Zan's self-hosted persistent memory system for all agents.
+ * MegaMind v2 — Zan's self-hosted persistent memory system for all agents.
  *
- * Talks to the MegaMind API server (Bun + SQLite FTS5) running on Rocky
- * at port 4200 (reachable via Tailscale at 100.120.223.125:4200).
- * NO external APIs, NO Copilot calls, NO OpenCode official servers.
+ * Talks to the MegaMind API server (Bun + SQLite + Vector Embeddings) running
+ * on Rocky at port 4200.
  *
- * Features:
- *  - Auto-recall: Injects recent memories into compaction context so every
- *    session (new or compacted) starts with full continuity.
- *  - Tools: memory_store, memory_search, memory_list, memory_delete
- *  - Source tagging: Every memory is tagged with hostname for traceability.
- *  - Conversations DB: Full conversation storage with FTS search.
+ * v2 upgrades:
+ *  - Hybrid search: vector semantic similarity + FTS5 keyword matching
+ *  - Auto-linking: knowledge graph of related memories
+ *  - Importance scoring: prioritize critical memories
+ *  - Embeddings: all-MiniLM-L6-v2 (384d) for semantic understanding
  */
 
-const MEMORY_URL = process.env.MEGAMIND_URL || process.env.OPUS_MEMORY_URL || "http://127.0.0.1:4200";
+const MEMORY_URL = process.env.MEGAMIND_URL || "http://127.0.0.1:4200";
 const SOURCE_TAG = `opencode@${hostname()}`;
 
 interface Memory {
@@ -25,7 +23,10 @@ interface Memory {
   category: string;
   source: string;
   session_id: string | null;
+  importance: number;
   created_at: string;
+  score?: number;
+  linked?: Array<{ id: number; content: string; category: string; similarity: number }>;
 }
 
 interface ListResponse {
@@ -36,6 +37,9 @@ interface StoreResponse {
   stored: boolean;
   id: number;
   created_at: string;
+  importance: number;
+  linked: number;
+  embedded: boolean;
 }
 
 interface SearchResponse {
@@ -57,17 +61,15 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
 function formatMemoryBlock(memories: Memory[], heading: string): string {
   if (!memories.length) return "";
   const lines = memories.map(
-    (m) => `- [${m.created_at}] (${m.category}) ${m.content}`
+    (m) => `- [#${m.id} | ${m.created_at} | ${m.category}] ${m.content}`
   );
-  return `## ${heading}\nThese are persistent memories from previous sessions. Use them to maintain continuity and avoid re-asking the user for context they already provided.\n\n${lines.join("\n")}`;
+  return `## ${heading}\nThese are persistent memories from MegaMind (Zan's self-hosted memory DB).\nThey contain prior session work, infrastructure state, decisions, and discoveries.\nUse them to maintain continuity — do NOT re-ask for context already here.\n\n${lines.join("\n")}`;
 }
 
 export const MegaMind: Plugin = async (ctx) => {
-  // Cache of memories fetched at session start, used for compaction injection
   let cachedMemories: Memory[] = [];
   let initialRecallDone = false;
 
-  // Fetch memories from the server (best-effort, never throws to caller)
   async function recallMemories(limit = 25): Promise<Memory[]> {
     try {
       const { results } = await apiFetch<ListResponse>(
@@ -86,7 +88,6 @@ export const MegaMind: Plugin = async (ctx) => {
     }
   }
 
-  // Do initial recall once
   async function ensureRecall() {
     if (!initialRecallDone) {
       initialRecallDone = true;
@@ -104,21 +105,17 @@ export const MegaMind: Plugin = async (ctx) => {
   }
 
   return {
-    // Listen for session events to trigger recall
     event: async ({ event }) => {
       if (event.type === "session.created") {
         await ensureRecall();
       }
     },
 
-    // Inject memories into compaction context so they survive context resets.
-    // This fires before the LLM generates a continuation summary.
     "experimental.session.compacting": async (_input, output) => {
-      // Refresh memories (they may have been updated during the session)
       const memories = await recallMemories(30);
       if (memories.length > 0) {
         output.context.push(
-          formatMemoryBlock(memories, "MegaMind — Persistent Context")
+          formatMemoryBlock(memories, "MegaMind — Persistent Context (Auto-Recalled)")
         );
       }
     },
@@ -150,7 +147,8 @@ export const MegaMind: Plugin = async (ctx) => {
                 session_id: context.sessionID,
               }),
             });
-            return `Stored memory #${result.id} (${args.category}): ${args.content.substring(0, 80)}...`;
+            const linkMsg = result.linked > 0 ? `, auto-linked to ${result.linked} related memories` : "";
+            return `Stored memory #${result.id} (${args.category}, importance ${result.importance})${linkMsg}: ${args.content.substring(0, 80)}...`;
           } catch (e: any) {
             return `Failed to store memory: ${e.message}`;
           }
@@ -176,16 +174,20 @@ export const MegaMind: Plugin = async (ctx) => {
               body: JSON.stringify({
                 query: args.query,
                 limit: Math.min(args.limit || 10, 50),
+                include_links: true,
               }),
             });
             if (!result.results?.length) {
               return "No memories found matching that query.";
             }
             return result.results
-              .map(
-                (m) =>
-                  `[#${m.id}] ${m.created_at} (${m.category}) ${m.content}`
-              )
+              .map((m) => {
+                let line = `[#${m.id}] ${m.created_at} (${m.category}) ${m.content}`;
+                if (m.linked && m.linked.length > 0) {
+                  line += `\n  Linked: ${m.linked.map(l => `#${l.id} (${l.similarity})`).join(", ")}`;
+                }
+                return line;
+              })
               .join("\n\n");
           } catch (e: any) {
             return `Search failed: ${e.message}`;

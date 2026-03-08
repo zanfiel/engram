@@ -1,0 +1,904 @@
+import { Database } from "bun:sqlite";
+import { resolve } from "path";
+import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
+
+const DATA_DIR = resolve(import.meta.dir, "data");
+const DB_PATH = resolve(DATA_DIR, "memory.db");
+const PORT = Number(process.env.ZANMEMORY_PORT || 4200);
+const HOST = process.env.ZANMEMORY_HOST || "0.0.0.0";
+
+// Embedding config
+const EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
+const EMBEDDING_DIM = 384;
+const AUTO_LINK_THRESHOLD = 0.7;   // cosine similarity threshold for auto-linking
+const AUTO_LINK_MAX = 3;           // max auto-links per memory
+const DEFAULT_IMPORTANCE = 5;
+
+// Ensure data directory exists
+await Bun.$`mkdir -p ${DATA_DIR}`;
+
+// ============================================================================
+// EMBEDDING MODEL — loaded once at startup
+// ============================================================================
+
+let embedder: FeatureExtractionPipeline | null = null;
+
+async function initEmbedder(): Promise<void> {
+  const start = Date.now();
+  console.log("Loading embedding model...");
+  embedder = await pipeline("feature-extraction", EMBEDDING_MODEL, {
+    dtype: "fp32",
+  }) as FeatureExtractionPipeline;
+  console.log(`Embedding model loaded in ${Date.now() - start}ms (${EMBEDDING_MODEL})`);
+}
+
+async function embed(text: string): Promise<Float32Array> {
+  if (!embedder) throw new Error("Embedding model not loaded");
+  const result = await embedder(text, { pooling: "mean", normalize: true });
+  return new Float32Array(result.data as Float32Array);
+}
+
+function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+  // Both vectors are already L2-normalized, so dot product = cosine similarity
+  let dot = 0;
+  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
+  return dot;
+}
+
+function embeddingToBuffer(emb: Float32Array): Buffer {
+  return Buffer.from(emb.buffer, emb.byteOffset, emb.byteLength);
+}
+
+function bufferToEmbedding(buf: Buffer | Uint8Array): Float32Array {
+  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  return new Float32Array(ab);
+}
+
+// ============================================================================
+// DATABASE
+// ============================================================================
+
+const db = new Database(DB_PATH, { create: true });
+db.exec("PRAGMA journal_mode=WAL");
+db.exec("PRAGMA foreign_keys=ON");
+db.exec("PRAGMA busy_timeout=5000");
+
+// ============================================================================
+// MEMORIES TABLE — upgraded with embedding + importance
+// ============================================================================
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'general',
+    source TEXT NOT NULL DEFAULT 'unknown',
+    session_id TEXT,
+    importance INTEGER NOT NULL DEFAULT 5,
+    embedding BLOB,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    content,
+    category,
+    source,
+    content='memories',
+    content_rowid='id',
+    tokenize='porter unicode61'
+  );
+
+  CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, content, category, source)
+    VALUES (new.id, new.content, new.category, new.source);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content, category, source)
+    VALUES ('delete', old.id, old.content, old.category, old.source);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content, category, source)
+    VALUES ('delete', old.id, old.content, old.category, old.source);
+    INSERT INTO memories_fts(rowid, content, category, source)
+    VALUES (new.id, new.content, new.category, new.source);
+  END;
+`);
+
+// Add columns if they don't exist (migration for existing DBs)
+try { db.exec("ALTER TABLE memories ADD COLUMN importance INTEGER NOT NULL DEFAULT 5"); } catch {}
+try { db.exec("ALTER TABLE memories ADD COLUMN embedding BLOB"); } catch {}
+
+// ============================================================================
+// MEMORY LINKS TABLE — auto-linking knowledge graph
+// ============================================================================
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS memory_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    target_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    similarity REAL NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(source_id, target_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_links_source ON memory_links(source_id);
+  CREATE INDEX IF NOT EXISTS idx_links_target ON memory_links(target_id);
+`);
+
+// ============================================================================
+// CONVERSATIONS TABLE
+// ============================================================================
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent TEXT NOT NULL,
+    session_id TEXT,
+    title TEXT,
+    metadata TEXT,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_conv_agent ON conversations(agent);
+  CREATE INDEX IF NOT EXISTS idx_conv_session ON conversations(session_id);
+  CREATE INDEX IF NOT EXISTS idx_conv_started ON conversations(started_at DESC);
+
+  CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    metadata TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id, created_at);
+
+  CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    content,
+    role,
+    content='messages',
+    content_rowid='id',
+    tokenize='porter unicode61'
+  );
+
+  CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, content, role)
+    VALUES (new.id, new.content, new.role);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content, role)
+    VALUES ('delete', old.id, old.content, old.role);
+  END;
+`);
+
+// ============================================================================
+// PREPARED STATEMENTS — memories
+// ============================================================================
+
+const insertMemory = db.prepare(
+  `INSERT INTO memories (content, category, source, session_id, importance, embedding)
+   VALUES (?, ?, ?, ?, ?, ?) RETURNING id, created_at`
+);
+const updateMemoryEmbedding = db.prepare(
+  `UPDATE memories SET embedding = ? WHERE id = ?`
+);
+const getAllEmbeddings = db.prepare(
+  `SELECT id, content, category, importance, embedding FROM memories WHERE embedding IS NOT NULL`
+);
+const searchMemoriesFTS = db.prepare(
+  `SELECT m.id, m.content, m.category, m.source, m.session_id, m.importance, m.created_at,
+     rank as fts_rank
+   FROM memories_fts f
+   JOIN memories m ON f.rowid = m.id
+   WHERE memories_fts MATCH ?
+   ORDER BY rank
+   LIMIT ?`
+);
+const listRecent = db.prepare(
+  `SELECT id, content, category, source, session_id, importance, created_at
+   FROM memories ORDER BY created_at DESC LIMIT ?`
+);
+const listByCategory = db.prepare(
+  `SELECT id, content, category, source, session_id, importance, created_at
+   FROM memories WHERE category = ? ORDER BY created_at DESC LIMIT ?`
+);
+const deleteMemory = db.prepare(`DELETE FROM memories WHERE id = ?`);
+const getMemory = db.prepare(`SELECT * FROM memories WHERE id = ?`);
+const getMemoryWithoutEmbedding = db.prepare(
+  `SELECT id, content, category, source, session_id, importance, created_at, updated_at FROM memories WHERE id = ?`
+);
+
+// Memory links
+const insertLink = db.prepare(
+  `INSERT OR IGNORE INTO memory_links (source_id, target_id, similarity) VALUES (?, ?, ?)`
+);
+const getLinksFor = db.prepare(
+  `SELECT ml.target_id as id, ml.similarity, m.content, m.category, m.importance, m.created_at
+   FROM memory_links ml
+   JOIN memories m ON ml.target_id = m.id
+   WHERE ml.source_id = ?
+   UNION
+   SELECT ml.source_id as id, ml.similarity, m.content, m.category, m.importance, m.created_at
+   FROM memory_links ml
+   JOIN memories m ON ml.source_id = m.id
+   WHERE ml.target_id = ?
+   ORDER BY similarity DESC`
+);
+
+// Count memories without embeddings (for backfill)
+const countNoEmbedding = db.prepare(
+  `SELECT COUNT(*) as count FROM memories WHERE embedding IS NULL`
+);
+const getNoEmbedding = db.prepare(
+  `SELECT id, content FROM memories WHERE embedding IS NULL LIMIT ?`
+);
+
+// ============================================================================
+// PREPARED STATEMENTS — conversations
+// ============================================================================
+
+const insertConversation = db.prepare(
+  `INSERT INTO conversations (agent, session_id, title, metadata) VALUES (?, ?, ?, ?) RETURNING id, started_at`
+);
+const updateConversation = db.prepare(
+  `UPDATE conversations SET title = COALESCE(?, title), metadata = COALESCE(?, metadata), updated_at = datetime('now') WHERE id = ?`
+);
+const getConversation = db.prepare(`SELECT * FROM conversations WHERE id = ?`);
+const getConversationBySession = db.prepare(
+  `SELECT * FROM conversations WHERE agent = ? AND session_id = ? ORDER BY started_at DESC LIMIT 1`
+);
+const listConversations = db.prepare(
+  `SELECT c.id, c.agent, c.session_id, c.title, c.metadata, c.started_at, c.updated_at,
+     (SELECT COUNT(*) FROM messages WHERE conversation_id = c.id) as message_count
+   FROM conversations c ORDER BY c.updated_at DESC LIMIT ?`
+);
+const listConversationsByAgent = db.prepare(
+  `SELECT c.id, c.agent, c.session_id, c.title, c.metadata, c.started_at, c.updated_at,
+     (SELECT COUNT(*) FROM messages WHERE conversation_id = c.id) as message_count
+   FROM conversations c WHERE c.agent = ? ORDER BY c.updated_at DESC LIMIT ?`
+);
+const deleteConversation = db.prepare(`DELETE FROM conversations WHERE id = ?`);
+
+const insertMessage = db.prepare(
+  `INSERT INTO messages (conversation_id, role, content, metadata) VALUES (?, ?, ?, ?) RETURNING id, created_at`
+);
+const getMessages = db.prepare(
+  `SELECT id, role, content, metadata, created_at FROM messages
+   WHERE conversation_id = ? ORDER BY created_at ASC LIMIT ? OFFSET ?`
+);
+const searchMessages = db.prepare(
+  `SELECT m.id, m.conversation_id, m.role, m.content, m.metadata, m.created_at,
+     c.agent, c.title as conv_title
+   FROM messages_fts f
+   JOIN messages m ON f.rowid = m.id
+   JOIN conversations c ON m.conversation_id = c.id
+   WHERE messages_fts MATCH ?
+   ORDER BY m.created_at DESC
+   LIMIT ?`
+);
+
+const touchConversation = db.prepare(
+  `UPDATE conversations SET updated_at = datetime('now') WHERE id = ?`
+);
+
+const bulkInsertConvo = db.transaction(
+  (agent: string, sessionId: string | null, title: string | null, metadata: string | null,
+   msgs: Array<{ role: string; content: string; metadata?: string | null }>) => {
+    const conv = insertConversation.get(agent, sessionId, title, metadata) as { id: number; started_at: string };
+    for (const msg of msgs) {
+      insertMessage.run(conv.id, msg.role, msg.content, msg.metadata || null);
+    }
+    return conv;
+  }
+);
+
+// ============================================================================
+// HYBRID SEARCH — combines vector similarity + FTS5 keyword matching
+// ============================================================================
+
+interface SearchResult {
+  id: number;
+  content: string;
+  category: string;
+  source?: string;
+  importance: number;
+  created_at: string;
+  score: number;
+  linked?: Array<{ id: number; content: string; category: string; similarity: number }>;
+}
+
+async function hybridSearch(query: string, limit: number = 10, includeLinks: boolean = false): Promise<SearchResult[]> {
+  const results = new Map<number, SearchResult>();
+
+  // 1. Vector search — semantic similarity
+  try {
+    const queryEmb = await embed(query);
+    const allMems = getAllEmbeddings.all() as Array<{
+      id: number; content: string; category: string; importance: number; embedding: Buffer;
+    }>;
+
+    for (const mem of allMems) {
+      if (!mem.embedding) continue;
+      const memEmb = bufferToEmbedding(mem.embedding);
+      const sim = cosineSimilarity(queryEmb, memEmb);
+      if (sim > 0.25) { // floor — ignore very low similarity
+        results.set(mem.id, {
+          id: mem.id,
+          content: mem.content,
+          category: mem.category,
+          importance: mem.importance,
+          created_at: "",
+          score: sim * 0.6, // weight: 60% vector
+        });
+      }
+    }
+  } catch (e: any) {
+    console.error("Vector search failed:", e.message);
+  }
+
+  // 2. FTS5 keyword search
+  const sanitized = sanitizeFTS(query);
+  if (sanitized) {
+    try {
+      const ftsResults = searchMemoriesFTS.all(sanitized, limit * 3) as Array<{
+        id: number; content: string; category: string; source: string;
+        session_id: string; importance: number; created_at: string; fts_rank: number;
+      }>;
+
+      // Normalize FTS ranks (they're negative — more negative = better match)
+      const maxRank = ftsResults.length > 0 ? Math.abs(ftsResults[0].fts_rank) : 1;
+
+      for (const r of ftsResults) {
+        const ftsScore = (Math.abs(r.fts_rank) / maxRank) * 0.4; // weight: 40% FTS
+        const existing = results.get(r.id);
+        if (existing) {
+          existing.score += ftsScore;
+          existing.created_at = r.created_at;
+          existing.source = r.source;
+        } else {
+          results.set(r.id, {
+            id: r.id,
+            content: r.content,
+            category: r.category,
+            source: r.source,
+            importance: r.importance,
+            created_at: r.created_at,
+            score: ftsScore,
+          });
+        }
+      }
+    } catch {}
+  }
+
+  // 3. Boost by importance (normalized 1-10 -> 0-0.1 bonus)
+  for (const r of results.values()) {
+    r.score += (r.importance / 10) * 0.1;
+  }
+
+  // 4. Sort by score descending, take top N
+  let sorted = Array.from(results.values())
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+
+  // 5. Fill in missing created_at from DB if needed
+  for (const r of sorted) {
+    if (!r.created_at) {
+      const mem = getMemoryWithoutEmbedding.get(r.id) as any;
+      if (mem) {
+        r.created_at = mem.created_at;
+        r.source = mem.source;
+      }
+    }
+  }
+
+  // 6. Optionally include linked memories (1-hop graph traversal)
+  if (includeLinks) {
+    for (const r of sorted) {
+      const links = getLinksFor.all(r.id, r.id) as Array<{
+        id: number; similarity: number; content: string; category: string; importance: number; created_at: string;
+      }>;
+      if (links.length > 0) {
+        r.linked = links.map(l => ({
+          id: l.id,
+          content: l.content,
+          category: l.category,
+          similarity: Math.round(l.similarity * 1000) / 1000,
+        }));
+      }
+    }
+  }
+
+  return sorted;
+}
+
+// ============================================================================
+// AUTO-LINKING — find similar memories and create bidirectional links
+// ============================================================================
+
+async function autoLink(memoryId: number, embedding: Float32Array): Promise<number> {
+  const allMems = getAllEmbeddings.all() as Array<{
+    id: number; content: string; category: string; importance: number; embedding: Buffer;
+  }>;
+
+  const similarities: Array<{ id: number; similarity: number }> = [];
+
+  for (const mem of allMems) {
+    if (mem.id === memoryId || !mem.embedding) continue;
+    const memEmb = bufferToEmbedding(mem.embedding);
+    const sim = cosineSimilarity(embedding, memEmb);
+    if (sim >= AUTO_LINK_THRESHOLD) {
+      similarities.push({ id: mem.id, similarity: sim });
+    }
+  }
+
+  // Sort by similarity descending, take top N
+  similarities.sort((a, b) => b.similarity - a.similarity);
+  const toLink = similarities.slice(0, AUTO_LINK_MAX);
+
+  let linked = 0;
+  for (const { id, similarity } of toLink) {
+    // Bidirectional links
+    insertLink.run(memoryId, id, similarity);
+    insertLink.run(id, memoryId, similarity);
+    linked++;
+  }
+
+  return linked;
+}
+
+// ============================================================================
+// BACKFILL — generate embeddings for existing memories that lack them
+// ============================================================================
+
+async function backfillEmbeddings(batchSize: number = 50): Promise<number> {
+  const missing = getNoEmbedding.all(batchSize) as Array<{ id: number; content: string }>;
+  let count = 0;
+
+  for (const mem of missing) {
+    try {
+      const emb = await embed(mem.content);
+      updateMemoryEmbedding.run(embeddingToBuffer(emb), mem.id);
+      count++;
+    } catch (e: any) {
+      console.error(`Failed to embed memory #${mem.id}: ${e.message}`);
+    }
+  }
+
+  // Auto-link newly embedded memories
+  if (count > 0) {
+    for (const mem of missing.slice(0, count)) {
+      const row = getMemory.get(mem.id) as any;
+      if (row?.embedding) {
+        const emb = bufferToEmbedding(row.embedding);
+        await autoLink(mem.id, emb);
+      }
+    }
+  }
+
+  return count;
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+function json(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function errorResponse(message: string, status = 400) {
+  return json({ error: message }, status);
+}
+
+function sanitizeFTS(query: string): string {
+  return query
+    .replace(/[^\w\s-]/g, "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => `"${w}"`)
+    .join(" OR ");
+}
+
+// ============================================================================
+// SERVER
+// ============================================================================
+
+// Initialize embedding model before starting server
+await initEmbedder();
+
+const server = Bun.serve({
+  port: PORT,
+  hostname: HOST,
+  async fetch(req) {
+    const url = new URL(req.url);
+    const method = req.method;
+
+    // ========================================================================
+    // HEALTH
+    // ========================================================================
+    if (url.pathname === "/health" && method === "GET") {
+      const memCount = db.prepare("SELECT COUNT(*) as count FROM memories").get() as { count: number };
+      const convCount = db.prepare("SELECT COUNT(*) as count FROM conversations").get() as { count: number };
+      const msgCount = db.prepare("SELECT COUNT(*) as count FROM messages").get() as { count: number };
+      const linkCount = db.prepare("SELECT COUNT(*) as count FROM memory_links").get() as { count: number };
+      const embCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE embedding IS NOT NULL").get() as { count: number };
+      const noEmbCount = (countNoEmbedding.get() as { count: number }).count;
+      const dbSize = Bun.file(DB_PATH).size;
+      return json({
+        status: "ok",
+        memories: memCount.count,
+        embedded: embCount.count,
+        unembedded: noEmbCount,
+        links: linkCount.count,
+        conversations: convCount.count,
+        messages: msgCount.count,
+        embedding_model: EMBEDDING_MODEL,
+        db_size_mb: Math.round(dbSize / 1048576 * 100) / 100,
+      });
+    }
+
+    // ========================================================================
+    // MEMORIES — store with embedding + auto-link
+    // ========================================================================
+
+    if (url.pathname === "/store" && method === "POST") {
+      try {
+        const body = await req.json();
+        const { content, category, source, session_id, importance } = body;
+        if (!content || typeof content !== "string" || content.trim().length === 0) {
+          return errorResponse("content is required and must be a non-empty string");
+        }
+
+        const imp = Math.max(1, Math.min(10, Number(importance) || DEFAULT_IMPORTANCE));
+
+        // Generate embedding
+        let embBuffer: Buffer | null = null;
+        let embArray: Float32Array | null = null;
+        try {
+          embArray = await embed(content.trim());
+          embBuffer = embeddingToBuffer(embArray);
+        } catch (e: any) {
+          console.error("Embedding failed, storing without:", e.message);
+        }
+
+        const result = insertMemory.get(
+          content.trim(),
+          (category || "general").trim(),
+          (source || "unknown").trim(),
+          session_id || null,
+          imp,
+          embBuffer
+        ) as { id: number; created_at: string };
+
+        // Auto-link if we have an embedding
+        let linked = 0;
+        if (embArray) {
+          linked = await autoLink(result.id, embArray);
+        }
+
+        return json({
+          stored: true,
+          id: result.id,
+          created_at: result.created_at,
+          importance: imp,
+          linked,
+          embedded: !!embBuffer,
+        });
+      } catch (e: any) {
+        return errorResponse(`Failed to store: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // MEMORIES — hybrid search (vector + FTS5)
+    // ========================================================================
+
+    if (url.pathname === "/search" && method === "POST") {
+      try {
+        const body = await req.json();
+        const { query, limit, include_links } = body;
+        if (!query || typeof query !== "string") return errorResponse("query is required");
+        const results = await hybridSearch(query, Math.min(limit || 10, 50), include_links || false);
+        return json({ results });
+      } catch (e: any) {
+        return errorResponse(`Search failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // MEMORIES — list, get, delete (mostly unchanged)
+    // ========================================================================
+
+    if (url.pathname === "/list" && method === "GET") {
+      const limit = Math.min(Number(url.searchParams.get("limit") || 20), 100);
+      const category = url.searchParams.get("category");
+      const results = category ? listByCategory.all(category, limit) : listRecent.all(limit);
+      return json({ results });
+    }
+
+    if (url.pathname.startsWith("/memory/") && method === "GET") {
+      const id = Number(url.pathname.split("/")[2]);
+      if (isNaN(id)) return errorResponse("Invalid id");
+      const memory = getMemoryWithoutEmbedding.get(id);
+      if (!memory) return errorResponse("Not found", 404);
+      // Include linked memories
+      const links = getLinksFor.all(id, id) as Array<{
+        id: number; similarity: number; content: string; category: string;
+      }>;
+      return json({ ...(memory as object), links });
+    }
+
+    if (url.pathname.startsWith("/memory/") && method === "DELETE") {
+      const id = Number(url.pathname.split("/")[2]);
+      if (isNaN(id)) return errorResponse("Invalid id");
+      deleteMemory.run(id);
+      return json({ deleted: true, id });
+    }
+
+    // ========================================================================
+    // BACKFILL — trigger embedding backfill for existing memories
+    // ========================================================================
+
+    if (url.pathname === "/backfill" && method === "POST") {
+      try {
+        const body = await req.json().catch(() => ({}));
+        const batch = Math.min(Number((body as any).batch) || 50, 200);
+        const count = await backfillEmbeddings(batch);
+        const remaining = (countNoEmbedding.get() as { count: number }).count;
+        return json({ backfilled: count, remaining });
+      } catch (e: any) {
+        return errorResponse(`Backfill failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // GRAPH — get links for a memory
+    // ========================================================================
+
+    if (url.pathname.startsWith("/links/") && method === "GET") {
+      const id = Number(url.pathname.split("/")[2]);
+      if (isNaN(id)) return errorResponse("Invalid id");
+      const links = getLinksFor.all(id, id);
+      return json({ memory_id: id, links });
+    }
+
+    // ========================================================================
+    // CONVERSATIONS (unchanged)
+    // ========================================================================
+
+    if (url.pathname === "/conversations" && method === "POST") {
+      try {
+        const body = await req.json();
+        const { agent, session_id, title, metadata } = body;
+        if (!agent || typeof agent !== "string") return errorResponse("agent is required");
+        const result = insertConversation.get(
+          agent.trim(), session_id || null, title || null,
+          metadata ? JSON.stringify(metadata) : null
+        ) as { id: number; started_at: string };
+        return json({ id: result.id, started_at: result.started_at });
+      } catch (e: any) {
+        return errorResponse(`Failed to create conversation: ${e.message}`, 500);
+      }
+    }
+
+    if (url.pathname === "/conversations" && method === "GET") {
+      const limit = Math.min(Number(url.searchParams.get("limit") || 50), 500);
+      const agent = url.searchParams.get("agent");
+      const results = agent
+        ? listConversationsByAgent.all(agent, limit)
+        : listConversations.all(limit);
+      return json({ results });
+    }
+
+    if (/^\/conversations\/\d+$/.test(url.pathname) && method === "GET") {
+      const id = Number(url.pathname.split("/")[2]);
+      const conv = getConversation.get(id);
+      if (!conv) return errorResponse("Not found", 404);
+      const limit = Math.min(Number(url.searchParams.get("limit") || 10000), 100000);
+      const offset = Number(url.searchParams.get("offset") || 0);
+      const msgs = getMessages.all(id, limit, offset);
+      return json({ conversation: conv, messages: msgs });
+    }
+
+    if (/^\/conversations\/\d+$/.test(url.pathname) && method === "PATCH") {
+      try {
+        const id = Number(url.pathname.split("/")[2]);
+        const body = await req.json();
+        updateConversation.run(
+          body.title || null,
+          body.metadata ? JSON.stringify(body.metadata) : null,
+          id
+        );
+        return json({ updated: true, id });
+      } catch (e: any) {
+        return errorResponse(`Failed to update: ${e.message}`, 500);
+      }
+    }
+
+    if (/^\/conversations\/\d+$/.test(url.pathname) && method === "DELETE") {
+      const id = Number(url.pathname.split("/")[2]);
+      deleteConversation.run(id);
+      return json({ deleted: true, id });
+    }
+
+    // ========================================================================
+    // MESSAGES
+    // ========================================================================
+
+    if (/^\/conversations\/\d+\/messages$/.test(url.pathname) && method === "POST") {
+      try {
+        const convId = Number(url.pathname.split("/")[2]);
+        const conv = getConversation.get(convId);
+        if (!conv) return errorResponse("Conversation not found", 404);
+
+        const body = await req.json();
+        const msgs = Array.isArray(body) ? body : [body];
+        const results: Array<{ id: number; created_at: string }> = [];
+
+        for (const msg of msgs) {
+          if (!msg.role || !msg.content) continue;
+          const result = insertMessage.get(
+            convId, msg.role, msg.content, msg.metadata ? JSON.stringify(msg.metadata) : null
+          ) as { id: number; created_at: string };
+          results.push(result);
+        }
+
+        touchConversation.run(convId);
+        return json({ added: results.length, messages: results });
+      } catch (e: any) {
+        return errorResponse(`Failed to add messages: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // BULK STORE
+    // ========================================================================
+
+    if (url.pathname === "/conversations/bulk" && method === "POST") {
+      try {
+        const body = await req.json();
+        const { agent, session_id, title, metadata, messages: msgs } = body;
+        if (!agent) return errorResponse("agent is required");
+        if (!msgs || !Array.isArray(msgs) || msgs.length === 0) {
+          return errorResponse("messages array is required and must not be empty");
+        }
+
+        const conv = bulkInsertConvo(
+          agent.trim(),
+          session_id || null,
+          title || null,
+          metadata ? JSON.stringify(metadata) : null,
+          msgs.map((m: any) => ({
+            role: m.role || "user",
+            content: m.content || "",
+            metadata: m.metadata ? JSON.stringify(m.metadata) : null,
+          }))
+        );
+
+        return json({ id: conv.id, started_at: conv.started_at, messages: msgs.length });
+      } catch (e: any) {
+        return errorResponse(`Bulk store failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // UPSERT
+    // ========================================================================
+
+    if (url.pathname === "/conversations/upsert" && method === "POST") {
+      try {
+        const body = await req.json();
+        const { agent, session_id, title, metadata, messages: msgs } = body;
+        if (!agent) return errorResponse("agent is required");
+        if (!session_id) return errorResponse("session_id is required for upsert");
+
+        let conv = getConversationBySession.get(agent, session_id) as any;
+        let created = false;
+
+        if (!conv) {
+          const result = insertConversation.get(
+            agent, session_id, title || null,
+            metadata ? JSON.stringify(metadata) : null
+          ) as { id: number; started_at: string };
+          conv = { id: result.id };
+          created = true;
+        } else if (title || metadata) {
+          updateConversation.run(
+            title || null,
+            metadata ? JSON.stringify(metadata) : null,
+            conv.id
+          );
+        }
+
+        let added = 0;
+        if (msgs && Array.isArray(msgs)) {
+          for (const msg of msgs) {
+            if (!msg.role || !msg.content) continue;
+            insertMessage.run(
+              conv.id, msg.role, msg.content,
+              msg.metadata ? JSON.stringify(msg.metadata) : null
+            );
+            added++;
+          }
+          if (added > 0) touchConversation.run(conv.id);
+        }
+
+        return json({ id: conv.id, created, added });
+      } catch (e: any) {
+        return errorResponse(`Upsert failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // SEARCH MESSAGES
+    // ========================================================================
+
+    if (url.pathname === "/messages/search" && method === "POST") {
+      try {
+        const body = await req.json();
+        const { query, limit } = body;
+        if (!query || typeof query !== "string") return errorResponse("query is required");
+        const sanitized = sanitizeFTS(query);
+        if (!sanitized) return json({ results: [] });
+        const results = searchMessages.all(sanitized, Math.min(limit || 30, 200));
+        return json({ results });
+      } catch (e: any) {
+        return errorResponse(`Search failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // STATS
+    // ========================================================================
+
+    if (url.pathname === "/stats" && method === "GET") {
+      const memCount = db.prepare("SELECT COUNT(*) as count FROM memories").get() as { count: number };
+      const embCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE embedding IS NOT NULL").get() as { count: number };
+      const linkCount = db.prepare("SELECT COUNT(*) as count FROM memory_links").get() as { count: number };
+      const convCount = db.prepare("SELECT COUNT(*) as count FROM conversations").get() as { count: number };
+      const msgCount = db.prepare("SELECT COUNT(*) as count FROM messages").get() as { count: number };
+      const agents = db.prepare(
+        `SELECT agent, COUNT(*) as conversations,
+          (SELECT COUNT(*) FROM messages m JOIN conversations c2 ON m.conversation_id = c2.id WHERE c2.agent = c.agent) as total_messages
+         FROM conversations c GROUP BY agent ORDER BY total_messages DESC`
+      ).all();
+      const dbSize = Bun.file(DB_PATH).size;
+      return json({
+        memories: memCount.count,
+        embedded: embCount.count,
+        links: linkCount.count,
+        embedding_model: EMBEDDING_MODEL,
+        conversations: convCount.count,
+        messages: msgCount.count,
+        agents,
+        db_size_mb: Math.round(dbSize / 1048576 * 100) / 100,
+        db_path: DB_PATH,
+      });
+    }
+
+    return errorResponse("Not found", 404);
+  },
+});
+
+// Backfill existing memories on startup (non-blocking)
+const noEmb = (countNoEmbedding.get() as { count: number }).count;
+if (noEmb > 0) {
+  console.log(`Found ${noEmb} memories without embeddings, backfilling...`);
+  backfillEmbeddings(200).then((n) => {
+    console.log(`Backfilled ${n} memories. Remaining: ${noEmb - n}`);
+  }).catch(e => console.error("Backfill error:", e));
+}
+
+console.log(`MegaMind v2 listening on ${HOST}:${PORT}`);
+console.log(`Database: ${DB_PATH}`);
+console.log(`Embedding model: ${EMBEDDING_MODEL} (${EMBEDDING_DIM}d)`);
+console.log(`Auto-link: threshold=${AUTO_LINK_THRESHOLD}, max=${AUTO_LINK_MAX}`);
