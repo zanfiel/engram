@@ -136,6 +136,43 @@ const tools = [
       required: [],
     },
   },
+  {
+    name: "engram_entities",
+    description: "Manage entities (people, organizations, devices, products, services). Create, list, search, or get details.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["create", "list", "get", "search", "link", "unlink", "relate"], description: "Action to perform" },
+        id: { type: "number", description: "Entity ID (for get/link/unlink/relate)" },
+        name: { type: "string", description: "Entity name (for create)" },
+        type: { type: "string", enum: ["person", "organization", "team", "device", "product", "service", "generic"], description: "Entity type" },
+        description: { type: "string", description: "Entity description" },
+        aka: { type: "string", description: "Also known as / aliases" },
+        query: { type: "string", description: "Search query (for search)" },
+        memory_id: { type: "number", description: "Memory ID to link/unlink" },
+        target_id: { type: "number", description: "Target entity ID (for relate)" },
+        relationship: { type: "string", description: "Relationship type (for relate, e.g. 'works_at', 'owns')" },
+      },
+      required: ["action"],
+    },
+  },
+  {
+    name: "engram_projects",
+    description: "Manage projects for scoping memories. Create, list, search within a project, or link memories.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["create", "list", "get", "search", "link", "unlink"], description: "Action to perform" },
+        id: { type: "number", description: "Project ID (for get/search/link/unlink)" },
+        name: { type: "string", description: "Project name (for create)" },
+        description: { type: "string", description: "Project description" },
+        status: { type: "string", enum: ["active", "paused", "completed", "archived"], description: "Project status" },
+        memory_id: { type: "number", description: "Memory ID to link/unlink" },
+        query: { type: "string", description: "Search query (for scoped search)" },
+      },
+      required: ["action"],
+    },
+  },
 ];
 
 // Resource definitions
@@ -234,6 +271,120 @@ async function executeTool(name: string, args: any): Promise<string> {
       }
     }
 
+    case "engram_entities": {
+      switch (args.action) {
+        case "create": {
+          if (!args.name) throw new Error("name required for create");
+          const result = await api("/entities", {
+            method: "POST",
+            body: JSON.stringify({ name: args.name, type: args.type || "generic", description: args.description, aka: args.aka }),
+          });
+          return `Created entity #${result.id}: ${args.name} (${args.type || "generic"})`;
+        }
+        case "list": {
+          const params = args.type ? `?type=${args.type}` : "";
+          const result = await api(`/entities${params}`);
+          if (!result.entities?.length) return "No entities found.";
+          return result.entities.map((e: any) =>
+            `#${e.id} [${e.type}] ${e.name}${e.aka ? ` (aka: ${e.aka})` : ""} — ${e.memory_count} memories`
+          ).join("\n");
+        }
+        case "get": {
+          if (!args.id) throw new Error("id required for get");
+          const e = await api(`/entities/${args.id}`);
+          let text = `Entity #${e.id}: ${e.name} (${e.type})`;
+          if (e.description) text += `\n  ${e.description}`;
+          if (e.aka) text += `\n  AKA: ${e.aka}`;
+          if (e.relationships?.length) {
+            text += `\n  Relationships:`;
+            for (const r of e.relationships) text += `\n    ${r.direction === "outgoing" ? "→" : "←"} ${r.relationship} ${r.related_entity_name} (#${r.related_entity_id})`;
+          }
+          if (e.memories?.length) {
+            text += `\n  Memories (${e.memories.length}):`;
+            for (const m of e.memories) text += `\n    #${m.id} [${m.category}] ${m.content.substring(0, 100)}`;
+          }
+          return text;
+        }
+        case "search": {
+          if (!args.query) throw new Error("query required for search");
+          const result = await api(`/entities?q=${encodeURIComponent(args.query)}`);
+          if (!result.entities?.length) return `No entities matching "${args.query}"`;
+          return result.entities.map((e: any) => `#${e.id} [${e.type}] ${e.name} — ${e.memory_count} memories`).join("\n");
+        }
+        case "link": {
+          if (!args.id || !args.memory_id) throw new Error("id and memory_id required for link");
+          await api(`/entities/${args.id}/memories/${args.memory_id}`, { method: "PUT" });
+          return `Linked memory #${args.memory_id} to entity #${args.id}`;
+        }
+        case "unlink": {
+          if (!args.id || !args.memory_id) throw new Error("id and memory_id required for unlink");
+          await api(`/entities/${args.id}/memories/${args.memory_id}`, { method: "DELETE" });
+          return `Unlinked memory #${args.memory_id} from entity #${args.id}`;
+        }
+        case "relate": {
+          if (!args.id || !args.target_id || !args.relationship) throw new Error("id, target_id, and relationship required");
+          await api(`/entities/${args.id}/relationships`, {
+            method: "POST",
+            body: JSON.stringify({ target_id: args.target_id, relationship: args.relationship }),
+          });
+          return `Entity #${args.id} → ${args.relationship} → Entity #${args.target_id}`;
+        }
+        default: throw new Error(`Unknown entity action: ${args.action}`);
+      }
+    }
+
+    case "engram_projects": {
+      switch (args.action) {
+        case "create": {
+          if (!args.name) throw new Error("name required for create");
+          const result = await api("/projects", {
+            method: "POST",
+            body: JSON.stringify({ name: args.name, description: args.description, status: args.status || "active" }),
+          });
+          return `Created project #${result.id}: ${args.name} (${result.status})`;
+        }
+        case "list": {
+          const params = args.status ? `?status=${args.status}` : "";
+          const result = await api(`/projects${params}`);
+          if (!result.projects?.length) return "No projects found.";
+          return result.projects.map((p: any) =>
+            `#${p.id} [${p.status}] ${p.name} — ${p.memory_count} memories`
+          ).join("\n");
+        }
+        case "get": {
+          if (!args.id) throw new Error("id required for get");
+          const p = await api(`/projects/${args.id}`);
+          let text = `Project #${p.id}: ${p.name} (${p.status})`;
+          if (p.description) text += `\n  ${p.description}`;
+          if (p.memories?.length) {
+            text += `\n  Memories (${p.memories.length}):`;
+            for (const m of p.memories) text += `\n    #${m.id} [${m.category}] ${m.content.substring(0, 100)}`;
+          }
+          return text;
+        }
+        case "search": {
+          if (!args.id || !args.query) throw new Error("id and query required for scoped search");
+          const result = await api(`/projects/${args.id}/search`, {
+            method: "POST",
+            body: JSON.stringify({ query: args.query }),
+          });
+          if (!result.results?.length) return `No memories matching "${args.query}" in project #${args.id}`;
+          return result.results.map((r: any) => `#${r.id} (${r.score.toFixed(3)}) ${r.content.substring(0, 120)}`).join("\n");
+        }
+        case "link": {
+          if (!args.id || !args.memory_id) throw new Error("id and memory_id required for link");
+          await api(`/projects/${args.id}/memories/${args.memory_id}`, { method: "PUT" });
+          return `Linked memory #${args.memory_id} to project #${args.id}`;
+        }
+        case "unlink": {
+          if (!args.id || !args.memory_id) throw new Error("id and memory_id required for unlink");
+          await api(`/projects/${args.id}/memories/${args.memory_id}`, { method: "DELETE" });
+          return `Unlinked memory #${args.memory_id} from project #${args.id}`;
+        }
+        default: throw new Error(`Unknown project action: ${args.action}`);
+      }
+    }
+
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -266,7 +417,7 @@ async function handleRequest(req: MCPRequest): Promise<MCPResponse> {
             },
             serverInfo: {
               name: "engram",
-              version: "4.2.0",
+              version: "4.3.0",
             },
           },
         };

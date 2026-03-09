@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Engram — Memory Graph</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e17; color: #c0c8d8; font-family: 'SF Mono', 'Fira Code', monospace; overflow: hidden; }
+#controls { position: fixed; top: 12px; left: 12px; z-index: 10; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+#controls input, #controls select, #controls button {
+  background: #141824; border: 1px solid #2a3040; color: #c0c8d8; padding: 6px 12px;
+  border-radius: 6px; font-size: 13px; font-family: inherit;
+}
+#controls button { cursor: pointer; background: #1a2040; border-color: #00f0ff40; color: #00f0ff; }
+#controls button:hover { background: #00f0ff15; border-color: #00f0ff; }
+#search { width: 260px; }
+#info { position: fixed; bottom: 12px; left: 12px; font-size: 12px; color: #506080; z-index: 10; }
+#tooltip {
+  position: fixed; display: none; background: #141824ee; border: 1px solid #00f0ff40;
+  border-radius: 8px; padding: 12px 16px; max-width: 400px; font-size: 12px;
+  z-index: 20; pointer-events: none; box-shadow: 0 4px 20px #00000080;
+}
+#tooltip .tt-title { color: #00f0ff; font-weight: bold; margin-bottom: 4px; }
+#tooltip .tt-meta { color: #8090a0; font-size: 11px; }
+#tooltip .tt-content { color: #c0c8d8; margin-top: 6px; line-height: 1.4; }
+canvas { display: block; }
+#legend {
+  position: fixed; top: 12px; right: 12px; background: #141824ee; border: 1px solid #2a3040;
+  border-radius: 8px; padding: 12px; font-size: 11px; z-index: 10;
+}
+#legend div { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+#legend span.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <input type="text" id="search" placeholder="Search context (empty = top memories)…">
+  <select id="depth"><option value="1">Depth 1</option><option value="2" selected>Depth 2</option><option value="3">Depth 3</option></select>
+  <input type="number" id="maxNodes" value="150" min="20" max="500" style="width:70px" title="Max nodes">
+  <button id="go">Load Graph</button>
+  <button id="resetZoom">Reset View</button>
+</div>
+<div id="legend">
+  <div><span class="dot" style="background:#00f0ff"></span> task</div>
+  <div><span class="dot" style="background:#b44dff"></span> discovery</div>
+  <div><span class="dot" style="background:#ff2daa"></span> decision</div>
+  <div><span class="dot" style="background:#39ff14"></span> state</div>
+  <div><span class="dot" style="background:#ff3355"></span> issue</div>
+  <div><span class="dot" style="background:#8899aa"></span> general</div>
+  <div><span class="dot" style="background:#ffaa00"></span> entity</div>
+  <div><span class="dot" style="background:#00ff88"></span> project</div>
+</div>
+<div id="tooltip"><div class="tt-title"></div><div class="tt-meta"></div><div class="tt-content"></div></div>
+<div id="info">Engram Memory Graph</div>
+<canvas id="canvas"></canvas>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const tooltip = document.getElementById('tooltip');
+const info = document.getElementById('info');
+
+const COLORS = {
+  task: '#00f0ff', discovery: '#b44dff', decision: '#ff2daa',
+  state: '#39ff14', issue: '#ff3355', general: '#8899aa',
+  entity: '#ffaa00', project: '#00ff88', person: '#ffaa00',
+  organization: '#ff8800', team: '#ffcc00', device: '#aabb00',
+  product: '#ff6600', service: '#ff4488',
+};
+const EDGE_COLORS = {
+  updates: '#ff335580', extends: '#39ff1480', contradicts: '#ff2daa80',
+  derived_from: '#b44dff80', related: '#ffffff20', about: '#ffaa0060',
+  contains: '#00ff8860', caused_by: '#ff880060', prerequisite_for: '#00f0ff40',
+};
+
+let nodes = [], edges = [], simulation = [];
+let zoom = 1, panX = 0, panY = 0;
+let dragging = null, dragStart = null, panning = false, panStart = null;
+let hoveredNode = null;
+
+function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+window.addEventListener('resize', resize);
+resize();
+
+function nodeColor(n) { return COLORS[n.group] || COLORS[n.type] || '#556677'; }
+function edgeColor(e) { return EDGE_COLORS[e.type] || '#ffffff15'; }
+
+async function loadGraph() {
+  const q = document.getElementById('search').value;
+  const depth = document.getElementById('depth').value;
+  const max = document.getElementById('maxNodes').value;
+  const params = new URLSearchParams({ depth, max });
+  if (q.trim()) params.set('q', q);
+
+  info.textContent = 'Loading…';
+  try {
+    const resp = await fetch(`/graph?${params}`);
+    const data = await resp.json();
+    if (data.error) { info.textContent = `Error: ${data.error}`; return; }
+
+    nodes = data.nodes.map(n => ({
+      ...n,
+      x: (Math.random() - 0.5) * 600,
+      y: (Math.random() - 0.5) * 600,
+      vx: 0, vy: 0,
+      radius: n.size || 5,
+    }));
+
+    const nodeMap = new Map(nodes.map(n => [n.id, n]));
+    edges = data.edges.filter(e => nodeMap.has(e.source) && nodeMap.has(e.target))
+      .map(e => ({ ...e, sourceNode: nodeMap.get(e.source), targetNode: nodeMap.get(e.target) }));
+
+    info.textContent = `${data.node_count} nodes, ${data.edge_count} edges`;
+    resetView();
+    simulate();
+  } catch (e) { info.textContent = `Failed: ${e.message}`; }
+}
+
+function simulate() {
+  const iterations = 200;
+  let i = 0;
+  function tick() {
+    if (i++ > iterations) return;
+    // Repulsion
+    for (let a = 0; a < nodes.length; a++) {
+      for (let b = a + 1; b < nodes.length; b++) {
+        let dx = nodes[b].x - nodes[a].x, dy = nodes[b].y - nodes[a].y;
+        let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        let force = 800 / (dist * dist);
+        let fx = dx / dist * force, fy = dy / dist * force;
+        nodes[a].vx -= fx; nodes[a].vy -= fy;
+        nodes[b].vx += fx; nodes[b].vy += fy;
+      }
+    }
+    // Attraction (edges)
+    for (const e of edges) {
+      let dx = e.targetNode.x - e.sourceNode.x, dy = e.targetNode.y - e.sourceNode.y;
+      let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      let force = (dist - 80) * 0.005 * (e.weight || 0.5);
+      let fx = dx / dist * force, fy = dy / dist * force;
+      e.sourceNode.vx += fx; e.sourceNode.vy += fy;
+      e.targetNode.vx -= fx; e.targetNode.vy -= fy;
+    }
+    // Center gravity
+    for (const n of nodes) {
+      n.vx -= n.x * 0.001; n.vy -= n.y * 0.001;
+      n.vx *= 0.9; n.vy *= 0.9;
+      if (n !== dragging) { n.x += n.vx; n.y += n.vy; }
+    }
+    draw();
+    requestAnimationFrame(tick);
+  }
+  tick();
+}
+
+function toScreen(x, y) {
+  return [x * zoom + panX + canvas.width / 2, y * zoom + panY + canvas.height / 2];
+}
+function fromScreen(sx, sy) {
+  return [(sx - panX - canvas.width / 2) / zoom, (sy - panY - canvas.height / 2) / zoom];
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Edges
+  for (const e of edges) {
+    const [x1, y1] = toScreen(e.sourceNode.x, e.sourceNode.y);
+    const [x2, y2] = toScreen(e.targetNode.x, e.targetNode.y);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+    ctx.strokeStyle = edgeColor(e);
+    ctx.lineWidth = Math.max(0.5, (e.weight || 0.3) * 2 * zoom);
+    ctx.stroke();
+
+    // Edge label at midpoint for non-related types
+    if (e.type !== 'related' && zoom > 0.6) {
+      const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+      ctx.font = `${Math.max(8, 9 * zoom)}px monospace`;
+      ctx.fillStyle = edgeColor(e).replace(/80$/, 'cc');
+      ctx.textAlign = 'center';
+      ctx.fillText(e.type, mx, my - 3);
+    }
+  }
+
+  // Nodes
+  for (const n of nodes) {
+    const [x, y] = toScreen(n.x, n.y);
+    const r = n.radius * zoom;
+    if (x < -50 || x > canvas.width + 50 || y < -50 || y > canvas.height + 50) continue;
+
+    // Glow for hovered
+    if (n === hoveredNode) {
+      ctx.beginPath(); ctx.arc(x, y, r + 4, 0, Math.PI * 2);
+      ctx.fillStyle = nodeColor(n) + '30'; ctx.fill();
+    }
+
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = nodeColor(n);
+    ctx.globalAlpha = n.type === 'memory' ? Math.max(0.4, (n.confidence || 1)) : 0.9;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // Shape: square for entities, diamond for projects
+    if (n.type === 'entity') {
+      ctx.strokeStyle = nodeColor(n); ctx.lineWidth = 1.5;
+      ctx.strokeRect(x - r, y - r, r * 2, r * 2);
+    } else if (n.type === 'project') {
+      ctx.beginPath();
+      ctx.moveTo(x, y - r * 1.3); ctx.lineTo(x + r * 1.3, y);
+      ctx.lineTo(x, y + r * 1.3); ctx.lineTo(x - r * 1.3, y); ctx.closePath();
+      ctx.strokeStyle = nodeColor(n); ctx.lineWidth = 1.5; ctx.stroke();
+    }
+
+    // Label
+    if (zoom > 0.4 || n === hoveredNode) {
+      ctx.font = `${Math.max(9, 10 * zoom)}px monospace`;
+      ctx.fillStyle = '#c0c8d8';
+      ctx.textAlign = 'center';
+      ctx.fillText(n.label.substring(0, 30), x, y + r + 12 * zoom);
+    }
+  }
+}
+
+function findNode(sx, sy) {
+  const [wx, wy] = fromScreen(sx, sy);
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const n = nodes[i];
+    const dx = wx - n.x, dy = wy - n.y;
+    if (dx * dx + dy * dy < (n.radius + 4) * (n.radius + 4)) return n;
+  }
+  return null;
+}
+
+canvas.addEventListener('mousedown', e => {
+  const n = findNode(e.clientX, e.clientY);
+  if (n) { dragging = n; dragStart = { x: e.clientX, y: e.clientY }; }
+  else { panning = true; panStart = { x: e.clientX - panX, y: e.clientY - panY }; }
+});
+canvas.addEventListener('mousemove', e => {
+  if (dragging) {
+    const [wx, wy] = fromScreen(e.clientX, e.clientY);
+    dragging.x = wx; dragging.y = wy; dragging.vx = 0; dragging.vy = 0; draw();
+  } else if (panning) {
+    panX = e.clientX - panStart.x; panY = e.clientY - panStart.y; draw();
+  } else {
+    const n = findNode(e.clientX, e.clientY);
+    hoveredNode = n;
+    if (n) {
+      tooltip.style.display = 'block';
+      tooltip.style.left = e.clientX + 15 + 'px';
+      tooltip.style.top = e.clientY + 15 + 'px';
+      tooltip.querySelector('.tt-title').textContent = `${n.type === 'memory' ? '#' + n.id.slice(1) : ''} ${n.label}`;
+      tooltip.querySelector('.tt-meta').textContent =
+        n.type === 'memory' ? `${n.category} · imp=${n.importance} · conf=${(n.confidence||1).toFixed(2)}` :
+        `${n.type}${n.group ? ' · ' + n.group : ''}`;
+      tooltip.querySelector('.tt-content').textContent = '';
+      canvas.style.cursor = 'pointer';
+    } else {
+      tooltip.style.display = 'none';
+      canvas.style.cursor = 'grab';
+    }
+    draw();
+  }
+});
+canvas.addEventListener('mouseup', () => { dragging = null; panning = false; });
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const factor = e.deltaY > 0 ? 0.9 : 1.1;
+  const [wx, wy] = fromScreen(e.clientX, e.clientY);
+  zoom *= factor;
+  zoom = Math.max(0.1, Math.min(5, zoom));
+  panX = e.clientX - canvas.width / 2 - wx * zoom;
+  panY = e.clientY - canvas.height / 2 - wy * zoom;
+  draw();
+}, { passive: false });
+
+function resetView() { zoom = 1; panX = 0; panY = 0; }
+
+document.getElementById('go').addEventListener('click', loadGraph);
+document.getElementById('resetZoom').addEventListener('click', () => { resetView(); draw(); });
+document.getElementById('search').addEventListener('keydown', e => { if (e.key === 'Enter') loadGraph(); });
+
+// Auto-load on page load
+loadGraph();
+</script>
+</body>
+</html>

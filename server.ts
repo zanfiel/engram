@@ -29,6 +29,10 @@ const DECAY_MAX_BOOST = 2.0;       // cap on access-based boost
 const CONSOLIDATION_THRESHOLD = 8; // auto-consolidate clusters with 8+ related memories
 const CONSOLIDATION_INTERVAL = 30 * 60 * 1000; // check every 30 minutes
 
+// Reranker config
+const RERANKER_ENABLED = process.env.RERANKER !== "0";
+const RERANKER_TOP_K = Number(process.env.RERANKER_TOP_K || 20); // rerank top K candidates
+
 // API key config
 const API_KEY_PREFIX = "eg_";
 const DEFAULT_RATE_LIMIT = 120; // requests per minute
@@ -71,6 +75,63 @@ function embeddingToBuffer(emb: Float32Array): Buffer {
 function bufferToEmbedding(buf: Buffer | Uint8Array): Float32Array {
   const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
   return new Float32Array(ab);
+}
+
+// ============================================================================
+// LLM-BASED RERANKER
+// ============================================================================
+
+async function rerank(
+  query: string,
+  candidates: Array<{ id: number; content: string; score: number; [k: string]: any }>,
+  topK: number = RERANKER_TOP_K
+): Promise<typeof candidates> {
+  if (!RERANKER_ENABLED || !LLM_API_KEY || candidates.length <= 3) return candidates;
+
+  // Only rerank the top candidates to save tokens
+  const toRerank = candidates.slice(0, Math.min(topK, candidates.length));
+  const numbered = toRerank.map((c, i) => `[${i}] ${c.content.substring(0, 200)}`).join("\n");
+
+  const prompt = `Given the query, rank the following documents by relevance. Return ONLY a JSON array of indices from most to least relevant. Include ALL indices.
+
+Query: "${query}"
+
+Documents:
+${numbered}
+
+Return format: [most_relevant_index, next_most_relevant, ...]`;
+
+  try {
+    const resp = await callLLM("You are a document reranking engine. Return only a JSON array of integer indices.", prompt);
+    if (!resp) return candidates;
+
+    // Parse the index array
+    const match = resp.match(/\[[\d,\s]+\]/);
+    if (!match) return candidates;
+    const indices = JSON.parse(match[0]) as number[];
+
+    // Build reranked list with adjusted scores
+    const reranked: typeof candidates = [];
+    for (let rank = 0; rank < indices.length; rank++) {
+      const idx = indices[rank];
+      if (idx >= 0 && idx < toRerank.length) {
+        const item = { ...toRerank[idx] };
+        item.score = item.score * (1 + (indices.length - rank) / indices.length * 0.5); // boost by rank
+        (item as any).reranked = true;
+        reranked.push(item);
+      }
+    }
+
+    // Add any candidates that weren't reranked (beyond topK)
+    const rerankedIds = new Set(reranked.map(r => r.id));
+    for (const c of candidates) {
+      if (!rerankedIds.has(c.id)) reranked.push(c);
+    }
+
+    return reranked;
+  } catch {
+    return candidates; // fallback to original ranking
+  }
 }
 
 // ============================================================================
@@ -241,6 +302,64 @@ try {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_webhooks_user ON webhooks(user_id);
+  `);
+} catch {}
+
+// v4.3 — Entities, Projects
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS entities (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'generic',
+      description TEXT,
+      aka TEXT,
+      metadata TEXT,
+      user_id INTEGER DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name COLLATE NOCASE);
+    CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
+    CREATE INDEX IF NOT EXISTS idx_entities_user ON entities(user_id);
+
+    CREATE TABLE IF NOT EXISTS entity_relationships (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+      target_entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+      relationship TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(source_entity_id, target_entity_id, relationship)
+    );
+    CREATE INDEX IF NOT EXISTS idx_entrel_source ON entity_relationships(source_entity_id);
+    CREATE INDEX IF NOT EXISTS idx_entrel_target ON entity_relationships(target_entity_id);
+
+    CREATE TABLE IF NOT EXISTS memory_entities (
+      memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+      entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+      PRIMARY KEY (memory_id, entity_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_me_entity ON memory_entities(entity_id);
+
+    CREATE TABLE IF NOT EXISTS projects (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      description TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      metadata TEXT,
+      user_id INTEGER DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
+    CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
+
+    CREATE TABLE IF NOT EXISTS memory_projects (
+      memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      PRIMARY KEY (memory_id, project_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_mp_project ON memory_projects(project_id);
   `);
 } catch {}
 
@@ -598,6 +717,105 @@ const getChangesSince = db.prepare(
 );
 const getMemoryBySyncId = db.prepare(
   `SELECT id, updated_at FROM memories WHERE sync_id = ?`
+);
+
+// Entity queries
+const insertEntity = db.prepare(
+  `INSERT INTO entities (name, type, description, aka, metadata, user_id)
+   VALUES (?, ?, ?, ?, ?, ?) RETURNING id, created_at`
+);
+const getEntity = db.prepare(
+  `SELECT e.*, GROUP_CONCAT(DISTINCT me.memory_id) as memory_ids
+   FROM entities e LEFT JOIN memory_entities me ON me.entity_id = e.id
+   WHERE e.id = ? GROUP BY e.id`
+);
+const listEntities = db.prepare(
+  `SELECT e.id, e.name, e.type, e.description, e.aka, e.created_at,
+     (SELECT COUNT(*) FROM memory_entities WHERE entity_id = e.id) as memory_count
+   FROM entities e WHERE e.user_id = ? ORDER BY e.name COLLATE NOCASE`
+);
+const listEntitiesByType = db.prepare(
+  `SELECT e.id, e.name, e.type, e.description, e.aka, e.created_at,
+     (SELECT COUNT(*) FROM memory_entities WHERE entity_id = e.id) as memory_count
+   FROM entities e WHERE e.user_id = ? AND e.type = ? ORDER BY e.name COLLATE NOCASE`
+);
+const searchEntities = db.prepare(
+  `SELECT e.id, e.name, e.type, e.description, e.aka, e.created_at,
+     (SELECT COUNT(*) FROM memory_entities WHERE entity_id = e.id) as memory_count
+   FROM entities e WHERE e.user_id = ? AND (e.name LIKE ? OR e.aka LIKE ? OR e.description LIKE ?)
+   ORDER BY e.name COLLATE NOCASE LIMIT ?`
+);
+const updateEntity = db.prepare(
+  `UPDATE entities SET name = COALESCE(?, name), type = COALESCE(?, type),
+   description = COALESCE(?, description), aka = COALESCE(?, aka),
+   metadata = COALESCE(?, metadata), updated_at = datetime('now') WHERE id = ? AND user_id = ?`
+);
+const deleteEntity = db.prepare(`DELETE FROM entities WHERE id = ? AND user_id = ?`);
+const linkMemoryEntity = db.prepare(
+  `INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?, ?)`
+);
+const unlinkMemoryEntity = db.prepare(
+  `DELETE FROM memory_entities WHERE memory_id = ? AND entity_id = ?`
+);
+const getEntityMemories = db.prepare(
+  `SELECT m.id, m.content, m.category, m.importance, m.tags, m.created_at, m.decay_score, m.confidence
+   FROM memories m JOIN memory_entities me ON me.memory_id = m.id
+   WHERE me.entity_id = ? AND m.is_forgotten = 0 AND m.is_archived = 0
+   ORDER BY m.created_at DESC LIMIT ?`
+);
+const insertEntityRelationship = db.prepare(
+  `INSERT OR IGNORE INTO entity_relationships (source_entity_id, target_entity_id, relationship) VALUES (?, ?, ?)`
+);
+const deleteEntityRelationship = db.prepare(
+  `DELETE FROM entity_relationships WHERE source_entity_id = ? AND target_entity_id = ? AND relationship = ?`
+);
+const getEntityRelationships = db.prepare(
+  `SELECT er.id, er.relationship, er.created_at,
+     CASE WHEN er.source_entity_id = ? THEN er.target_entity_id ELSE er.source_entity_id END as related_entity_id,
+     CASE WHEN er.source_entity_id = ? THEN 'outgoing' ELSE 'incoming' END as direction,
+     e.name as related_entity_name, e.type as related_entity_type
+   FROM entity_relationships er
+   JOIN entities e ON e.id = CASE WHEN er.source_entity_id = ? THEN er.target_entity_id ELSE er.source_entity_id END
+   WHERE er.source_entity_id = ? OR er.target_entity_id = ?`
+);
+
+// Project queries
+const insertProject = db.prepare(
+  `INSERT INTO projects (name, description, status, metadata, user_id)
+   VALUES (?, ?, ?, ?, ?) RETURNING id, created_at`
+);
+const getProject = db.prepare(
+  `SELECT p.*, GROUP_CONCAT(DISTINCT mp.memory_id) as memory_ids
+   FROM projects p LEFT JOIN memory_projects mp ON mp.project_id = p.id
+   WHERE p.id = ? GROUP BY p.id`
+);
+const listProjects = db.prepare(
+  `SELECT p.id, p.name, p.description, p.status, p.created_at,
+     (SELECT COUNT(*) FROM memory_projects WHERE project_id = p.id) as memory_count
+   FROM projects p WHERE p.user_id = ? ORDER BY p.status = 'active' DESC, p.name COLLATE NOCASE`
+);
+const listProjectsByStatus = db.prepare(
+  `SELECT p.id, p.name, p.description, p.status, p.created_at,
+     (SELECT COUNT(*) FROM memory_projects WHERE project_id = p.id) as memory_count
+   FROM projects p WHERE p.user_id = ? AND p.status = ? ORDER BY p.name COLLATE NOCASE`
+);
+const updateProject = db.prepare(
+  `UPDATE projects SET name = COALESCE(?, name), description = COALESCE(?, description),
+   status = COALESCE(?, status), metadata = COALESCE(?, metadata),
+   updated_at = datetime('now') WHERE id = ? AND user_id = ?`
+);
+const deleteProject = db.prepare(`DELETE FROM projects WHERE id = ? AND user_id = ?`);
+const linkMemoryProject = db.prepare(
+  `INSERT OR IGNORE INTO memory_projects (memory_id, project_id) VALUES (?, ?)`
+);
+const unlinkMemoryProject = db.prepare(
+  `DELETE FROM memory_projects WHERE memory_id = ? AND project_id = ?`
+);
+const getProjectMemories = db.prepare(
+  `SELECT m.id, m.content, m.category, m.importance, m.tags, m.created_at, m.decay_score, m.confidence
+   FROM memories m JOIN memory_projects mp ON mp.memory_id = m.id
+   WHERE mp.project_id = ? AND m.is_forgotten = 0 AND m.is_archived = 0
+   ORDER BY m.created_at DESC LIMIT ?`
 );
 
 const getRecentDynamicMemories = db.prepare(
@@ -1908,10 +2126,12 @@ const server = Bun.serve({
       const episodeCount = db.prepare("SELECT COUNT(*) as count FROM episodes").get() as { count: number };
       const consolidationCount = db.prepare("SELECT COUNT(*) as count FROM consolidations").get() as { count: number };
       const taggedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE tags IS NOT NULL AND is_forgotten = 0").get() as { count: number };
+      const entityCount = db.prepare("SELECT COUNT(*) as count FROM entities").get() as { count: number };
+      const projectCount = db.prepare("SELECT COUNT(*) as count FROM projects").get() as { count: number };
       const dbSize = Bun.file(DB_PATH).size;
       return json({
         status: "ok",
-        version: 4.2,
+        version: 4.4,
         memories: memCount.count,
         embedded: embCount.count,
         unembedded: noEmbCount,
@@ -1923,6 +2143,8 @@ const server = Bun.serve({
         tagged: taggedCount.count,
         episodes: episodeCount.count,
         consolidations: consolidationCount.count,
+        entities: entityCount.count,
+        projects: projectCount.count,
         conversations: convCount.count,
         messages: msgCount.count,
         embedding_model: EMBEDDING_MODEL,
@@ -1943,9 +2165,155 @@ const server = Bun.serve({
           auto_tagging: !!LLM_API_KEY,
           mem0_import: true,
           supermemory_import: true,
+          entities: true,
+          projects: true,
+          scoped_search: true,
+          reranker: RERANKER_ENABLED && !!LLM_API_KEY,
+          conversation_extraction: !!LLM_API_KEY,
+          derived_memories: !!LLM_API_KEY,
+          graph: true,
         },
         db_size_mb: Math.round(dbSize / 1048576 * 100) / 100,
       });
+    }
+
+    // ========================================================================
+    // CONVERSATION EXTRACTION — POST /add (Mem0-compatible)
+    // ========================================================================
+
+    if (url.pathname === "/add" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      if (!LLM_API_KEY) return errorResponse("LLM not configured — /add requires fact extraction", 400);
+      try {
+        const body = await req.json() as any;
+        const messages = body.messages as Array<{ role: string; content: string }>;
+        if (!Array.isArray(messages) || messages.length === 0) {
+          return errorResponse("messages array required: [{role: 'user'|'assistant'|'system', content: '...'}]");
+        }
+
+        const category = body.category || "general";
+        const source = body.source || "conversation";
+        const projectIds = body.project_ids as number[] | undefined;
+        const entityIds = body.entity_ids as number[] | undefined;
+        const episodeId = body.episode_id as number | undefined;
+
+        // Format conversation for extraction
+        const convoText = messages.map(m => `${m.role}: ${m.content}`).join("\n\n");
+
+        const extractionPrompt = `You are a fact extraction engine. Analyze this conversation and extract distinct, atomic facts worth remembering long-term.
+
+Rules:
+- Extract facts primarily from USER messages. Only extract from ASSISTANT messages if they contain genuinely novel information (not just rephrasing the user).
+- Each fact should be ONE self-contained statement. If you can't summarize it in under 50 words, split it.
+- Skip greetings, filler, questions without assertions, and transient information.
+- For each fact, classify:
+  - category: task|discovery|decision|state|issue|general
+  - importance: 1-10 (9-10=critical decisions, 7-8=useful knowledge, 5-6=context, <5=minor)
+  - is_static: true if this is a permanent/rarely-changing fact, false if temporal
+  - tags: 2-5 lowercase keyword tags
+- Detect temporal facts and set forget_after if appropriate (ISO datetime or null)
+
+Return JSON:
+{
+  "facts": [
+    {
+      "content": "extracted fact as a clear statement",
+      "category": "task",
+      "importance": 7,
+      "is_static": false,
+      "tags": ["keyword1", "keyword2"],
+      "forget_after": null
+    }
+  ]
+}
+
+If no meaningful facts, return {"facts": []}`;
+
+        const llmResp = await callLLM(extractionPrompt, convoText);
+        if (!llmResp) return json({ added: 0, facts: [] });
+
+        // Parse extracted facts
+        let extracted: { facts: Array<any> };
+        try {
+          const cleaned = llmResp.replace(/```json\n?|\n?```/g, "").trim();
+          // Try direct parse first, then extract JSON object
+          try {
+            extracted = JSON.parse(cleaned);
+          } catch {
+            const jsonMatch = cleaned.match(/\{[\s\S]*"facts"[\s\S]*\}/);
+            if (jsonMatch) {
+              extracted = JSON.parse(jsonMatch[0]);
+            } else {
+              console.error("Conversation extraction: unparseable LLM response:", cleaned.substring(0, 500));
+              return errorResponse("LLM returned unparseable response", 500);
+            }
+          }
+        } catch (parseErr: any) {
+          console.error("Conversation extraction parse error:", parseErr.message);
+          return errorResponse("LLM returned unparseable response", 500);
+        }
+
+        if (!extracted.facts?.length) return json({ added: 0, facts: [] });
+
+        // Store each fact as a memory
+        const stored: Array<{ id: number; content: string; category: string }> = [];
+        for (const fact of extracted.facts) {
+          if (!fact.content?.trim()) continue;
+
+          let embBuffer: Buffer | null = null;
+          let embArray: Float32Array | null = null;
+          try {
+            embArray = await embed(fact.content.trim());
+            embBuffer = embeddingToBuffer(embArray);
+          } catch {}
+
+          const result = insertMemory.get(
+            fact.content.trim(), fact.category || category, source, null,
+            fact.importance || DEFAULT_IMPORTANCE, embBuffer,
+            1, 1, null, null, 1, fact.is_static ? 1 : 0, 0,
+            fact.forget_after || null, null, 0
+          ) as { id: number; created_at: string };
+
+          const syncId = crypto.randomUUID();
+          const tagsJson = fact.tags?.length ? JSON.stringify(fact.tags) : null;
+          db.prepare(
+            "UPDATE memories SET user_id = ?, space_id = ?, tags = ?, episode_id = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
+          ).run(auth.user_id, auth.space_id || null, tagsJson, episodeId || null, syncId, result.id);
+
+          // Link to entities/projects
+          if (entityIds) for (const eid of entityIds) linkMemoryEntity.run(result.id, eid);
+          if (projectIds) for (const pid of projectIds) linkMemoryProject.run(result.id, pid);
+
+          // Auto-link
+          if (embArray) await autoLink(result.id, embArray);
+
+          // Queue async fact extraction (for relationship detection)
+          if (LLM_API_KEY) {
+            (async () => {
+              try {
+                const extraction = await extractFacts(result.id, fact.content.trim(), embArray!);
+                if (extraction) processExtractionResult(result.id, extraction, embArray!);
+              } catch {}
+            })();
+          }
+
+          emitWebhookEvent("memory.created", {
+            id: result.id, content: fact.content.trim(), category: fact.category || category,
+            importance: fact.importance || DEFAULT_IMPORTANCE, source: "conversation",
+          }, auth.user_id);
+
+          stored.push({ id: result.id, content: fact.content.trim(), category: fact.category || category });
+        }
+
+        return json({
+          added: stored.length,
+          facts: stored,
+          source: "conversation",
+          messages_processed: messages.length,
+        });
+      } catch (e: any) {
+        return errorResponse(`Conversation extraction failed: ${e.message}`, 500);
+      }
     }
 
     // ========================================================================
@@ -2012,6 +2380,16 @@ const server = Bun.serve({
         db.prepare(
           "UPDATE memories SET user_id = ?, space_id = ?, tags = ?, episode_id = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
         ).run(auth.user_id, auth.space_id || null, tagsJson, episodeId, syncId, result.id);
+
+        // Link to entities and projects if provided
+        const entityIds = body.entity_ids as number[] | undefined;
+        const projectIds = body.project_ids as number[] | undefined;
+        if (entityIds && Array.isArray(entityIds)) {
+          for (const eid of entityIds) linkMemoryEntity.run(result.id, eid);
+        }
+        if (projectIds && Array.isArray(projectIds)) {
+          for (const pid of projectIds) linkMemoryProject.run(result.id, pid);
+        }
 
         // Update episode memory count
         if (episodeId) {
@@ -2115,6 +2493,14 @@ const server = Bun.serve({
             const mem = getMemoryWithoutEmbedding.get(r.id) as any;
             return mem?.episode_id === filterEpisode;
           });
+        }
+
+        // Rerank results for better precision
+        const doRerank = body.rerank !== false; // opt-out with rerank: false
+        if (doRerank && results.length > 3) {
+          results = await rerank(query, results);
+          // Re-trim to requested limit after reranking
+          results = results.slice(0, Math.min(limit || 10, 50));
         }
 
         // Track access on returned results
@@ -2623,10 +3009,10 @@ const server = Bun.serve({
     }
 
     // ========================================================================
-    // GRAPH DATA
+    // RAW GRAPH DATA (legacy — use GET /graph with params instead)
     // ========================================================================
 
-    if (url.pathname === "/graph" && method === "GET") {
+    if (url.pathname === "/graph/raw" && method === "GET") {
       const memories = getAllMemoriesForGraph.all(auth.user_id);
       const links = getAllLinksForGraph.all(auth.user_id);
       return json({ memories, links });
@@ -3366,6 +3752,132 @@ ${memoryBlock}
     }
 
     // ========================================================================
+    // DERIVE — Infer new facts from memory clusters
+    // ========================================================================
+
+    if (url.pathname === "/derive" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      if (!LLM_API_KEY) return errorResponse("LLM not configured — /derive requires inference", 400);
+      try {
+        const body = await req.json() as any;
+        const context = body.context || "";
+        const limit = Math.min(Number(body.limit || 30), 100);
+        const minCluster = Number(body.min_cluster || 3);
+
+        // Gather candidate memories to derive from
+        let candidates: any[];
+        if (context.trim()) {
+          candidates = await hybridSearch(context, limit, false, true, true);
+        } else {
+          candidates = db.prepare(
+            `SELECT id, content, category, importance, tags, created_at
+             FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?
+             ORDER BY COALESCE(decay_score, importance) DESC LIMIT ?`
+          ).all(auth.user_id, limit) as any[];
+        }
+
+        if (candidates.length < minCluster) {
+          return json({ derived: 0, message: `Need at least ${minCluster} memories, found ${candidates.length}` });
+        }
+
+        // Format memories for LLM inference
+        const memoryList = candidates.map((c, i) =>
+          `[${c.id}] (${c.category}) ${c.content}`
+        ).join("\n");
+
+        const derivePrompt = `You are an inference engine for a memory system. Given a collection of memories, identify patterns, connections, and inferences that are NOT explicitly stated but can be logically derived.
+
+Rules:
+- Only derive facts that are NOT already stored — don't repeat existing memories
+- Each derived fact must cite which memory IDs it was inferred from (source_ids)
+- Confidence should reflect how certain the inference is (0.3-0.9, never 1.0)
+- Prefer actionable insights over trivial observations
+- Maximum 5 derived facts per batch
+
+Return JSON:
+{
+  "derived": [
+    {
+      "content": "inferred fact",
+      "category": "discovery",
+      "importance": 6,
+      "confidence": 0.7,
+      "source_ids": [123, 456],
+      "reasoning": "brief explanation of the inference"
+    }
+  ]
+}
+
+If no meaningful inferences, return {"derived": []}`;
+
+        const resp = await callLLM(derivePrompt, `Here are the memories:\n\n${memoryList}`);
+        if (!resp) return json({ derived: 0, facts: [] });
+
+        let parsed: { derived: Array<any> };
+        try {
+          const cleaned = resp.replace(/```json\n?|\n?```/g, "").trim();
+          try {
+            parsed = JSON.parse(cleaned);
+          } catch {
+            const jsonMatch = cleaned.match(/\{[\s\S]*"derived"[\s\S]*\}/);
+            if (jsonMatch) {
+              parsed = JSON.parse(jsonMatch[0]);
+            } else {
+              console.error("Derive: unparseable LLM response:", cleaned.substring(0, 500));
+              return json({ derived: 0, facts: [], error: "LLM returned unparseable response" });
+            }
+          }
+        } catch {
+          return json({ derived: 0, facts: [], error: "LLM returned unparseable response" });
+        }
+
+        if (!parsed.derived?.length) return json({ derived: 0, facts: [] });
+
+        const stored: Array<{ id: number; content: string; confidence: number; source_ids: number[] }> = [];
+        for (const d of parsed.derived) {
+          if (!d.content?.trim()) continue;
+
+          let embBuffer: Buffer | null = null;
+          let embArray: Float32Array | null = null;
+          try {
+            embArray = await embed(d.content.trim());
+            embBuffer = embeddingToBuffer(embArray);
+          } catch {}
+
+          const result = insertMemory.get(
+            d.content.trim(), d.category || "discovery", "derived", null,
+            d.importance || 5, embBuffer, 1, 1, null, null, 1, 0, 0, null, null, 0
+          ) as { id: number; created_at: string };
+
+          const syncId = crypto.randomUUID();
+          db.prepare(
+            "UPDATE memories SET user_id = ?, sync_id = ?, confidence = ?, tags = ? WHERE id = ?"
+          ).run(auth.user_id, syncId, d.confidence || 0.7, JSON.stringify(["derived", ...(d.tags || [])]), result.id);
+
+          // Link to source memories
+          if (d.source_ids && Array.isArray(d.source_ids)) {
+            for (const srcId of d.source_ids) {
+              try { insertLink.run(result.id, srcId, d.confidence || 0.7, "derived_from"); } catch {}
+            }
+          }
+
+          if (embArray) await autoLink(result.id, embArray);
+
+          emitWebhookEvent("memory.derived", {
+            id: result.id, content: d.content.trim(), confidence: d.confidence,
+            source_ids: d.source_ids, reasoning: d.reasoning,
+          }, auth.user_id);
+
+          stored.push({ id: result.id, content: d.content.trim(), confidence: d.confidence || 0.7, source_ids: d.source_ids || [] });
+        }
+
+        return json({ derived: stored.length, facts: stored });
+      } catch (e: any) {
+        return errorResponse(`Derive failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
     // MEM0 IMPORT — v4.2
     // ========================================================================
 
@@ -3487,6 +3999,448 @@ ${memoryBlock}
     }
 
     // ========================================================================
+    // MEMORY GRAPH — v4.3
+    // ========================================================================
+
+    if (url.pathname === "/graph" && method === "GET") {
+      try {
+        const center = url.searchParams.get("center"); // memory ID to center on
+        const depth = Math.min(Number(url.searchParams.get("depth") || 2), 4);
+        const maxNodes = Math.min(Number(url.searchParams.get("max") || 200), 500);
+        const includeEntities = url.searchParams.get("entities") !== "0";
+        const context = url.searchParams.get("q");
+
+        type GNode = { id: string; label: string; type: string; category?: string; importance?: number; confidence?: number; group?: string; size?: number };
+        type GEdge = { source: string; target: string; type: string; weight: number };
+
+        const nodes: Map<string, GNode> = new Map();
+        const edges: GEdge[] = [];
+        const visited = new Set<number>();
+
+        // BFS from center or top memories
+        const queue: Array<{ id: number; currentDepth: number }> = [];
+
+        if (center) {
+          queue.push({ id: Number(center), currentDepth: 0 });
+        } else if (context) {
+          // Semantic search to find starting nodes
+          const results = await hybridSearch(context, 10, false, true, true);
+          for (const r of results) queue.push({ id: r.id, currentDepth: 0 });
+        } else {
+          // Top memories by decay score
+          const top = db.prepare(
+            `SELECT id FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?
+             ORDER BY COALESCE(decay_score, importance) DESC LIMIT 20`
+          ).all(auth.user_id) as any[];
+          for (const t of top) queue.push({ id: t.id, currentDepth: 0 });
+        }
+
+        while (queue.length > 0 && nodes.size < maxNodes) {
+          const { id, currentDepth } = queue.shift()!;
+          if (visited.has(id)) continue;
+          visited.add(id);
+
+          const mem = getMemoryWithoutEmbedding.get(id) as any;
+          if (!mem || mem.is_forgotten) continue;
+
+          const nodeId = `m${id}`;
+          nodes.set(nodeId, {
+            id: nodeId,
+            label: mem.content.substring(0, 60) + (mem.content.length > 60 ? "…" : ""),
+            type: "memory",
+            category: mem.category,
+            importance: mem.importance,
+            confidence: mem.confidence,
+            group: mem.category,
+            size: Math.max(3, mem.importance * 1.5),
+          });
+
+          // Get links
+          if (currentDepth < depth) {
+            const links = db.prepare(
+              `SELECT ml.source_id, ml.target_id, ml.similarity, ml.type,
+                m.id as linked_id, m.content, m.category, m.importance, m.confidence
+               FROM memory_links ml
+               JOIN memories m ON m.id = CASE WHEN ml.source_id = ? THEN ml.target_id ELSE ml.source_id END
+               WHERE (ml.source_id = ? OR ml.target_id = ?) AND m.is_forgotten = 0`
+            ).all(id, id, id) as any[];
+
+            for (const link of links) {
+              const linkedNodeId = `m${link.linked_id}`;
+              edges.push({
+                source: nodeId,
+                target: linkedNodeId,
+                type: link.type || "related",
+                weight: link.similarity,
+              });
+              if (!visited.has(link.linked_id)) {
+                queue.push({ id: link.linked_id, currentDepth: currentDepth + 1 });
+              }
+            }
+          }
+
+          // Entity connections
+          if (includeEntities) {
+            const memEntities = db.prepare(
+              `SELECT e.id, e.name, e.type FROM entities e
+               JOIN memory_entities me ON me.entity_id = e.id WHERE me.memory_id = ?`
+            ).all(id) as any[];
+            for (const ent of memEntities) {
+              const entNodeId = `e${ent.id}`;
+              if (!nodes.has(entNodeId)) {
+                nodes.set(entNodeId, {
+                  id: entNodeId,
+                  label: ent.name,
+                  type: "entity",
+                  group: ent.type,
+                  size: 8,
+                });
+              }
+              edges.push({ source: nodeId, target: entNodeId, type: "about", weight: 1.0 });
+            }
+          }
+        }
+
+        // Add entity-to-entity relationships
+        if (includeEntities) {
+          const entityIds = [...nodes.entries()].filter(([k]) => k.startsWith("e")).map(([k]) => Number(k.slice(1)));
+          if (entityIds.length > 0) {
+            const placeholders = entityIds.map(() => "?").join(",");
+            const rels = db.prepare(
+              `SELECT source_entity_id, target_entity_id, relationship FROM entity_relationships
+               WHERE source_entity_id IN (${placeholders}) OR target_entity_id IN (${placeholders})`
+            ).all(...entityIds, ...entityIds) as any[];
+            for (const r of rels) {
+              edges.push({
+                source: `e${r.source_entity_id}`,
+                target: `e${r.target_entity_id}`,
+                type: r.relationship,
+                weight: 0.9,
+              });
+            }
+          }
+        }
+
+        // Add project clusters
+        const projectNodes = db.prepare(
+          `SELECT DISTINCT p.id, p.name, p.status FROM projects p
+           JOIN memory_projects mp ON mp.project_id = p.id
+           JOIN memories m ON m.id = mp.memory_id
+           WHERE p.user_id = ? AND m.is_forgotten = 0`
+        ).all(auth.user_id) as any[];
+        for (const proj of projectNodes) {
+          const projNodeId = `p${proj.id}`;
+          nodes.set(projNodeId, {
+            id: projNodeId,
+            label: proj.name,
+            type: "project",
+            group: "project",
+            size: 10,
+          });
+          // Link project to its memories that are in the graph
+          const projMems = db.prepare(
+            "SELECT memory_id FROM memory_projects WHERE project_id = ?"
+          ).all(proj.id) as any[];
+          for (const pm of projMems) {
+            if (nodes.has(`m${pm.memory_id}`)) {
+              edges.push({ source: projNodeId, target: `m${pm.memory_id}`, type: "contains", weight: 0.8 });
+            }
+          }
+        }
+
+        return json({
+          nodes: [...nodes.values()],
+          edges: edges,
+          node_count: nodes.size,
+          edge_count: edges.length,
+        });
+      } catch (e: any) {
+        return errorResponse(`Graph failed: ${e.message}`, 500);
+      }
+    }
+
+    // Graph visualization page
+    if (url.pathname === "/graph/view" && method === "GET") {
+      const graphHtml = await Bun.file(resolve(import.meta.dir, "engram-graph.html")).text().catch(() => null);
+      if (!graphHtml) return errorResponse("Graph view not found. Place engram-graph.html alongside server.ts", 404);
+      return new Response(graphHtml, { headers: { "Content-Type": "text/html" } });
+    }
+
+    // ========================================================================
+    // ENTITIES — v4.3
+    // ========================================================================
+
+    // Create entity
+    if (url.pathname === "/entities" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const body = await req.json() as any;
+        if (!body.name?.trim()) return errorResponse("name is required");
+        const validTypes = ["person", "organization", "team", "device", "product", "service", "generic"];
+        const type = validTypes.includes(body.type) ? body.type : "generic";
+        const result = insertEntity.get(
+          body.name.trim(), type, body.description || null,
+          body.aka || null, body.metadata ? JSON.stringify(body.metadata) : null,
+          auth.user_id
+        ) as { id: number; created_at: string };
+        return json({ created: true, id: result.id, name: body.name.trim(), type, created_at: result.created_at });
+      } catch (e: any) {
+        return errorResponse(`Failed to create entity: ${e.message}`, 500);
+      }
+    }
+
+    // List entities
+    if (url.pathname === "/entities" && method === "GET") {
+      const type = url.searchParams.get("type");
+      const q = url.searchParams.get("q");
+      let entities: any[];
+      if (q) {
+        const like = `%${q}%`;
+        entities = searchEntities.all(auth.user_id, like, like, like, 100) as any[];
+      } else if (type) {
+        entities = listEntitiesByType.all(auth.user_id, type) as any[];
+      } else {
+        entities = listEntities.all(auth.user_id) as any[];
+      }
+      for (const e of entities) {
+        try { if (e.metadata) e.metadata = JSON.parse(e.metadata); } catch {}
+      }
+      return json({ entities, count: entities.length });
+    }
+
+    // Get single entity with details
+    if (url.pathname.match(/^\/entities\/\d+$/) && method === "GET") {
+      const id = Number(url.pathname.split("/")[2]);
+      const entity = getEntity.get(id) as any;
+      if (!entity) return errorResponse("Entity not found", 404);
+      try { if (entity.metadata) entity.metadata = JSON.parse(entity.metadata); } catch {}
+      entity.memory_ids = entity.memory_ids ? entity.memory_ids.split(",").map(Number) : [];
+      entity.relationships = getEntityRelationships.all(id, id, id, id, id) as any[];
+      const limit = Math.min(Number(url.searchParams.get("limit") || 20), 100);
+      entity.memories = getEntityMemories.all(id, limit) as any[];
+      for (const m of entity.memories) {
+        try { if (m.tags) m.tags = JSON.parse(m.tags); } catch { m.tags = []; }
+      }
+      return json(entity);
+    }
+
+    // Update entity
+    if (url.pathname.match(/^\/entities\/\d+$/) && method === "PUT") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const id = Number(url.pathname.split("/")[2]);
+        const body = await req.json() as any;
+        updateEntity.run(
+          body.name || null, body.type || null, body.description || null,
+          body.aka || null, body.metadata ? JSON.stringify(body.metadata) : null,
+          id, auth.user_id
+        );
+        return json({ updated: true, id });
+      } catch (e: any) {
+        return errorResponse(`Update failed: ${e.message}`, 500);
+      }
+    }
+
+    // Delete entity
+    if (url.pathname.match(/^\/entities\/\d+$/) && method === "DELETE") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      const id = Number(url.pathname.split("/")[2]);
+      deleteEntity.run(id, auth.user_id);
+      return json({ deleted: true, id });
+    }
+
+    // Link memory ↔ entity
+    if (url.pathname.match(/^\/entities\/\d+\/memories\/\d+$/) && method === "PUT") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      const parts = url.pathname.split("/");
+      const entityId = Number(parts[2]);
+      const memoryId = Number(parts[4]);
+      linkMemoryEntity.run(memoryId, entityId);
+      return json({ linked: true, entity_id: entityId, memory_id: memoryId });
+    }
+
+    // Unlink memory ↔ entity
+    if (url.pathname.match(/^\/entities\/\d+\/memories\/\d+$/) && method === "DELETE") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      const parts = url.pathname.split("/");
+      const entityId = Number(parts[2]);
+      const memoryId = Number(parts[4]);
+      unlinkMemoryEntity.run(memoryId, entityId);
+      return json({ unlinked: true, entity_id: entityId, memory_id: memoryId });
+    }
+
+    // Entity relationships
+    if (url.pathname.match(/^\/entities\/\d+\/relationships$/) && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const entityId = Number(url.pathname.split("/")[2]);
+        const body = await req.json() as any;
+        if (!body.target_id || !body.relationship) return errorResponse("target_id and relationship required");
+        insertEntityRelationship.run(entityId, body.target_id, body.relationship);
+        return json({ linked: true, source: entityId, target: body.target_id, relationship: body.relationship });
+      } catch (e: any) {
+        return errorResponse(`Relationship failed: ${e.message}`, 500);
+      }
+    }
+
+    if (url.pathname.match(/^\/entities\/\d+\/relationships$/) && method === "DELETE") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const entityId = Number(url.pathname.split("/")[2]);
+        const body = await req.json() as any;
+        if (!body.target_id || !body.relationship) return errorResponse("target_id and relationship required");
+        deleteEntityRelationship.run(entityId, body.target_id, body.relationship);
+        return json({ unlinked: true, source: entityId, target: body.target_id, relationship: body.relationship });
+      } catch (e: any) {
+        return errorResponse(`Unlink failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // PROJECTS — v4.3
+    // ========================================================================
+
+    // Create project
+    if (url.pathname === "/projects" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const body = await req.json() as any;
+        if (!body.name?.trim()) return errorResponse("name is required");
+        const validStatuses = ["active", "paused", "completed", "archived"];
+        const status = validStatuses.includes(body.status) ? body.status : "active";
+        const result = insertProject.get(
+          body.name.trim(), body.description || null, status,
+          body.metadata ? JSON.stringify(body.metadata) : null, auth.user_id
+        ) as { id: number; created_at: string };
+        return json({ created: true, id: result.id, name: body.name.trim(), status, created_at: result.created_at });
+      } catch (e: any) {
+        return errorResponse(`Failed to create project: ${e.message}`, 500);
+      }
+    }
+
+    // List projects
+    if (url.pathname === "/projects" && method === "GET") {
+      const status = url.searchParams.get("status");
+      const projects = status
+        ? listProjectsByStatus.all(auth.user_id, status) as any[]
+        : listProjects.all(auth.user_id) as any[];
+      for (const p of projects) {
+        try { if (p.metadata) p.metadata = JSON.parse(p.metadata); } catch {}
+      }
+      return json({ projects, count: projects.length });
+    }
+
+    // Get single project
+    if (url.pathname.match(/^\/projects\/\d+$/) && method === "GET") {
+      const id = Number(url.pathname.split("/")[2]);
+      const project = getProject.get(id) as any;
+      if (!project) return errorResponse("Project not found", 404);
+      try { if (project.metadata) project.metadata = JSON.parse(project.metadata); } catch {}
+      project.memory_ids = project.memory_ids ? project.memory_ids.split(",").map(Number) : [];
+      const limit = Math.min(Number(url.searchParams.get("limit") || 50), 200);
+      project.memories = getProjectMemories.all(id, limit) as any[];
+      for (const m of project.memories) {
+        try { if (m.tags) m.tags = JSON.parse(m.tags); } catch { m.tags = []; }
+      }
+      return json(project);
+    }
+
+    // Update project
+    if (url.pathname.match(/^\/projects\/\d+$/) && method === "PUT") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const id = Number(url.pathname.split("/")[2]);
+        const body = await req.json() as any;
+        updateProject.run(
+          body.name || null, body.description || null,
+          body.status || null, body.metadata ? JSON.stringify(body.metadata) : null,
+          id, auth.user_id
+        );
+        return json({ updated: true, id });
+      } catch (e: any) {
+        return errorResponse(`Update failed: ${e.message}`, 500);
+      }
+    }
+
+    // Delete project
+    if (url.pathname.match(/^\/projects\/\d+$/) && method === "DELETE") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      const id = Number(url.pathname.split("/")[2]);
+      deleteProject.run(id, auth.user_id);
+      return json({ deleted: true, id });
+    }
+
+    // Link memory ↔ project
+    if (url.pathname.match(/^\/projects\/\d+\/memories\/\d+$/) && method === "PUT") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      const parts = url.pathname.split("/");
+      const projectId = Number(parts[2]);
+      const memoryId = Number(parts[4]);
+      linkMemoryProject.run(memoryId, projectId);
+      return json({ linked: true, project_id: projectId, memory_id: memoryId });
+    }
+
+    // Unlink memory ↔ project
+    if (url.pathname.match(/^\/projects\/\d+\/memories\/\d+$/) && method === "DELETE") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      const parts = url.pathname.split("/");
+      const projectId = Number(parts[2]);
+      const memoryId = Number(parts[4]);
+      unlinkMemoryProject.run(memoryId, projectId);
+      return json({ unlinked: true, project_id: projectId, memory_id: memoryId });
+    }
+
+    // Scoped search — search memories within a project
+    if (url.pathname.match(/^\/projects\/\d+\/search$/) && method === "POST") {
+      try {
+        const projectId = Number(url.pathname.split("/")[2]);
+        const body = await req.json() as any;
+        const query = body.query;
+        if (!query) return errorResponse("query is required");
+        const limit = Math.min(Number(body.limit || 20), 100);
+
+        // Get all memory IDs in this project
+        const projectMemIds = (db.prepare(
+          "SELECT memory_id FROM memory_projects WHERE project_id = ?"
+        ).all(projectId) as any[]).map(r => r.memory_id);
+
+        if (projectMemIds.length === 0) return json({ results: [], count: 0, project_id: projectId });
+
+        // Run normal search then filter to project scope
+        const allResults = await hybridSearch(query, limit * 3, false, true, true);
+        const scoped = allResults.filter(r => projectMemIds.includes(r.id)).slice(0, limit);
+        for (const r of scoped) trackAccess.run(r.id);
+        return json({ results: scoped, count: scoped.length, project_id: projectId });
+      } catch (e: any) {
+        return errorResponse(`Project search failed: ${e.message}`, 500);
+      }
+    }
+
+    // Entity-scoped search
+    if (url.pathname.match(/^\/entities\/\d+\/search$/) && method === "POST") {
+      try {
+        const entityId = Number(url.pathname.split("/")[2]);
+        const body = await req.json() as any;
+        const query = body.query;
+        if (!query) return errorResponse("query is required");
+        const limit = Math.min(Number(body.limit || 20), 100);
+
+        const entityMemIds = (db.prepare(
+          "SELECT memory_id FROM memory_entities WHERE entity_id = ?"
+        ).all(entityId) as any[]).map(r => r.memory_id);
+
+        if (entityMemIds.length === 0) return json({ results: [], count: 0, entity_id: entityId });
+
+        const allResults = await hybridSearch(query, limit * 3, false, true, true);
+        const scoped = allResults.filter(r => entityMemIds.includes(r.id)).slice(0, limit);
+        for (const r of scoped) trackAccess.run(r.id);
+        return json({ results: scoped, count: scoped.length, entity_id: entityId });
+      } catch (e: any) {
+        return errorResponse(`Entity search failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
     // STATS — v4
     // ========================================================================
 
@@ -3588,7 +4542,7 @@ if (LLM_API_KEY) {
 sweepExpiredMemories();
 updateDecayScores(); // Initial decay score calculation
 
-console.log(`Engram v4.2 listening on ${HOST}:${PORT}`);
+console.log(`Engram v4.4 listening on ${HOST}:${PORT}`);
 console.log(`Database: ${DB_PATH}`);
 console.log(`Embedding model: ${EMBEDDING_MODEL} (${EMBEDDING_DIM}d)`);
 console.log(`LLM: ${LLM_API_KEY ? `${LLM_MODEL} via ${LLM_URL}` : "not configured"}`);

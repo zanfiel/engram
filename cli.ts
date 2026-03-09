@@ -231,6 +231,100 @@ const commands: Record<string, () => Promise<void>> = {
     console.log(`✓ Forgotten #${id}`);
   },
 
+  // Entities
+  async entities() {
+    const sub = args[0];
+    if (sub === "create") {
+      const name = args.slice(1).filter(a => !a.startsWith("-")).join(" ");
+      if (!name) { console.error("Usage: engram entities create <name> [-t type] [-d desc]"); process.exit(1); }
+      const type = getFlag("-t", "--type") || "generic";
+      const desc = getFlag("-d", "--description");
+      const result = await api("/entities", { method: "POST", body: JSON.stringify({ name, type, description: desc }) });
+      console.log(`✓ Created entity #${result.id}: ${name} (${type})`);
+    } else if (sub === "link" && args[1] && args[2]) {
+      await api(`/entities/${args[1]}/memories/${args[2]}`, { method: "PUT" });
+      console.log(`✓ Linked memory #${args[2]} → entity #${args[1]}`);
+    } else if (sub === "unlink" && args[1] && args[2]) {
+      await api(`/entities/${args[1]}/memories/${args[2]}`, { method: "DELETE" });
+      console.log(`✓ Unlinked memory #${args[2]} from entity #${args[1]}`);
+    } else if (sub === "relate" && args[1] && args[2] && args[3]) {
+      await api(`/entities/${args[1]}/relationships`, {
+        method: "POST", body: JSON.stringify({ target_id: Number(args[2]), relationship: args[3] }),
+      });
+      console.log(`✓ Entity #${args[1]} → ${args[3]} → Entity #${args[2]}`);
+    } else if (sub && !isNaN(Number(sub))) {
+      const e = await api(`/entities/${sub}`);
+      console.log(`Entity #${e.id}: ${e.name} (${e.type})`);
+      if (e.description) console.log(`  ${e.description}`);
+      if (e.aka) console.log(`  AKA: ${e.aka}`);
+      if (e.relationships?.length) {
+        console.log(`  Relationships:`);
+        for (const r of e.relationships) console.log(`    ${r.direction === "outgoing" ? "→" : "←"} ${r.relationship} ${r.related_entity_name}`);
+      }
+      if (e.memories?.length) {
+        console.log(`  Memories (${e.memories.length}):`);
+        for (const m of e.memories) console.log(`    #${m.id} [${m.category}] ${m.content.substring(0, 100)}`);
+      }
+    } else {
+      const q = getFlag("-q", "--query");
+      const type = getFlag("-t", "--type");
+      const params = new URLSearchParams();
+      if (q) params.set("q", q);
+      if (type) params.set("type", type);
+      const result = await api(`/entities?${params}`);
+      for (const e of result.entities) {
+        console.log(`  #${e.id} [${e.type}] ${e.name}${e.aka ? ` (${e.aka})` : ""} — ${e.memory_count} memories`);
+      }
+      console.log(`${result.count} entities`);
+    }
+  },
+
+  // Projects
+  async projects() {
+    const sub = args[0];
+    if (sub === "create") {
+      const name = args.slice(1).filter(a => !a.startsWith("-")).join(" ");
+      if (!name) { console.error("Usage: engram projects create <name> [-d desc] [-s status]"); process.exit(1); }
+      const desc = getFlag("-d", "--description");
+      const status = getFlag("-s", "--status");
+      const result = await api("/projects", { method: "POST", body: JSON.stringify({ name, description: desc, status }) });
+      console.log(`✓ Created project #${result.id}: ${name} (${result.status})`);
+    } else if (sub === "link" && args[1] && args[2]) {
+      await api(`/projects/${args[1]}/memories/${args[2]}`, { method: "PUT" });
+      console.log(`✓ Linked memory #${args[2]} → project #${args[1]}`);
+    } else if (sub === "unlink" && args[1] && args[2]) {
+      await api(`/projects/${args[1]}/memories/${args[2]}`, { method: "DELETE" });
+      console.log(`✓ Unlinked memory #${args[2]} from project #${args[1]}`);
+    } else if (sub === "search" && args[1]) {
+      const projectId = args[1];
+      const query = args.slice(2).join(" ");
+      if (!query) { console.error("Usage: engram projects search <project_id> <query>"); process.exit(1); }
+      const result = await api(`/projects/${projectId}/search`, {
+        method: "POST", body: JSON.stringify({ query }),
+      });
+      for (const r of result.results) {
+        console.log(`  #${r.id} (${r.score.toFixed(3)}) ${r.content.substring(0, 120)}`);
+      }
+      console.log(`${result.count} results in project #${projectId}`);
+    } else if (sub && !isNaN(Number(sub))) {
+      const p = await api(`/projects/${sub}`);
+      console.log(`Project #${p.id}: ${p.name} (${p.status})`);
+      if (p.description) console.log(`  ${p.description}`);
+      if (p.memories?.length) {
+        console.log(`  Memories (${p.memories.length}):`);
+        for (const m of p.memories) console.log(`    #${m.id} [${m.category}] ${m.content.substring(0, 100)}`);
+      }
+    } else {
+      const status = getFlag("-s", "--status");
+      const params = status ? `?status=${status}` : "";
+      const result = await api(`/projects${params}`);
+      for (const p of result.projects) {
+        console.log(`  #${p.id} [${p.status}] ${p.name} — ${p.memory_count} memories`);
+      }
+      console.log(`${result.count} projects`);
+    }
+  },
+
   // Help
   async help() {
     console.log(`
@@ -244,6 +338,9 @@ Commands:
   get <id>
   forget <id>
   tags [search <tag>]
+  entities [create <name> [-t type] | <id> | link <eid> <mid> | relate <eid> <tid> <rel>]
+  projects [create <name> | <id> | link <pid> <mid> | search <pid> <query>]
+  episodes [<id>]
   episodes [<id>]
   prompt [-f format] [--tokens N] [context]
   sync <remote_url>
