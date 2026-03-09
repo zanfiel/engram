@@ -35,15 +35,28 @@ const context = await engram.recall("setting up the user's editor");
 
 **Key features:**
 
-- 🧠 **Semantic search** — find memories by meaning, not just keywords
-- 🔗 **Auto-linking** — memories automatically connect to related memories
+- 🧠 **Semantic + full-text search** — find memories by meaning or keywords, locally
+- 🔗 **Auto-linking** — memories automatically connect, forming a knowledge graph
 - 📊 **Graph visualization** — explore your memory space in a WebGL galaxy
 - 🔄 **Versioning** — update memories without losing history
 - 🧹 **Auto-deduplication** — detects and merges near-duplicate memories
-- ⏰ **Auto-forget** — set memories to expire after a duration
-- 🔍 **Fact extraction** — LLM-powered extraction of static facts from conversations
+- ⏰ **Auto-forget & decay** — time-weighted importance with access reinforcement
+- 🔍 **Fact extraction & auto-tagging** — LLM extracts facts, classifies, tags
+- 💬 **Conversation extraction** — feed chat logs, get structured memories
+- ⚡ **Contradiction detection** — find and resolve conflicting memories
+- ⏪ **Time-travel queries** — query what you knew at any point in time
+- 🎯 **Smart context builder** — token-budget-aware RAG context assembly
+- 💭 **Reflections** — periodic meta-analysis that becomes searchable memory
+- 🧬 **Derived memories** — inference engine finds patterns across memories
+- 🗜️ **Auto-consolidation** — summarize large memory clusters automatically
+- 🏆 **LLM reranker** — search results reranked for semantic precision
 - 👥 **Multi-tenant** — isolated memory per user with API keys
-- 📦 **Spaces** — organize memories into named collections
+- 📦 **Spaces, tags, episodes** — organize memories into named collections
+- 🧩 **Entities & projects** — track people, servers, tools, projects
+- 📬 **Webhooks & digests** — event hooks + scheduled HMAC-signed summaries
+- 🔄 **Sync & import** — cross-instance sync, import from Mem0 / Supermemory
+- 📥 **URL ingest** — extract facts from web pages or text blobs
+- 🛠️ **MCP server & CLI** — IDE integrations + terminal workflows
 - 🐳 **One-command deploy** — `docker compose up`
 
 ---
@@ -190,8 +203,9 @@ Use `X-Space: space-name` header to scope operations to a specific memory space.
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/store` | Store a memory |
-| `POST` | `/search` | Semantic search |
+| `POST` | `/search` | Semantic + full-text search |
 | `POST` | `/recall` | Contextual recall (agent-optimized) |
+| `POST` | `/context` | Smart context builder (token-budget RAG) |
 | `GET` | `/list` | List recent memories |
 | `GET` | `/profile` | User profile (static facts + recent) |
 | `GET` | `/graph` | Full memory graph (nodes + edges) |
@@ -205,13 +219,56 @@ Use `X-Space: space-name` header to scope operations to a specific memory space.
 | `POST` | `/memory/:id/archive` | Archive (hidden from recall) |
 | `POST` | `/memory/:id/unarchive` | Restore from archive |
 | `DELETE` | `/memory/:id` | Permanent delete |
+| `GET` | `/versions/:id` | Version chain for a memory |
 
-### Data
+### Intelligence
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/add` | Extract memories from conversations |
+| `POST` | `/ingest` | Extract facts from URLs or text |
+| `POST` | `/derive` | Generate inferred memories |
+| `POST` | `/reflect` | Generate period reflection |
+| `GET` | `/reflections` | List past reflections |
+| `GET` | `/contradictions` | Find conflicting memories |
+| `POST` | `/contradictions/resolve` | Resolve a contradiction |
+| `POST` | `/timetravel` | Query memory state at a past time |
+
+### Organization
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/tags` | List all tags |
+| `POST` | `/tags/search` | Search by tags |
+| `POST` | `/episodes` | Create episode |
+| `GET` | `/episodes` | List episodes |
+| `POST` | `/entities` | Create entity |
+| `GET` | `/entities` | List entities |
+| `POST` | `/projects` | Create project |
+| `GET` | `/projects` | List projects |
+
+### Data & Sync
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/export` | Export all memories + links (JSON/JSONL) |
 | `POST` | `/import` | Bulk import memories |
+| `POST` | `/import/mem0` | Import from Mem0 |
+| `POST` | `/import/supermemory` | Import from Supermemory |
+| `GET` | `/sync/changes` | Get changes since timestamp |
+| `POST` | `/sync/receive` | Receive synced changes |
+
+### Platform
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/webhooks` | Create webhook |
+| `GET` | `/webhooks` | List webhooks |
+| `POST` | `/digests` | Create scheduled digest |
+| `GET` | `/digests` | List digests |
+| `POST` | `/digests/send` | Manually trigger a digest |
+| `POST` | `/pack` | Pack memories into token budget |
+| `GET` | `/prompt` | Generate prompt template |
 
 ### Auth & Multi-tenant
 
@@ -232,14 +289,17 @@ Use `X-Space: space-name` header to scope operations to a specific memory space.
 |--------|------|-------------|
 | `GET` | `/duplicates` | Find duplicate clusters |
 | `POST` | `/deduplicate` | Auto-merge duplicates |
+| `POST` | `/consolidate` | Consolidate memory cluster |
 | `POST` | `/sweep` | Run forget sweep |
 | `POST` | `/backfill` | Backfill missing embeddings |
+| `POST` | `/decay/refresh` | Recalculate decay scores |
+| `GET` | `/decay/scores` | View decay scores |
 
 ### System
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/health` | Health check |
+| `GET` | `/health` | Health check (28 feature flags) |
 | `GET` | `/stats` | Detailed statistics |
 
 ### Store Request
@@ -359,17 +419,23 @@ server {
 
 1. **Store** — Memory content is embedded using MiniLM (384-dim vectors) and stored in SQLite with full-text indexing.
 
-2. **Auto-link** — New memories are compared against existing ones. Memories above 0.75 similarity are linked, forming a knowledge graph.
+2. **Auto-link** — New memories are compared against existing ones. Memories above 0.75 similarity are linked with typed relationships (similarity, updates, extends, contradicts, caused_by, prerequisite_for).
 
-3. **Fact extraction** — If an LLM is configured, Engram analyzes memories and extracts static facts (things that are persistently true). These become high-priority recall candidates.
+3. **Fact extraction** — If an LLM is configured, Engram analyzes new memories, extracts static facts, auto-tags with keywords, classifies importance, and detects relationships to existing memories (updates, duplicates, contradictions).
 
-4. **Recall** — When an agent needs context, Engram combines four strategies: static facts (always), semantic matches (relevant), high-importance (critical), and recent (temporal). This creates a rich context window without overwhelming the agent.
+4. **Recall** — When an agent needs context, Engram combines four strategies: static facts (always), semantic matches (relevant), high-importance (critical), and recent (temporal). The Smart Context Builder adds token-budget awareness and graph expansion.
 
-5. **Deduplication** — Periodic sweeps find near-identical memories and merge them, incrementing source_count to track how often something was mentioned.
+5. **Contradiction detection** — Periodically scans for memories that conflict. LLM verification eliminates false positives. Contradictions can be resolved by keeping one side, both, or merging.
 
-6. **Auto-forget** — Memories can be set to expire. A background sweep runs every 5 minutes to mark expired memories as forgotten.
+6. **Deduplication** — Periodic sweeps find near-identical memories and merge them, incrementing source_count to track how often something was mentioned.
 
-7. **Versioning** — Updating a memory creates a new version linked to the original. The full chain is preserved, but only the latest version surfaces in search/recall.
+7. **Decay & forget** — Memories decay over time based on access patterns. Static memories are immune. Auto-forget sweeps expire TTL-based memories every 5 minutes.
+
+8. **Versioning** — Updating a memory creates a new version linked to the original. Time-travel queries can reconstruct the knowledge state at any past timestamp.
+
+9. **Consolidation** — Large clusters of related memories get summarized into a single dense memory. Originals are archived, links preserved.
+
+10. **Reflection** — On-demand meta-analysis generates insights about themes, progress, and patterns over any time period. Reflections become searchable memories themselves.
 
 ---
 
@@ -379,13 +445,28 @@ server {
 |---------|--------|------|-------------|
 | Semantic search | ✅ | ✅ | ✅ |
 | Local embeddings | ✅ | ❌ | ❌ |
+| Full-text search (FTS5) | ✅ | ❌ | ❌ |
 | Graph visualization | ✅ | ❌ | ✅ |
 | Memory versioning | ✅ | ❌ | ❌ |
 | Auto-deduplication | ✅ | ❌ | ❌ |
-| Auto-forget | ✅ | ❌ | ❌ |
-| Fact extraction | ✅ | ✅ | ❌ |
-| Multi-tenant | ✅ | ✅ | ❌ |
-| Spaces/collections | ✅ | ❌ | ✅ |
+| Auto-forget / TTL | ✅ | ❌ | ❌ |
+| Decay scoring | ✅ | ❌ | ❌ |
+| Contradiction detection | ✅ | ❌ | ❌ |
+| Time-travel queries | ✅ | ❌ | ❌ |
+| Smart context builder (RAG) | ✅ | ❌ | ❌ |
+| Reflections | ✅ | ❌ | ❌ |
+| Derived memories | ✅ | ❌ | ❌ |
+| Auto-consolidation | ✅ | ❌ | ❌ |
+| LLM reranker | ✅ | ❌ | ❌ |
+| Fact extraction + auto-tagging | ✅ | ✅ | ❌ |
+| Conversation extraction | ✅ | ✅ | ❌ |
+| Multi-tenant + API keys | ✅ | ✅ | ❌ |
+| Spaces / collections | ✅ | ❌ | ✅ |
+| Entities & projects | ✅ | ❌ | ❌ |
+| Webhooks & digests | ✅ | ❌ | ❌ |
+| Cross-instance sync | ✅ | ❌ | ❌ |
+| MCP server + CLI | ✅ | ❌ | ❌ |
+| URL ingest | ✅ | ❌ | ❌ |
 | Self-hosted | ✅ | ✅ | ✅ |
 | No external API needed | ✅ | ❌ | ❌ |
 | SQLite (zero deps) | ✅ | ❌ | ❌ |

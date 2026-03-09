@@ -100,12 +100,21 @@ nav .logo{font-size:16px;font-weight:800;letter-spacing:-0.02em}
 nav .logo span{color:var(--accent)}
 nav .links{display:flex;gap:24px;font-size:13px;color:var(--dim)}
 nav .links a:hover{color:var(--text);text-decoration:none}
+.nav-toggle{display:none;background:none;border:none;color:var(--text);font-size:22px;cursor:pointer;padding:4px 8px;line-height:1}
+@media(max-width:640px){
+  .nav-toggle{display:block}
+  nav .links{display:none;position:absolute;top:100%;left:0;right:0;flex-direction:column;gap:0;background:rgba(10,14,23,0.95);backdrop-filter:blur(12px);border-bottom:1px solid rgba(255,255,255,0.06);padding:8px 0}
+  nav .links.open{display:flex}
+  nav .links a{padding:12px 2rem;border-bottom:1px solid rgba(255,255,255,0.03)}
+  nav .links a:hover{background:rgba(129,140,248,0.06)}
+}
 </style>
 </head>
 <body>
 
 <nav>
   <div class="logo">en<span>gram</span></div>
+  <button class="nav-toggle" onclick="this.nextElementSibling.classList.toggle('open')" aria-label="Menu">☰</button>
   <div class="links">
     <a href="#features">Features</a>
     <a href="#sdks">SDKs</a>
@@ -143,54 +152,127 @@ nav .links a:hover{color:var(--text);text-decoration:none}
 <section id="features">
   <div class="container">
     <div class="section-label">Features</div>
-    <h2 class="section-title">Everything agents need to remember</h2>
-    <p class="section-desc">One server. One SQLite file. Zero external dependencies. Runs anywhere Bun runs.</p>
+    <h2 class="section-title">28 features. One SQLite file.</h2>
+    <p class="section-desc">Zero external dependencies. Runs anywhere Bun runs. Every feature below ships in a single 5,700-line TypeScript file.</p>
 
-    <div class="features">
+    <div style="margin-bottom:1rem;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--cyan)">Core Memory</div>
+    <div class="features" style="margin-bottom:3rem">
       <div class="feature">
         <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">🧠</div>
-        <h3>Semantic Search</h3>
-        <p>384-dim embeddings generated locally with MiniLM. Find memories by meaning, not keywords. No OpenAI key required.</p>
+        <h3>Semantic + Full-Text Search</h3>
+        <p>384-dim embeddings generated locally with MiniLM. Hybrid search combines vector similarity with SQLite FTS5 keyword matching. No OpenAI key required.</p>
       </div>
       <div class="feature">
         <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">🔗</div>
-        <h3>Auto-Linking</h3>
-        <p>New memories automatically connect to related ones above 0.75 similarity, forming a knowledge graph you can visualize and traverse.</p>
+        <h3>Auto-Linking & Knowledge Graph</h3>
+        <p>New memories automatically connect to related ones via embedding similarity. Typed relationships: updates, extends, contradicts, caused_by, prerequisite_for.</p>
       </div>
       <div class="feature">
         <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:var(--accent2)">🔄</div>
-        <h3>Versioning</h3>
-        <p>Update memories without losing history. Full version chain preserved. Only the latest version surfaces in search and recall.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">🧹</div>
-        <h3>Auto-Deduplication</h3>
-        <p>Detects near-identical memories and merges them. Source count tracks how often something was mentioned — signal, not noise.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:var(--amber)">⏰</div>
-        <h3>Auto-Forget</h3>
-        <p>Set memories to expire. A background sweep runs every 5 minutes. Low-importance memories fade. Critical ones persist forever.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(244,114,182,0.1);color:var(--pink)">🔍</div>
-        <h3>Fact Extraction</h3>
-        <p>Optional LLM-powered extraction of static facts from conversations. Supports any OpenAI-compatible API. Facts become high-priority recall candidates.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">👥</div>
-        <h3>Multi-Tenant</h3>
-        <p>Isolated memory per user with API keys, rate limiting, and scoped queries. Each user sees only their own memories.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">📦</div>
-        <h3>Spaces</h3>
-        <p>Organize memories into named collections. Switch between projects, domains, or contexts with a single header.</p>
+        <h3>Versioning & Dedup</h3>
+        <p>Update memories without losing history. Full version chain preserved. Near-duplicates detected and merged automatically. Source count tracks confirmation frequency.</p>
       </div>
       <div class="feature">
         <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">📊</div>
+        <h3>Decay Scoring</h3>
+        <p>Time-weighted importance with access reinforcement. Static memories never decay. Dynamic ones fade unless accessed. Configurable half-life.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:var(--amber)">🏷️</div>
+        <h3>Tags, Episodes & Spaces</h3>
+        <p>Organize memories with tags, group into episodic sessions, and isolate by named spaces. Filter and scope all queries.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(244,114,182,0.1);color:var(--pink)">⏰</div>
+        <h3>Auto-Forget</h3>
+        <p>Set memories to expire with TTL. Background sweep every 5 minutes. Low-importance memories fade. Critical ones persist forever.</p>
+      </div>
+    </div>
+
+    <div style="margin-bottom:1rem;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--accent2)">Intelligence Layer</div>
+    <div class="features" style="margin-bottom:3rem">
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(244,114,182,0.1);color:var(--pink)">🔍</div>
+        <h3>Fact Extraction & Auto-Tagging</h3>
+        <p>LLM-powered extraction of atomic facts from conversations and text. Automatic category classification, importance rating, static/dynamic detection, and keyword tagging.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(248,113,113,0.1);color:var(--red)">⚡</div>
+        <h3>Contradiction Detection</h3>
+        <p>Scans for conflicting memories. Optional LLM verification eliminates false positives. Resolve by keeping one, both, or LLM-powered merge into a single truth.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:var(--accent2)">💭</div>
+        <h3>Reflections</h3>
+        <p>Periodic meta-analysis over day, week, or month. Identifies themes, progress, patterns, and unresolved items. Reflections become searchable memories themselves.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">🧬</div>
+        <h3>Derived Memories</h3>
+        <p>Inference engine finds patterns across memories and generates new facts that aren't explicitly stated. Each inference cites its sources with confidence scores.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">🗜️</div>
+        <h3>Auto-Consolidation</h3>
+        <p>Large clusters of related memories get summarized into a single dense memory. Originals archived, links preserved. Keeps the memory space clean.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">🏆</div>
+        <h3>LLM Reranker</h3>
+        <p>Search results reranked by an LLM for semantic precision. Candidates retrieved by embedding similarity, then filtered by a language model that understands nuance.</p>
+      </div>
+    </div>
+
+    <div style="margin-bottom:1rem;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--green)">Retrieval</div>
+    <div class="features" style="margin-bottom:3rem">
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">🎯</div>
+        <h3>Smart Context Builder</h3>
+        <p>Token-budget-aware RAG assembly. Four-phase pipeline: static facts → semantic search → linked expansion → recent. Three strategies: balanced, precision, breadth.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:var(--amber)">⏪</div>
+        <h3>Time-Travel Queries</h3>
+        <p>Query what the agent knew at any point in time. Version-chain-aware — finds the correct memory state as of any timestamp, with optional semantic search.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(244,114,182,0.1);color:var(--pink)">📋</div>
+        <h3>Prompt Templates & Packing</h3>
+        <p>Generate ready-to-use prompt context blocks. Pack memories into token-budgeted strings optimized for any LLM context window.</p>
+      </div>
+    </div>
+
+    <div style="margin-bottom:1rem;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--amber)">Platform</div>
+    <div class="features" style="margin-bottom:3rem">
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">👥</div>
+        <h3>Multi-Tenant</h3>
+        <p>Isolated memory per user with scoped API keys, rate limiting, and per-key permissions. Each user sees only their own memories.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">📬</div>
+        <h3>Webhooks & Digests</h3>
+        <p>Event webhooks on memory changes. Scheduled digest delivery (hourly/daily/weekly) via HMAC-signed webhooks with stats, new memories, and reflections.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:var(--accent2)">🔄</div>
+        <h3>Sync, Import & Ingest</h3>
+        <p>Cross-instance sync via change feeds. Import from Mem0 and Supermemory. Ingest URLs or text blobs — Engram extracts facts and stores them as linked memories.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">📊</div>
         <h3>Graph Visualization</h3>
-        <p>WebGL galaxy-style graph of your memory space. Explore connections, search, create, edit — all from the browser.</p>
+        <p>Built-in WebGL galaxy graph. Explore connections, search, create, edit, archive — all from the browser. Category filters, keyboard shortcuts, auto-refresh.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(244,114,182,0.1);color:var(--pink)">🧩</div>
+        <h3>Entities & Projects</h3>
+        <p>Track named entities (people, servers, tools) and projects. Link memories to entities and projects. Scoped search within any entity or project.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:var(--amber)">🛠️</div>
+        <h3>MCP Server & CLI</h3>
+        <p>Model Context Protocol server for IDE integrations. CLI for terminal workflows. Both ship with the same binary — no extra install.</p>
       </div>
     </div>
   </div>
@@ -316,13 +398,29 @@ nav .links a:hover{color:var(--text);text-decoration:none}
       </thead>
       <tbody>
         <tr><td>Semantic search</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
-        <tr><td>Local embeddings</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Local embeddings (no API)</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Full-text search (FTS5)</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
         <tr><td>Graph visualization</td><td class="yes">✓</td><td class="no">✗</td><td class="yes">✓</td></tr>
         <tr><td>Memory versioning</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
         <tr><td>Auto-deduplication</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Auto-forget</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Fact extraction</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td></tr>
-        <tr><td>Multi-tenant</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td></tr>
+        <tr><td>Auto-forget / TTL</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Decay scoring</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Contradiction detection</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Time-travel queries</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Smart context builder (RAG)</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Reflections / meta-analysis</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Derived memories (inference)</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Auto-consolidation</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>LLM reranker</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Fact extraction + auto-tagging</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td></tr>
+        <tr><td>Conversation extraction</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td></tr>
+        <tr><td>Multi-tenant + API keys</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td></tr>
+        <tr><td>Spaces / collections</td><td class="yes">✓</td><td class="no">✗</td><td class="yes">✓</td></tr>
+        <tr><td>Entities & projects</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Webhooks & digests</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Cross-instance sync</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>MCP server + CLI</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>URL ingest</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
         <tr><td>No external API needed</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
         <tr><td>SQLite (zero deps)</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
         <tr><td>Self-hosted</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
