@@ -22,6 +22,13 @@ const LLM_MODEL = process.env.LLM_MODEL || "claude-sonnet-4-20250514";
 // Auto-forget sweep interval (every 5 minutes)
 const FORGET_SWEEP_INTERVAL = 5 * 60 * 1000;
 
+// Decay configuration
+const DECAY_HALF_LIFE_DAYS = 30;   // importance halves every 30 days without access
+const DECAY_ACCESS_BOOST = 0.1;    // each access adds this much decay resistance
+const DECAY_MAX_BOOST = 2.0;       // cap on access-based boost
+const CONSOLIDATION_THRESHOLD = 8; // auto-consolidate clusters with 8+ related memories
+const CONSOLIDATION_INTERVAL = 30 * 60 * 1000; // check every 30 minutes
+
 // API key config
 const API_KEY_PREFIX = "eg_";
 const DEFAULT_RATE_LIMIT = 120; // requests per minute
@@ -158,6 +165,56 @@ try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_parent ON memories(parent
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_latest ON memories(is_latest) WHERE is_latest = 1"); } catch {}
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_forgotten ON memories(is_forgotten)"); } catch {}
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_forget_after ON memories(forget_after) WHERE forget_after IS NOT NULL"); } catch {}
+
+// v4.1 — Access tracking, tags, episodes
+const v41Columns: [string, string][] = [
+  ["last_accessed_at", "TEXT"],
+  ["access_count", "INTEGER NOT NULL DEFAULT 0"],
+  ["tags", "TEXT"],  // JSON array: ["tag1", "tag2"]
+  ["episode_id", "INTEGER"],
+  ["decay_score", "REAL"],  // cached effective score
+];
+for (const [col, def] of v41Columns) {
+  try { db.exec(`ALTER TABLE memories ADD COLUMN ${col} ${def}`); } catch {}
+}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_tags ON memories(tags) WHERE tags IS NOT NULL"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_episode ON memories(episode_id) WHERE episode_id IS NOT NULL"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_access ON memories(access_count DESC)"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_decay ON memories(decay_score DESC)"); } catch {}
+
+// Episodes table
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS episodes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT,
+      session_id TEXT,
+      agent TEXT,
+      summary TEXT,
+      user_id INTEGER DEFAULT 1,
+      memory_count INTEGER NOT NULL DEFAULT 0,
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      ended_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
+    CREATE INDEX IF NOT EXISTS idx_episodes_user ON episodes(user_id);
+    CREATE INDEX IF NOT EXISTS idx_episodes_agent ON episodes(agent);
+  `);
+} catch {}
+
+// Consolidation tracking
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS consolidations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      summary_memory_id INTEGER NOT NULL REFERENCES memories(id),
+      source_memory_ids TEXT NOT NULL,
+      cluster_label TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+} catch {}
 
 // ============================================================================
 // SCHEMA v4 — Multi-tenant: users, API keys, spaces
@@ -422,6 +479,63 @@ const getStaticMemories = db.prepare(
    ORDER BY source_count DESC, updated_at DESC`
 );
 
+// Access tracking
+const trackAccess = db.prepare(
+  `UPDATE memories SET access_count = access_count + 1, last_accessed_at = datetime('now') WHERE id = ?`
+);
+
+// Tags
+const getByTag = db.prepare(
+  `SELECT id, content, category, source, importance, created_at, tags, access_count, episode_id
+   FROM memories WHERE tags LIKE ? AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?
+   ORDER BY created_at DESC LIMIT ?`
+);
+
+const getAllTags = db.prepare(
+  `SELECT DISTINCT tags FROM memories WHERE tags IS NOT NULL AND is_forgotten = 0 AND is_archived = 0 AND user_id = ?`
+);
+
+// Episodes
+const insertEpisode = db.prepare(
+  `INSERT INTO episodes (title, session_id, agent, user_id) VALUES (?, ?, ?, ?) RETURNING id, started_at`
+);
+const updateEpisode = db.prepare(
+  `UPDATE episodes SET title = COALESCE(?, title), summary = COALESCE(?, summary),
+   ended_at = COALESCE(?, ended_at), memory_count = (SELECT COUNT(*) FROM memories WHERE episode_id = episodes.id)
+   WHERE id = ?`
+);
+const getEpisode = db.prepare(`SELECT * FROM episodes WHERE id = ?`);
+const getEpisodeBySession = db.prepare(
+  `SELECT * FROM episodes WHERE session_id = ? AND agent = ? AND user_id = ? ORDER BY started_at DESC LIMIT 1`
+);
+const listEpisodes = db.prepare(
+  `SELECT * FROM episodes WHERE user_id = ? ORDER BY started_at DESC LIMIT ?`
+);
+const getEpisodeMemories = db.prepare(
+  `SELECT id, content, category, source, importance, created_at, tags, access_count
+   FROM memories WHERE episode_id = ? AND is_forgotten = 0 ORDER BY created_at ASC`
+);
+const assignToEpisode = db.prepare(
+  `UPDATE memories SET episode_id = ? WHERE id = ?`
+);
+
+// Consolidation queries
+const getClusterCandidates = db.prepare(
+  `SELECT source_id, COUNT(*) as link_count FROM memory_links
+   JOIN memories m ON memory_links.source_id = m.id
+   WHERE m.is_forgotten = 0 AND m.is_archived = 0 AND m.is_latest = 1
+   GROUP BY source_id HAVING link_count >= ?
+   ORDER BY link_count DESC LIMIT 10`
+);
+
+const getClusterMembers = db.prepare(
+  `SELECT DISTINCT m.id, m.content, m.category, m.importance, m.created_at, m.access_count
+   FROM memory_links ml
+   JOIN memories m ON (ml.target_id = m.id OR ml.source_id = m.id)
+   WHERE (ml.source_id = ? OR ml.target_id = ?) AND m.is_forgotten = 0 AND m.is_archived = 0
+   ORDER BY m.importance DESC, m.created_at DESC`
+);
+
 const getRecentDynamicMemories = db.prepare(
   `SELECT id, content, category, source_count, created_at
    FROM memories WHERE is_static = 0 AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?
@@ -432,7 +546,7 @@ const getRecentDynamicMemories = db.prepare(
 const getAllMemoriesForGraph = db.prepare(
   `SELECT id, content, category, importance, is_latest, is_forgotten, is_static,
      is_inference, version, parent_memory_id, root_memory_id, source_count,
-     forget_after, created_at
+     forget_after, created_at, tags, access_count, episode_id, decay_score
    FROM memories WHERE user_id = ? ORDER BY created_at DESC`
 );
 
@@ -512,7 +626,7 @@ interface FactExtractionResult {
     importance: number;
   }>;
   relation_to_existing: {
-    type: "none" | "updates" | "extends" | "duplicate";
+    type: "none" | "updates" | "extends" | "duplicate" | "contradicts" | "caused_by" | "prerequisite_for";
     existing_memory_id?: number | null;
     reason?: string;
   };
@@ -568,7 +682,7 @@ Respond with ONLY valid JSON (no markdown, no backticks):
     }
   ],
   "relation_to_existing": {
-    "type": "none|updates|extends|duplicate",
+    "type": "none|updates|extends|duplicate|contradicts|caused_by|prerequisite_for",
     "existing_memory_id": number_or_null,
     "reason": "why this relation was determined"
   }
@@ -578,6 +692,9 @@ Rules:
 - "updates" = new content contradicts or supersedes an existing memory
 - "extends" = new content adds to/enriches an existing memory without contradicting it
 - "duplicate" = new content says essentially the same thing as an existing memory
+- "contradicts" = new content directly conflicts with an existing memory (both may be valid)
+- "caused_by" = new content describes something that was caused by an existing memory's event
+- "prerequisite_for" = existing memory describes something that requires this new content first
 - "none" = no meaningful relation to any existing memory
 - For forget_after: use ISO 8601 datetime. Tasks/events might expire in days-weeks. Permanent facts = null.
 - The "facts" array should contain the KEY discrete facts from the content (1-3 facts usually)
@@ -657,6 +774,22 @@ function processExtractionResult(
     console.log(`Memory #${newMemoryId} extends #${rel.existing_memory_id}`);
   }
 
+  if (rel.type === "contradicts" && rel.existing_memory_id) {
+    insertLink.run(newMemoryId, rel.existing_memory_id, 0.85, "contradicts");
+    insertLink.run(rel.existing_memory_id, newMemoryId, 0.85, "contradicts");
+    console.log(`Memory #${newMemoryId} contradicts #${rel.existing_memory_id}`);
+  }
+
+  if (rel.type === "caused_by" && rel.existing_memory_id) {
+    insertLink.run(newMemoryId, rel.existing_memory_id, 0.8, "caused_by");
+    console.log(`Memory #${newMemoryId} caused by #${rel.existing_memory_id}`);
+  }
+
+  if (rel.type === "prerequisite_for" && rel.existing_memory_id) {
+    insertLink.run(rel.existing_memory_id, newMemoryId, 0.8, "prerequisite_for");
+    console.log(`Memory #${rel.existing_memory_id} is prerequisite for #${newMemoryId}`);
+  }
+
   // Apply fact classifications to the memory
   if (result.facts.length > 0) {
     const primaryFact = result.facts[0];
@@ -675,6 +808,166 @@ function processExtractionResult(
 }
 
 // ============================================================================
+// DECAY SCORING — Time-weighted importance with access reinforcement
+// ============================================================================
+
+function calculateDecayScore(
+  importance: number,
+  createdAt: string,
+  accessCount: number = 0,
+  lastAccessedAt: string | null = null,
+  isStatic: boolean = false,
+  sourceCount: number = 1
+): number {
+  // Static memories don't decay
+  if (isStatic) return importance;
+
+  const now = Date.now();
+  const created = new Date(createdAt + "Z").getTime();
+  const daysSinceCreation = (now - created) / (1000 * 60 * 60 * 24);
+
+  // Access boost: each access slows decay, capped at DECAY_MAX_BOOST
+  const accessBoost = Math.min(accessCount * DECAY_ACCESS_BOOST, DECAY_MAX_BOOST);
+
+  // Source count boost: confirmed memories decay slower
+  const sourceBoost = Math.min((sourceCount - 1) * 0.05, 0.5);
+
+  // Recency of last access matters — recently accessed memories decay slower
+  let accessRecencyBoost = 0;
+  if (lastAccessedAt) {
+    const lastAccess = new Date(lastAccessedAt + "Z").getTime();
+    const daysSinceAccess = (now - lastAccess) / (1000 * 60 * 60 * 24);
+    accessRecencyBoost = Math.max(0, 1 - (daysSinceAccess / DECAY_HALF_LIFE_DAYS)) * 0.5;
+  }
+
+  // Effective half-life increases with access
+  const effectiveHalfLife = DECAY_HALF_LIFE_DAYS * (1 + accessBoost + sourceBoost + accessRecencyBoost);
+
+  // Exponential decay
+  const decayFactor = Math.pow(0.5, daysSinceCreation / effectiveHalfLife);
+
+  return importance * decayFactor;
+}
+
+function updateDecayScores(): number {
+  const memories = db.prepare(
+    `SELECT id, importance, created_at, access_count, last_accessed_at, is_static, source_count
+     FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1`
+  ).all() as Array<any>;
+
+  let updated = 0;
+  const updateDecay = db.prepare(`UPDATE memories SET decay_score = ? WHERE id = ?`);
+
+  const batch = db.transaction(() => {
+    for (const m of memories) {
+      const score = calculateDecayScore(
+        m.importance, m.created_at, m.access_count, m.last_accessed_at,
+        !!m.is_static, m.source_count
+      );
+      updateDecay.run(Math.round(score * 1000) / 1000, m.id);
+      updated++;
+    }
+  });
+  batch();
+
+  return updated;
+}
+
+// ============================================================================
+// MEMORY CONSOLIDATION — Auto-summarize large clusters
+// ============================================================================
+
+const CONSOLIDATION_PROMPT = `You are a memory consolidation engine. Given a cluster of related memories, create a single concise summary that captures all key information.
+
+Rules:
+- Preserve ALL important facts, decisions, and specific values (versions, IPs, dates, names)
+- The summary should be self-contained — someone reading only the summary should understand the full picture
+- Keep it under 500 words
+- Format as clear, dense paragraphs — not bullet points
+- Include the most important specifics, not just generalizations
+
+Respond with ONLY a JSON object:
+{
+  "summary": "the consolidated summary text",
+  "title": "short 3-5 word cluster label",
+  "importance": 1-10
+}`;
+
+async function consolidateCluster(
+  centerMemoryId: number,
+  userId: number = 1
+): Promise<{ summaryId: number; archivedCount: number } | null> {
+  if (!LLM_API_KEY) return null;
+
+  const members = getClusterMembers.all(centerMemoryId, centerMemoryId) as Array<any>;
+  if (members.length < CONSOLIDATION_THRESHOLD) return null;
+
+  // Check if already consolidated
+  const existing = db.prepare(
+    `SELECT id FROM consolidations WHERE source_memory_ids LIKE ?`
+  ).get(`%${centerMemoryId}%`) as any;
+  if (existing) return null;
+
+  const memberContents = members.map(m =>
+    `[#${m.id}, ${m.category}, imp=${m.importance}]: ${m.content}`
+  ).join("\n\n");
+
+  try {
+    const response = await callLLM(CONSOLIDATION_PROMPT, memberContents);
+    let jsonStr = response.trim();
+    if (jsonStr.startsWith("```")) {
+      jsonStr = jsonStr.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+    }
+    const result = JSON.parse(jsonStr) as { summary: string; title: string; importance: number };
+
+    // Create summary memory
+    const embArray = await embed(result.summary);
+    const embBuffer = embeddingToBuffer(embArray);
+    const imp = Math.max(1, Math.min(10, result.importance || 8));
+
+    const summaryMem = insertMemory.get(
+      `[Consolidated: ${result.title}] ${result.summary}`,
+      "discovery", "consolidation", null, imp, embBuffer,
+      1, 1, null, null, members.length, 1, 0, null, null, 0
+    ) as { id: number; created_at: string };
+    db.prepare("UPDATE memories SET user_id = ?, tags = ? WHERE id = ?").run(
+      userId, JSON.stringify(["consolidated", result.title.toLowerCase().replace(/\s+/g, "-")]), summaryMem.id
+    );
+
+    // Archive source memories and link to summary
+    let archived = 0;
+    for (const m of members) {
+      markArchived.run(m.id);
+      insertLink.run(summaryMem.id, m.id, 1.0, "consolidates");
+      archived++;
+    }
+
+    // Track consolidation
+    db.prepare(
+      `INSERT INTO consolidations (summary_memory_id, source_memory_ids, cluster_label)
+       VALUES (?, ?, ?)`
+    ).run(summaryMem.id, JSON.stringify(members.map(m => m.id)), result.title);
+
+    await autoLink(summaryMem.id, embArray);
+    console.log(`Consolidated ${archived} memories into #${summaryMem.id}: "${result.title}"`);
+    return { summaryId: summaryMem.id, archivedCount: archived };
+  } catch (e: any) {
+    console.error(`Consolidation failed for cluster around #${centerMemoryId}:`, e.message);
+    return null;
+  }
+}
+
+async function runConsolidationSweep(userId: number = 1): Promise<number> {
+  const candidates = getClusterCandidates.all(CONSOLIDATION_THRESHOLD) as Array<{ source_id: number; link_count: number }>;
+  let totalConsolidated = 0;
+  for (const c of candidates) {
+    const result = await consolidateCluster(c.source_id, userId);
+    if (result) totalConsolidated += result.archivedCount;
+  }
+  return totalConsolidated;
+}
+
+// ============================================================================
 // HYBRID SEARCH — v3 with relationship expansion + version awareness
 // ============================================================================
 
@@ -686,11 +979,15 @@ interface SearchResult {
   importance: number;
   created_at: string;
   score: number;
+  decay_score?: number;
   version?: number;
   is_latest?: boolean;
   is_static?: boolean;
   source_count?: number;
   root_memory_id?: number;
+  tags?: string[];
+  access_count?: number;
+  episode_id?: number;
   linked?: Array<{ id: number; content: string; category: string; similarity: number; type: string }>;
   version_chain?: Array<{ id: number; content: string; version: number; is_latest: boolean }>;
 }
@@ -776,9 +1073,15 @@ async function hybridSearch(
     } catch {}
   }
 
-  // 3. Boost by importance + source_count + static priority
+  // 3. Boost by importance + source_count + static priority + decay
   for (const r of results.values()) {
-    r.score += (r.importance / 10) * 0.05;
+    // Use decay score instead of raw importance
+    const decayScore = calculateDecayScore(
+      r.importance, r.created_at, (r as any).access_count || 0, null,
+      !!r.is_static, r.source_count || 1
+    );
+    r.decay_score = Math.round(decayScore * 1000) / 1000;
+    r.score += (decayScore / 10) * 0.05;
     r.score += Math.min((r.source_count || 1) / 10, 1) * 0.03;
     if (r.is_static) r.score += 0.02;
   }
@@ -1448,10 +1751,13 @@ const server = Bun.serve({
       const staticCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_static = 1 AND is_forgotten = 0").get() as { count: number };
       const versionedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE version > 1").get() as { count: number };
       const archivedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_archived = 1 AND is_forgotten = 0").get() as { count: number };
+      const episodeCount = db.prepare("SELECT COUNT(*) as count FROM episodes").get() as { count: number };
+      const consolidationCount = db.prepare("SELECT COUNT(*) as count FROM consolidations").get() as { count: number };
+      const taggedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE tags IS NOT NULL AND is_forgotten = 0").get() as { count: number };
       const dbSize = Bun.file(DB_PATH).size;
       return json({
         status: "ok",
-        version: 3,
+        version: 4.1,
         memories: memCount.count,
         embedded: embCount.count,
         unembedded: noEmbCount,
@@ -1460,11 +1766,22 @@ const server = Bun.serve({
         archived: archivedCount.count,
         static: staticCount.count,
         versioned: versionedCount.count,
+        tagged: taggedCount.count,
+        episodes: episodeCount.count,
+        consolidations: consolidationCount.count,
         conversations: convCount.count,
         messages: msgCount.count,
         embedding_model: EMBEDDING_MODEL,
         llm_model: LLM_MODEL,
         llm_configured: !!LLM_API_KEY,
+        features: {
+          decay: true,
+          tags: true,
+          episodes: true,
+          consolidation: !!LLM_API_KEY,
+          typed_relationships: true,
+          access_tracking: true,
+        },
         db_size_mb: Math.round(dbSize / 1048576 * 100) / 100,
       });
     }
@@ -1477,12 +1794,37 @@ const server = Bun.serve({
       if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const body = await req.json();
-        const { content, category, source, session_id, importance } = body;
+        const { content, category, source, session_id, importance, tags, episode } = body;
         if (!content || typeof content !== "string" || content.trim().length === 0) {
           return errorResponse("content is required and must be a non-empty string");
         }
 
         const imp = Math.max(1, Math.min(10, Number(importance) || DEFAULT_IMPORTANCE));
+
+        // Validate and serialize tags
+        let tagsJson: string | null = null;
+        if (tags) {
+          if (Array.isArray(tags)) {
+            tagsJson = JSON.stringify(tags.map((t: any) => String(t).trim().toLowerCase()).filter(Boolean));
+          } else if (typeof tags === "string") {
+            tagsJson = JSON.stringify(tags.split(",").map(t => t.trim().toLowerCase()).filter(Boolean));
+          }
+        }
+
+        // Episode management: auto-create or find existing episode
+        let episodeId: number | null = null;
+        if (episode !== false && session_id && source) {
+          const existing = getEpisodeBySession.get(session_id, source, auth.user_id) as any;
+          if (existing) {
+            episodeId = existing.id;
+          } else if (episode !== "none") {
+            // Auto-create episode for this session
+            const ep = insertEpisode.get(
+              null, session_id, source, auth.user_id
+            ) as { id: number; started_at: string };
+            episodeId = ep.id;
+          }
+        }
 
         let embBuffer: Buffer | null = null;
         let embArray: Float32Array | null = null;
@@ -1503,8 +1845,21 @@ const server = Bun.serve({
           1, 1, null, null, 1, 0, 0, null, null, 0
         ) as { id: number; created_at: string };
 
-        // Set user_id and space_id
-        db.prepare("UPDATE memories SET user_id = ?, space_id = ? WHERE id = ?").run(auth.user_id, auth.space_id || null, result.id);
+        // Set user_id, space_id, tags, episode_id
+        db.prepare(
+          "UPDATE memories SET user_id = ?, space_id = ?, tags = ?, episode_id = ? WHERE id = ?"
+        ).run(auth.user_id, auth.space_id || null, tagsJson, episodeId, result.id);
+
+        // Update episode memory count
+        if (episodeId) {
+          updateEpisode.run(null, null, null, episodeId);
+        }
+
+        // Calculate initial decay score
+        const decayScore = calculateDecayScore(imp, result.created_at, 0, null, false, 1);
+        db.prepare("UPDATE memories SET decay_score = ? WHERE id = ?").run(
+          Math.round(decayScore * 1000) / 1000, result.id
+        );
 
         let linked = 0;
         if (embArray) {
@@ -1549,6 +1904,9 @@ const server = Bun.serve({
           importance: imp,
           linked,
           embedded: !!embBuffer,
+          tags: tagsJson ? JSON.parse(tagsJson) : [],
+          episode_id: episodeId,
+          decay_score: decayScore,
           fact_extraction: LLM_API_KEY ? "queued" : "disabled",
         });
       } catch (e: any) {
@@ -1563,16 +1921,67 @@ const server = Bun.serve({
     if (url.pathname === "/search" && method === "POST") {
       try {
         const body = await req.json();
-        const { query, limit, include_links, expand_relationships, latest_only } = body;
+        const { query, limit, include_links, expand_relationships, latest_only, tag, episode_id: filterEpisode } = body;
         if (!query || typeof query !== "string") return errorResponse("query is required");
-        const results = await hybridSearch(
+        let results = await hybridSearch(
           query,
           Math.min(limit || 10, 50),
           include_links || false,
           expand_relationships ?? true,
           latest_only ?? true
         );
-        return json({ results });
+
+        // Filter by tag if specified
+        if (tag) {
+          results = results.filter(r => {
+            const mem = getMemoryWithoutEmbedding.get(r.id) as any;
+            if (!mem?.tags) return false;
+            try { return JSON.parse(mem.tags).includes(tag); } catch { return false; }
+          });
+        }
+
+        // Filter by episode if specified
+        if (filterEpisode) {
+          results = results.filter(r => {
+            const mem = getMemoryWithoutEmbedding.get(r.id) as any;
+            return mem?.episode_id === filterEpisode;
+          });
+        }
+
+        // Track access on returned results
+        for (const r of results) {
+          trackAccess.run(r.id);
+        }
+
+        // Episodic expansion: if a result belongs to an episode, include episode context
+        const episodeContext: Array<{ episode_id: number; title: string; memories: any[] }> = [];
+        const seenEpisodes = new Set<number>();
+        for (const r of results) {
+          const mem = getMemoryWithoutEmbedding.get(r.id) as any;
+          if (mem?.episode_id && !seenEpisodes.has(mem.episode_id)) {
+            seenEpisodes.add(mem.episode_id);
+            const ep = getEpisode.get(mem.episode_id) as any;
+            if (ep) {
+              const epMems = getEpisodeMemories.all(mem.episode_id) as any[];
+              episodeContext.push({
+                episode_id: mem.episode_id,
+                title: ep.title || `Session ${ep.session_id || ep.id}`,
+                memories: epMems.map(m => ({ id: m.id, content: m.content, category: m.category })),
+              });
+            }
+          }
+          // Attach tags to results
+          if (mem?.tags) {
+            try { r.tags = JSON.parse(mem.tags); } catch {}
+          }
+          r.episode_id = mem?.episode_id;
+          r.access_count = mem?.access_count;
+        }
+
+        return json({
+          results,
+          ...(episodeContext.length > 0 ? { episodes: episodeContext } : {}),
+        });
       } catch (e: any) {
         return errorResponse(`Search failed: ${e.message}`, 500);
       }
@@ -1850,6 +2259,7 @@ const server = Bun.serve({
         const body = await req.json() as any;
         const context = body.context || ""; // user's first message or topic
         const limit = Math.min(Number(body.limit) || 20, 50);
+        const includeTags = body.tags as string[] | undefined;
 
         const results: Map<number, { memory: any; score: number; source: string }> = new Map();
 
@@ -1864,20 +2274,24 @@ const server = Bun.serve({
           const semanticResults = await hybridSearch(context, limit, false, true, true);
           for (const sr of semanticResults) {
             if (!results.has(sr.id)) {
-              results.set(sr.id, { memory: sr, score: sr.score * 50, source: "semantic" });
+              // Use decay_score instead of raw search score
+              const decayMultiplier = sr.decay_score ? (sr.decay_score / sr.importance) : 1;
+              results.set(sr.id, { memory: sr, score: sr.score * 50 * decayMultiplier, source: "semantic" });
             }
           }
         }
 
-        // 3. High-importance recent memories (fill remaining slots)
+        // 3. High-importance memories weighted by decay (not just raw importance)
         const recentImportant = db.prepare(
-          `SELECT id, content, category, source, importance, created_at, source_count, is_static
+          `SELECT id, content, category, source, importance, created_at, source_count, is_static,
+             access_count, last_accessed_at, decay_score, tags, episode_id
            FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?
-           ORDER BY importance DESC, created_at DESC LIMIT ?`
+           ORDER BY COALESCE(decay_score, importance) DESC, created_at DESC LIMIT ?`
         ).all(auth.user_id, limit) as Array<any>;
         for (const ri of recentImportant) {
           if (!results.has(ri.id)) {
-            results.set(ri.id, { memory: ri, score: ri.importance * 2, source: "important" });
+            const effectiveScore = ri.decay_score || ri.importance;
+            results.set(ri.id, { memory: ri, score: effectiveScore * 2, source: "important" });
           }
         }
 
@@ -1889,16 +2303,54 @@ const server = Bun.serve({
           }
         }
 
+        // 5. Tag-based boost: if caller specifies tags, boost matching memories
+        if (includeTags && includeTags.length > 0) {
+          for (const [id, entry] of results) {
+            const mem = getMemoryWithoutEmbedding.get(id) as any;
+            if (mem?.tags) {
+              try {
+                const memTags = JSON.parse(mem.tags) as string[];
+                const overlap = includeTags.filter(t => memTags.includes(t)).length;
+                if (overlap > 0) entry.score *= (1 + overlap * 0.2);
+              } catch {}
+            }
+          }
+        }
+
         // Sort by score descending, limit
         const sorted = Array.from(results.values())
           .sort((a, b) => b.score - a.score)
           .slice(0, limit);
+
+        // Track access on recalled memories
+        for (const s of sorted) {
+          trackAccess.run(s.memory.id);
+        }
+
+        // Episodic expansion: find episodes referenced by recalled memories
+        const episodeContext: Array<{ episode_id: number; title: string; memory_count: number }> = [];
+        const seenEpisodes = new Set<number>();
+        for (const s of sorted) {
+          const mem = getMemoryWithoutEmbedding.get(s.memory.id) as any;
+          if (mem?.episode_id && !seenEpisodes.has(mem.episode_id)) {
+            seenEpisodes.add(mem.episode_id);
+            const ep = getEpisode.get(mem.episode_id) as any;
+            if (ep) {
+              episodeContext.push({
+                episode_id: mem.episode_id,
+                title: ep.title || `Session ${ep.session_id || ep.id}`,
+                memory_count: ep.memory_count,
+              });
+            }
+          }
+        }
 
         return json({
           memories: sorted.map(s => ({
             ...s.memory,
             recall_source: s.source,
             recall_score: Math.round(s.score * 100) / 100,
+            tags: s.memory.tags ? (() => { try { return JSON.parse(s.memory.tags); } catch { return []; } })() : [],
           })),
           breakdown: {
             static: sorted.filter(s => s.source === "static").length,
@@ -1906,6 +2358,7 @@ const server = Bun.serve({
             important: sorted.filter(s => s.source === "important").length,
             recent: sorted.filter(s => s.source === "recent").length,
           },
+          ...(episodeContext.length > 0 ? { episodes: episodeContext } : {}),
         });
       } catch (e: any) {
         return errorResponse(`Smart recall failed: ${e.message}`, 500);
@@ -1918,6 +2371,9 @@ const server = Bun.serve({
       const memory = getMemoryWithoutEmbedding.get(id) as any;
       if (!memory) return errorResponse("Not found", 404);
 
+      // Track access
+      trackAccess.run(id);
+
       const links = getLinksFor.all(id, id) as Array<{
         id: number; similarity: number; type: string; content: string; category: string;
       }>;
@@ -1928,8 +2384,22 @@ const server = Bun.serve({
         created_at: string; source_count: number;
       }>;
 
+      // Parse tags and include episode info
+      let tags: string[] = [];
+      try { tags = memory.tags ? JSON.parse(memory.tags) : []; } catch {}
+      let episode = null;
+      if (memory.episode_id) {
+        episode = getEpisode.get(memory.episode_id) as any;
+      }
+
       return json({
         ...memory,
+        tags,
+        episode: episode ? { id: episode.id, title: episode.title, session_id: episode.session_id } : null,
+        decay_score: calculateDecayScore(
+          memory.importance, memory.created_at, memory.access_count || 0,
+          memory.last_accessed_at, !!memory.is_static, memory.source_count || 1
+        ),
         links: links.map(l => ({ ...l })),
         version_chain: chain.length > 1 ? chain : undefined,
       });
@@ -2199,6 +2669,11 @@ const server = Bun.serve({
         const body = await req.json() as any;
         if (!body.content?.trim()) return errorResponse("content is required");
         const imp = Math.max(1, Math.min(10, Number(body.importance) || 5));
+        let tagsJson: string | null = null;
+        if (body.tags) {
+          const tags = Array.isArray(body.tags) ? body.tags : body.tags.split(",");
+          tagsJson = JSON.stringify(tags.map((t: any) => String(t).trim().toLowerCase()).filter(Boolean));
+        }
         let embBuffer: Buffer | null = null;
         try {
           const embArray = await embed(body.content.trim());
@@ -2207,7 +2682,9 @@ const server = Bun.serve({
             body.content.trim(), body.category || "general", "gui", null,
             imp, embBuffer, 1, 1, null, null, 1, body.is_static ? 1 : 0, 0, null, null, 0
           ) as { id: number; created_at: string };
-          db.prepare("UPDATE memories SET user_id = ? WHERE id = ?").run(1, result.id);
+          db.prepare("UPDATE memories SET user_id = ?, tags = ? WHERE id = ?").run(1, tagsJson, result.id);
+          const decayScore = calculateDecayScore(imp, result.created_at, 0, null, !!body.is_static, 1);
+          db.prepare("UPDATE memories SET decay_score = ? WHERE id = ?").run(Math.round(decayScore * 1000) / 1000, result.id);
           await autoLink(result.id, embArray);
           return json({ created: true, id: result.id });
         } catch (e: any) {
@@ -2259,6 +2736,178 @@ const server = Bun.serve({
         for (const id of ids) { markArchived.run(id); count++; }
         return json({ archived: count });
       } catch (e: any) { return errorResponse(`Failed: ${e.message}`, 500); }
+    }
+
+    // ========================================================================
+    // TAGS — v4.1
+    // ========================================================================
+
+    if (url.pathname === "/tags" && method === "GET") {
+      const rows = getAllTags.all(auth.user_id) as Array<{ tags: string }>;
+      const tagSet = new Set<string>();
+      for (const row of rows) {
+        try {
+          const parsed = JSON.parse(row.tags) as string[];
+          for (const t of parsed) tagSet.add(t);
+        } catch {}
+      }
+      return json({ tags: Array.from(tagSet).sort() });
+    }
+
+    if (url.pathname === "/tags/search" && method === "POST") {
+      try {
+        const body = await req.json() as any;
+        const tag = body.tag?.trim().toLowerCase();
+        if (!tag) return errorResponse("tag is required");
+        const limit = Math.min(Number(body.limit) || 20, 100);
+        const results = getByTag.all(`%"${tag}"%`, auth.user_id, limit) as any[];
+        for (const r of results) {
+          try { r.tags = JSON.parse(r.tags); } catch { r.tags = []; }
+          trackAccess.run(r.id);
+        }
+        return json({ results, tag });
+      } catch (e: any) {
+        return errorResponse(`Tag search failed: ${e.message}`, 500);
+      }
+    }
+
+    if (url.pathname.match(/^\/memory\/\d+\/tags$/) && method === "PUT") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const id = Number(url.pathname.split("/")[2]);
+        const body = await req.json() as any;
+        let tags: string[] = [];
+        if (Array.isArray(body.tags)) {
+          tags = body.tags.map((t: any) => String(t).trim().toLowerCase()).filter(Boolean);
+        }
+        db.prepare("UPDATE memories SET tags = ?, updated_at = datetime('now') WHERE id = ?")
+          .run(JSON.stringify(tags), id);
+        return json({ updated: true, id, tags });
+      } catch (e: any) {
+        return errorResponse(`Failed to update tags: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // EPISODES — v4.1
+    // ========================================================================
+
+    if (url.pathname === "/episodes" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const body = await req.json() as any;
+        const ep = insertEpisode.get(
+          body.title || null, body.session_id || null, body.agent || null, auth.user_id
+        ) as { id: number; started_at: string };
+        return json({ created: true, id: ep.id, started_at: ep.started_at });
+      } catch (e: any) {
+        return errorResponse(`Failed to create episode: ${e.message}`, 500);
+      }
+    }
+
+    if (url.pathname === "/episodes" && method === "GET") {
+      const limit = Math.min(Number(url.searchParams.get("limit") || 20), 100);
+      const episodes = listEpisodes.all(auth.user_id, limit) as any[];
+      return json({ episodes });
+    }
+
+    if (/^\/episodes\/\d+$/.test(url.pathname) && method === "GET") {
+      const id = Number(url.pathname.split("/")[2]);
+      const episode = getEpisode.get(id) as any;
+      if (!episode) return errorResponse("Episode not found", 404);
+      const memories = getEpisodeMemories.all(id) as any[];
+      for (const m of memories) {
+        try { m.tags = JSON.parse(m.tags); } catch { m.tags = []; }
+      }
+      return json({ ...episode, memories });
+    }
+
+    if (/^\/episodes\/\d+$/.test(url.pathname) && method === "PATCH") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const id = Number(url.pathname.split("/")[2]);
+        const body = await req.json() as any;
+        updateEpisode.run(body.title || null, body.summary || null, body.ended_at || null, id);
+        return json({ updated: true, id });
+      } catch (e: any) {
+        return errorResponse(`Failed to update episode: ${e.message}`, 500);
+      }
+    }
+
+    if (/^\/episodes\/\d+\/memories$/.test(url.pathname) && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const episodeId = Number(url.pathname.split("/")[2]);
+        const body = await req.json() as any;
+        const memoryIds = body.memory_ids;
+        if (!Array.isArray(memoryIds)) return errorResponse("memory_ids array required");
+        let assigned = 0;
+        for (const mid of memoryIds) {
+          assignToEpisode.run(episodeId, mid);
+          assigned++;
+        }
+        updateEpisode.run(null, null, null, episodeId);
+        return json({ assigned, episode_id: episodeId });
+      } catch (e: any) {
+        return errorResponse(`Failed to assign memories: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // CONSOLIDATION — v4.1
+    // ========================================================================
+
+    if (url.pathname === "/consolidate" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const body = await req.json().catch(() => ({})) as any;
+        const memoryId = body.memory_id; // optional: consolidate specific cluster
+
+        if (memoryId) {
+          const result = await consolidateCluster(memoryId, auth.user_id);
+          if (!result) return json({ consolidated: false, reason: "Cluster too small or already consolidated" });
+          return json({ consolidated: true, summary_id: result.summaryId, archived: result.archivedCount });
+        } else {
+          const total = await runConsolidationSweep(auth.user_id);
+          return json({ consolidated: total > 0, archived: total });
+        }
+      } catch (e: any) {
+        return errorResponse(`Consolidation failed: ${e.message}`, 500);
+      }
+    }
+
+    if (url.pathname === "/consolidations" && method === "GET") {
+      const rows = db.prepare(
+        `SELECT c.id, c.summary_memory_id, c.source_memory_ids, c.cluster_label, c.created_at,
+          m.content as summary_content
+         FROM consolidations c JOIN memories m ON c.summary_memory_id = m.id
+         ORDER BY c.created_at DESC LIMIT 50`
+      ).all() as any[];
+      for (const r of rows) {
+        try { r.source_memory_ids = JSON.parse(r.source_memory_ids); } catch {}
+      }
+      return json({ consolidations: rows });
+    }
+
+    // ========================================================================
+    // DECAY — v4.1
+    // ========================================================================
+
+    if (url.pathname === "/decay/refresh" && method === "POST") {
+      const updated = updateDecayScores();
+      return json({ refreshed: updated });
+    }
+
+    if (url.pathname === "/decay/scores" && method === "GET") {
+      const limit = Math.min(Number(url.searchParams.get("limit") || 20), 100);
+      const order = url.searchParams.get("order") === "asc" ? "ASC" : "DESC";
+      const rows = db.prepare(
+        `SELECT id, content, category, importance, decay_score, access_count, last_accessed_at,
+           created_at, is_static, source_count
+         FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1
+         ORDER BY COALESCE(decay_score, importance) ${order} LIMIT ?`
+      ).all(limit) as any[];
+      return json({ memories: rows });
     }
 
     // ========================================================================
@@ -2342,11 +2991,31 @@ setInterval(() => {
   if (swept > 0) console.log(`Auto-forget sweep: ${swept} memories forgotten`);
 }, FORGET_SWEEP_INTERVAL);
 
-sweepExpiredMemories();
+// Decay score refresh (every 15 minutes)
+setInterval(() => {
+  const updated = updateDecayScores();
+  if (updated > 0) console.log(`Decay refresh: ${updated} scores updated`);
+}, 15 * 60 * 1000);
 
-console.log(`Engram v4.0 listening on ${HOST}:${PORT}`);
+// Auto-consolidation sweep (if LLM configured)
+if (LLM_API_KEY) {
+  setInterval(async () => {
+    try {
+      const consolidated = await runConsolidationSweep();
+      if (consolidated > 0) console.log(`Auto-consolidation: ${consolidated} memories consolidated`);
+    } catch (e: any) {
+      console.error("Auto-consolidation error:", e.message);
+    }
+  }, CONSOLIDATION_INTERVAL);
+}
+
+sweepExpiredMemories();
+updateDecayScores(); // Initial decay score calculation
+
+console.log(`Engram v4.1 listening on ${HOST}:${PORT}`);
 console.log(`Database: ${DB_PATH}`);
 console.log(`Embedding model: ${EMBEDDING_MODEL} (${EMBEDDING_DIM}d)`);
 console.log(`LLM: ${LLM_API_KEY ? `${LLM_MODEL} via ${LLM_URL}` : "not configured"}`);
 console.log(`Auto-link: threshold=${AUTO_LINK_THRESHOLD}, max=${AUTO_LINK_MAX}`);
+console.log(`Decay: half-life=${DECAY_HALF_LIFE_DAYS}d, consolidation=${LLM_API_KEY ? `threshold=${CONSOLIDATION_THRESHOLD}` : "disabled (no LLM)"}`);
 console.log(`Auto-forget sweep: every ${FORGET_SWEEP_INTERVAL / 1000}s`);
