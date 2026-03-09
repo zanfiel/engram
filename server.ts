@@ -216,6 +216,34 @@ try {
   `);
 } catch {}
 
+// v4.2 — Confidence, sync, webhooks
+const v42Columns: [string, string][] = [
+  ["confidence", "REAL NOT NULL DEFAULT 1.0"],
+  ["sync_id", "TEXT"],  // UUID for cross-instance sync
+];
+for (const [col, def] of v42Columns) {
+  try { db.exec(`ALTER TABLE memories ADD COLUMN ${col} ${def}`); } catch {}
+}
+try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_sync_id ON memories(sync_id) WHERE sync_id IS NOT NULL"); } catch {}
+
+// Webhooks table
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS webhooks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      url TEXT NOT NULL,
+      events TEXT NOT NULL DEFAULT '["*"]',
+      secret TEXT,
+      user_id INTEGER DEFAULT 1,
+      active BOOLEAN NOT NULL DEFAULT 1,
+      last_triggered_at TEXT,
+      failure_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_webhooks_user ON webhooks(user_id);
+  `);
+} catch {}
+
 // ============================================================================
 // SCHEMA v4 — Multi-tenant: users, API keys, spaces
 // ============================================================================
@@ -536,6 +564,42 @@ const getClusterMembers = db.prepare(
    ORDER BY m.importance DESC, m.created_at DESC`
 );
 
+// Confidence updates
+const updateConfidence = db.prepare(
+  `UPDATE memories SET confidence = ?, updated_at = datetime('now') WHERE id = ?`
+);
+
+// Webhook queries
+const insertWebhook = db.prepare(
+  `INSERT INTO webhooks (url, events, secret, user_id) VALUES (?, ?, ?, ?) RETURNING id, created_at`
+);
+const listWebhooks = db.prepare(
+  `SELECT id, url, events, active, last_triggered_at, failure_count, created_at
+   FROM webhooks WHERE user_id = ? ORDER BY created_at DESC`
+);
+const deleteWebhook = db.prepare(`DELETE FROM webhooks WHERE id = ? AND user_id = ?`);
+const getActiveWebhooks = db.prepare(
+  `SELECT id, url, events, secret FROM webhooks WHERE active = 1 AND user_id = ?`
+);
+const webhookTriggered = db.prepare(
+  `UPDATE webhooks SET last_triggered_at = datetime('now') WHERE id = ?`
+);
+const webhookFailed = db.prepare(
+  `UPDATE webhooks SET failure_count = failure_count + 1,
+   active = CASE WHEN failure_count >= 9 THEN 0 ELSE active END WHERE id = ?`
+);
+
+// Sync queries
+const getChangesSince = db.prepare(
+  `SELECT id, content, category, source, session_id, importance, tags, confidence,
+     sync_id, is_static, is_forgotten, is_archived, version, created_at, updated_at
+   FROM memories WHERE updated_at > ? AND user_id = ?
+   ORDER BY updated_at ASC LIMIT ?`
+);
+const getMemoryBySyncId = db.prepare(
+  `SELECT id, updated_at FROM memories WHERE sync_id = ?`
+);
+
 const getRecentDynamicMemories = db.prepare(
   `SELECT id, content, category, source_count, created_at
    FROM memories WHERE is_static = 0 AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?
@@ -681,6 +745,7 @@ Respond with ONLY valid JSON (no markdown, no backticks):
       "importance": 1-10
     }
   ],
+  "tags": ["lowercase", "keyword", "tags"],
   "relation_to_existing": {
     "type": "none|updates|extends|duplicate|contradicts|caused_by|prerequisite_for",
     "existing_memory_id": number_or_null,
@@ -698,7 +763,8 @@ Rules:
 - "none" = no meaningful relation to any existing memory
 - For forget_after: use ISO 8601 datetime. Tasks/events might expire in days-weeks. Permanent facts = null.
 - The "facts" array should contain the KEY discrete facts from the content (1-3 facts usually)
-- Category should match the original content's category if it makes sense`;
+- Category should match the original content's category if it makes sense
+- Include a "tags" array: 2-5 lowercase keywords that classify this memory (e.g. ["database", "postgresql", "migration"])`;
 
 async function extractFacts(
   content: string,
@@ -765,18 +831,21 @@ function processExtractionResult(
          WHERE id = ?`
       ).run(newVersion, rootId, existing.id, newMemoryId);
       insertLink.run(newMemoryId, rel.existing_memory_id, 1.0, "updates");
+      propagateConfidence(newMemoryId, "updates", rel.existing_memory_id);
       console.log(`Memory #${newMemoryId} updates #${rel.existing_memory_id} (v${newVersion}, root=#${rootId})`);
     }
   }
 
   if (rel.type === "extends" && rel.existing_memory_id) {
     insertLink.run(newMemoryId, rel.existing_memory_id, 0.9, "extends");
+    propagateConfidence(newMemoryId, "extends", rel.existing_memory_id);
     console.log(`Memory #${newMemoryId} extends #${rel.existing_memory_id}`);
   }
 
   if (rel.type === "contradicts" && rel.existing_memory_id) {
     insertLink.run(newMemoryId, rel.existing_memory_id, 0.85, "contradicts");
     insertLink.run(rel.existing_memory_id, newMemoryId, 0.85, "contradicts");
+    propagateConfidence(newMemoryId, "contradicts", rel.existing_memory_id);
     console.log(`Memory #${newMemoryId} contradicts #${rel.existing_memory_id}`);
   }
 
@@ -804,6 +873,20 @@ function processExtractionResult(
       primaryFact.importance,
       newMemoryId
     );
+  }
+
+  // Auto-tagging: apply LLM-inferred tags if present
+  if ((result as any).tags && Array.isArray((result as any).tags)) {
+    const inferred = (result as any).tags.map((t: any) => String(t).trim().toLowerCase()).filter(Boolean);
+    if (inferred.length > 0) {
+      // Merge with existing tags
+      const mem = getMemoryWithoutEmbedding.get(newMemoryId) as any;
+      let existing: string[] = [];
+      if (mem?.tags) try { existing = JSON.parse(mem.tags); } catch {}
+      const merged = [...new Set([...existing, ...inferred])];
+      db.prepare("UPDATE memories SET tags = ? WHERE id = ?").run(JSON.stringify(merged), newMemoryId);
+      console.log(`Auto-tagged memory #${newMemoryId}: [${merged.join(", ")}]`);
+    }
   }
 }
 
@@ -965,6 +1048,77 @@ async function runConsolidationSweep(userId: number = 1): Promise<number> {
     if (result) totalConsolidated += result.archivedCount;
   }
   return totalConsolidated;
+}
+
+// ============================================================================
+// WEBHOOK EVENT SYSTEM
+// ============================================================================
+
+async function emitWebhookEvent(
+  event: string,
+  payload: Record<string, unknown>,
+  userId: number = 1
+): Promise<void> {
+  const hooks = getActiveWebhooks.all(userId) as Array<{
+    id: number; url: string; events: string; secret: string | null;
+  }>;
+
+  for (const hook of hooks) {
+    try {
+      const events = JSON.parse(hook.events) as string[];
+      if (!events.includes("*") && !events.includes(event)) continue;
+
+      const body = JSON.stringify({ event, timestamp: new Date().toISOString(), data: payload });
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (hook.secret) {
+        const hmac = new Bun.CryptoHasher("sha256", hook.secret).update(body).digest("hex");
+        headers["X-Engram-Signature"] = `sha256=${hmac}`;
+      }
+
+      fetch(hook.url, { method: "POST", headers, body, signal: AbortSignal.timeout(10000) })
+        .then(resp => {
+          if (resp.ok) { webhookTriggered.run(hook.id); }
+          else { webhookFailed.run(hook.id); }
+        })
+        .catch(() => { webhookFailed.run(hook.id); });
+    } catch {}
+  }
+}
+
+// ============================================================================
+// CONFIDENCE PROPAGATION
+// ============================================================================
+
+function propagateConfidence(memoryId: number, relationType: string, existingMemoryId: number): void {
+  if (relationType === "updates") {
+    // Old memory's confidence drops — it's been superseded
+    updateConfidence.run(0.3, existingMemoryId);
+  } else if (relationType === "contradicts") {
+    // Both memories get reduced confidence — conflict needs resolution
+    const existing = getMemoryWithoutEmbedding.get(existingMemoryId) as any;
+    const current = getMemoryWithoutEmbedding.get(memoryId) as any;
+    if (existing) {
+      const newConf = Math.max(0.2, (existing.confidence || 1.0) * 0.6);
+      updateConfidence.run(newConf, existingMemoryId);
+    }
+    if (current) {
+      updateConfidence.run(0.7, memoryId); // newer info gets slight benefit of doubt
+    }
+
+    emitWebhookEvent("contradiction.detected", {
+      memory_id: memoryId,
+      contradicts_memory_id: existingMemoryId,
+      memory_content: current?.content,
+      existing_content: existing?.content,
+    });
+  } else if (relationType === "extends") {
+    // Extended memory gets a small confidence boost — it's been corroborated
+    const existing = getMemoryWithoutEmbedding.get(existingMemoryId) as any;
+    if (existing) {
+      const newConf = Math.min(1.0, (existing.confidence || 1.0) * 1.05);
+      updateConfidence.run(newConf, existingMemoryId);
+    }
+  }
 }
 
 // ============================================================================
@@ -1757,7 +1911,7 @@ const server = Bun.serve({
       const dbSize = Bun.file(DB_PATH).size;
       return json({
         status: "ok",
-        version: 4.1,
+        version: 4.2,
         memories: memCount.count,
         embedded: embCount.count,
         unembedded: noEmbCount,
@@ -1781,6 +1935,13 @@ const server = Bun.serve({
           consolidation: !!LLM_API_KEY,
           typed_relationships: true,
           access_tracking: true,
+          confidence: true,
+          webhooks: true,
+          sync: true,
+          pack: true,
+          prompt_templates: true,
+          auto_tagging: !!LLM_API_KEY,
+          mem0_import: true,
         },
         db_size_mb: Math.round(dbSize / 1048576 * 100) / 100,
       });
@@ -1845,10 +2006,11 @@ const server = Bun.serve({
           1, 1, null, null, 1, 0, 0, null, null, 0
         ) as { id: number; created_at: string };
 
-        // Set user_id, space_id, tags, episode_id
+        // Set user_id, space_id, tags, episode_id, sync_id, confidence
+        const syncId = crypto.randomUUID();
         db.prepare(
-          "UPDATE memories SET user_id = ?, space_id = ?, tags = ?, episode_id = ? WHERE id = ?"
-        ).run(auth.user_id, auth.space_id || null, tagsJson, episodeId, result.id);
+          "UPDATE memories SET user_id = ?, space_id = ?, tags = ?, episode_id = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
+        ).run(auth.user_id, auth.space_id || null, tagsJson, episodeId, syncId, result.id);
 
         // Update episode memory count
         if (episodeId) {
@@ -1896,6 +2058,12 @@ const server = Bun.serve({
             }
           })();
         }
+
+        // Emit webhook event
+        emitWebhookEvent("memory.created", {
+          id: result.id, content: content.trim(), category: category || "general",
+          importance: imp, tags: tagsJson ? JSON.parse(tagsJson) : [], episode_id: episodeId,
+        }, auth.user_id);
 
         return json({
           stored: true,
@@ -2903,11 +3071,345 @@ const server = Bun.serve({
       const order = url.searchParams.get("order") === "asc" ? "ASC" : "DESC";
       const rows = db.prepare(
         `SELECT id, content, category, importance, decay_score, access_count, last_accessed_at,
-           created_at, is_static, source_count
+           created_at, is_static, source_count, confidence
          FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1
          ORDER BY COALESCE(decay_score, importance) ${order} LIMIT ?`
       ).all(limit) as any[];
       return json({ memories: rows });
+    }
+
+    // ========================================================================
+    // CONTEXT WINDOW OPTIMIZER — POST /pack
+    // ========================================================================
+
+    if (url.pathname === "/pack" && method === "POST") {
+      try {
+        const body = await req.json() as any;
+        const context = body.context || "";
+        const tokenBudget = Math.max(100, Math.min(Number(body.tokens) || 4000, 128000));
+        const format = body.format || "text"; // text, json, xml
+
+        // Run recall to get candidate memories
+        const candidates: Array<{ content: string; category: string; importance: number; decay_score: number; confidence: number; score: number; source: string; id: number }> = [];
+
+        // Static facts first
+        const staticFacts = getStaticMemories.all(auth.user_id) as Array<any>;
+        for (const sf of staticFacts) {
+          candidates.push({ ...sf, score: 100, source: "static", decay_score: sf.importance, confidence: sf.confidence || 1 });
+        }
+
+        // Semantic search
+        if (context.trim()) {
+          const semantic = await hybridSearch(context, 50, false, true, true);
+          for (const sr of semantic) {
+            if (!candidates.find(c => c.id === sr.id)) {
+              candidates.push({
+                id: sr.id, content: sr.content, category: sr.category,
+                importance: sr.importance, decay_score: sr.decay_score || sr.importance,
+                confidence: 1, score: sr.score * 50, source: "semantic",
+              });
+            }
+          }
+        }
+
+        // High importance
+        const important = db.prepare(
+          `SELECT id, content, category, importance, decay_score, confidence
+           FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?
+           ORDER BY COALESCE(decay_score, importance) DESC LIMIT 30`
+        ).all(auth.user_id) as Array<any>;
+        for (const m of important) {
+          if (!candidates.find(c => c.id === m.id)) {
+            candidates.push({ ...m, score: (m.decay_score || m.importance) * 2, source: "important" });
+          }
+        }
+
+        // Sort by effective score (score * confidence)
+        candidates.sort((a, b) => (b.score * (b.confidence || 1)) - (a.score * (a.confidence || 1)));
+
+        // Greedy packing within token budget (~4 chars per token)
+        const packed: typeof candidates = [];
+        let tokensUsed = 0;
+        for (const c of candidates) {
+          const memTokens = Math.ceil(c.content.length / 4) + 10; // overhead for formatting
+          if (tokensUsed + memTokens > tokenBudget) continue;
+          packed.push(c);
+          tokensUsed += memTokens;
+        }
+
+        // Track access
+        for (const p of packed) trackAccess.run(p.id);
+
+        // Format output
+        let output: string;
+        if (format === "xml") {
+          output = packed.map(p =>
+            `<memory id="${p.id}" category="${p.category}" importance="${p.importance}">\n${p.content}\n</memory>`
+          ).join("\n");
+        } else if (format === "json") {
+          output = JSON.stringify(packed.map(p => ({
+            id: p.id, content: p.content, category: p.category, importance: p.importance,
+          })));
+        } else {
+          output = packed.map(p => `[${p.category}] ${p.content}`).join("\n\n");
+        }
+
+        return json({
+          packed: output,
+          memories_included: packed.length,
+          tokens_estimated: tokensUsed,
+          token_budget: tokenBudget,
+          utilization: Math.round((tokensUsed / tokenBudget) * 100) + "%",
+        });
+      } catch (e: any) {
+        return errorResponse(`Pack failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // PROMPT TEMPLATE ENGINE — GET /prompt
+    // ========================================================================
+
+    if (url.pathname === "/prompt" && method === "GET") {
+      try {
+        const format = url.searchParams.get("format") || "raw"; // raw, anthropic, openai, llamaindex
+        const tokenBudget = Math.max(100, Math.min(Number(url.searchParams.get("tokens") || 4000), 128000));
+        const context = url.searchParams.get("context") || "";
+
+        // Use pack logic internally
+        const packReq = new Request("http://localhost/pack", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ context, tokens: tokenBudget, format: "text" }),
+        });
+        // Run pack inline
+        const candidates: Array<any> = [];
+        const staticFacts = getStaticMemories.all(auth.user_id) as Array<any>;
+        for (const sf of staticFacts) candidates.push({ ...sf, score: 100 });
+        if (context.trim()) {
+          const semantic = await hybridSearch(context, 30, false, true, true);
+          for (const sr of semantic) {
+            if (!candidates.find((c: any) => c.id === sr.id)) candidates.push({ ...sr, score: sr.score * 50 });
+          }
+        }
+        const important = db.prepare(
+          `SELECT id, content, category, importance, decay_score, confidence
+           FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?
+           ORDER BY COALESCE(decay_score, importance) DESC LIMIT 20`
+        ).all(auth.user_id) as Array<any>;
+        for (const m of important) {
+          if (!candidates.find((c: any) => c.id === m.id)) candidates.push({ ...m, score: (m.decay_score || m.importance) * 2 });
+        }
+        candidates.sort((a: any, b: any) => b.score - a.score);
+
+        const packed: string[] = [];
+        let tokensUsed = 0;
+        for (const c of candidates) {
+          const t = Math.ceil(c.content.length / 4) + 5;
+          if (tokensUsed + t > tokenBudget) continue;
+          packed.push(`[${c.category}] ${c.content}`);
+          tokensUsed += t;
+          trackAccess.run(c.id);
+        }
+
+        const memoryBlock = packed.join("\n\n");
+
+        let prompt: string;
+        if (format === "anthropic") {
+          prompt = `<context>
+<engram-memories count="${packed.length}" tokens="~${tokensUsed}">
+${memoryBlock}
+</engram-memories>
+</context>
+
+The above are persistent memories from previous sessions. Use them to maintain continuity. If a memory contradicts the current conversation, prefer the conversation.`;
+        } else if (format === "openai") {
+          prompt = `# Persistent Memory (Engram)
+The following are ${packed.length} memories from previous sessions (~${tokensUsed} tokens):
+
+${memoryBlock}
+
+Use these memories for context. If they conflict with the current conversation, prefer the conversation.`;
+        } else if (format === "llamaindex") {
+          prompt = `[MEMORY CONTEXT]
+${memoryBlock}
+[/MEMORY CONTEXT]`;
+        } else {
+          prompt = memoryBlock;
+        }
+
+        return json({
+          prompt,
+          format,
+          memories_included: packed.length,
+          tokens_estimated: tokensUsed,
+        });
+      } catch (e: any) {
+        return errorResponse(`Prompt generation failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // WEBHOOKS — v4.2
+    // ========================================================================
+
+    if (url.pathname === "/webhooks" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const body = await req.json() as any;
+        if (!body.url) return errorResponse("url is required");
+        const events = body.events || ["*"];
+        const secret = body.secret || null;
+        const result = insertWebhook.get(body.url, JSON.stringify(events), secret, auth.user_id) as { id: number; created_at: string };
+        return json({ created: true, id: result.id, url: body.url, events });
+      } catch (e: any) {
+        return errorResponse(`Failed to create webhook: ${e.message}`, 500);
+      }
+    }
+
+    if (url.pathname === "/webhooks" && method === "GET") {
+      const hooks = listWebhooks.all(auth.user_id) as any[];
+      for (const h of hooks) {
+        try { h.events = JSON.parse(h.events); } catch {}
+      }
+      return json({ webhooks: hooks });
+    }
+
+    if (url.pathname.match(/^\/webhooks\/\d+$/) && method === "DELETE") {
+      const id = Number(url.pathname.split("/")[2]);
+      deleteWebhook.run(id, auth.user_id);
+      return json({ deleted: true, id });
+    }
+
+    // ========================================================================
+    // SYNC — v4.2 (Multi-instance replication)
+    // ========================================================================
+
+    if (url.pathname === "/sync/changes" && method === "GET") {
+      const since = url.searchParams.get("since") || "1970-01-01T00:00:00";
+      const limit = Math.min(Number(url.searchParams.get("limit") || 100), 1000);
+      const changes = getChangesSince.all(since, auth.user_id, limit) as any[];
+      for (const c of changes) {
+        try { c.tags = c.tags ? JSON.parse(c.tags) : []; } catch { c.tags = []; }
+      }
+      return json({
+        changes,
+        count: changes.length,
+        since,
+        server_time: new Date().toISOString(),
+      });
+    }
+
+    if (url.pathname === "/sync/receive" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const body = await req.json() as any;
+        const memories = body.memories;
+        if (!Array.isArray(memories)) return errorResponse("memories array required");
+
+        let created = 0, updated = 0, skipped = 0;
+        for (const mem of memories) {
+          if (!mem.sync_id || !mem.content) { skipped++; continue; }
+
+          const existing = getMemoryBySyncId.get(mem.sync_id) as any;
+          if (existing) {
+            // Conflict resolution: last-write-wins
+            if (mem.updated_at > existing.updated_at) {
+              db.prepare(
+                `UPDATE memories SET content = ?, category = ?, importance = ?, tags = ?,
+                 confidence = ?, is_static = ?, is_forgotten = ?, is_archived = ?,
+                 updated_at = ? WHERE id = ?`
+              ).run(
+                mem.content, mem.category || "general", mem.importance || 5,
+                mem.tags ? JSON.stringify(mem.tags) : null,
+                mem.confidence ?? 1.0, mem.is_static ? 1 : 0,
+                mem.is_forgotten ? 1 : 0, mem.is_archived ? 1 : 0,
+                mem.updated_at, existing.id
+              );
+              // Re-embed on content change
+              try {
+                const emb = await embed(mem.content);
+                updateMemoryEmbedding.run(embeddingToBuffer(emb), existing.id);
+              } catch {}
+              updated++;
+            } else {
+              skipped++;
+            }
+          } else {
+            // New memory from remote
+            let embBuffer: Buffer | null = null;
+            try { embBuffer = embeddingToBuffer(await embed(mem.content)); } catch {}
+            const result = insertMemory.get(
+              mem.content, mem.category || "general", mem.source || "sync", mem.session_id || null,
+              mem.importance || 5, embBuffer, mem.version || 1, 1, null, null, 1,
+              mem.is_static ? 1 : 0, mem.is_forgotten ? 1 : 0, null, null, 0
+            ) as { id: number; created_at: string };
+            db.prepare(
+              "UPDATE memories SET user_id = ?, sync_id = ?, tags = ?, confidence = ?, is_archived = ? WHERE id = ?"
+            ).run(
+              auth.user_id, mem.sync_id, mem.tags ? JSON.stringify(mem.tags) : null,
+              mem.confidence ?? 1.0, mem.is_archived ? 1 : 0, result.id
+            );
+            if (embBuffer) {
+              const embArray = await embed(mem.content);
+              await autoLink(result.id, embArray);
+            }
+            created++;
+          }
+        }
+
+        return json({ synced: true, created, updated, skipped });
+      } catch (e: any) {
+        return errorResponse(`Sync receive failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // MEM0 IMPORT — v4.2
+    // ========================================================================
+
+    if (url.pathname === "/import/mem0" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const body = await req.json() as any;
+        const memories = body.memories || body.results || body;
+        if (!Array.isArray(memories)) return errorResponse("Expected array of mem0 memories");
+
+        let imported = 0;
+        for (const mem of memories) {
+          // Mem0 format: { id, memory/text/content, metadata?, created_at?, updated_at?, user_id? }
+          const content = mem.memory || mem.text || mem.content;
+          if (!content) continue;
+
+          const category = mem.metadata?.category || mem.category || "general";
+          const source = mem.metadata?.source || mem.source || "mem0-import";
+          const importance = mem.metadata?.importance || 5;
+          const tags = mem.metadata?.tags || ["mem0-import"];
+
+          let embBuffer: Buffer | null = null;
+          let embArray: Float32Array | null = null;
+          try {
+            embArray = await embed(content.trim());
+            embBuffer = embeddingToBuffer(embArray);
+          } catch {}
+
+          const result = insertMemory.get(
+            content.trim(), category, source, null, importance, embBuffer,
+            1, 1, null, null, 1, 0, 0, null, null, 0
+          ) as { id: number; created_at: string };
+
+          db.prepare(
+            "UPDATE memories SET user_id = ?, tags = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
+          ).run(auth.user_id, JSON.stringify(tags), crypto.randomUUID(), result.id);
+
+          if (embArray) await autoLink(result.id, embArray);
+          imported++;
+        }
+
+        return json({ imported, source: "mem0" });
+      } catch (e: any) {
+        return errorResponse(`Mem0 import failed: ${e.message}`, 500);
+      }
     }
 
     // ========================================================================
@@ -3012,7 +3514,7 @@ if (LLM_API_KEY) {
 sweepExpiredMemories();
 updateDecayScores(); // Initial decay score calculation
 
-console.log(`Engram v4.1 listening on ${HOST}:${PORT}`);
+console.log(`Engram v4.2 listening on ${HOST}:${PORT}`);
 console.log(`Database: ${DB_PATH}`);
 console.log(`Embedding model: ${EMBEDDING_MODEL} (${EMBEDDING_DIM}d)`);
 console.log(`LLM: ${LLM_API_KEY ? `${LLM_MODEL} via ${LLM_URL}` : "not configured"}`);
