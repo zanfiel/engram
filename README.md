@@ -437,6 +437,30 @@ server {
 
 10. **Reflection** — On-demand meta-analysis generates insights about themes, progress, and patterns over any time period. Reflections become searchable memories themselves.
 
+11. **Conversation extraction** — Feed raw message arrays (Mem0-compatible `/add` format) and the LLM extracts atomic factual memories from the conversation. Each extracted fact is stored, embedded, and linked independently.
+
+12. **Derived memories** — LLM infers unstated facts from existing memories. If you store "deployed to production at 3am", Engram can derive "team works late hours" with a confidence score. Derived memories are tagged and traceable to their source.
+
+13. **LLM reranker** — Search results pass through an optional LLM reranking stage that reorders by true relevance to the query, not just embedding distance. Opt out per-request with `rerank: false`.
+
+14. **Entities & projects** — Create named entities (people, tools, concepts) and projects, then link memories to them. Scoped search within an entity or project returns only relevant memories. Entity-to-entity relationships model your knowledge topology.
+
+15. **Episodic memory** — Group memories by session. Episodes capture what happened in a single work session, meeting, or interaction. Query episodes by time range or session ID.
+
+16. **Tags** — Memories can be tagged with keywords (auto-generated during fact extraction or manually set). Tag search and tag listing endpoints let you browse memories by topic.
+
+17. **URL ingest** — `POST /ingest` with a URL. Engram fetches the page, extracts readable content, and stores it as a memory with the source URL preserved.
+
+18. **Smart context builder** — `POST /context` assembles a token-budget-aware context window for your agent. Walks the memory graph outward from the most relevant hits, packing as much related context as possible into your token limit.
+
+19. **Webhooks & digests** — Register webhook URLs that fire on memory events (store, update, delete). Scheduled digests summarize recent memory activity and POST to a webhook on a cron schedule.
+
+20. **Cross-instance sync** — `GET /sync/changes` returns memories modified since a timestamp. `POST /sync/receive` accepts memories from another Engram instance. Enables multi-node replication.
+
+21. **Conversation log** — Full CRUD for conversation threads and messages (`/conversations`, `/conversations/:id/messages`). Search across all stored messages with `/messages/search`. Separate from memories — this is raw conversation history.
+
+22. **Import adapters** — `POST /import/mem0` and `POST /import/supermemory` accept exports from those platforms and convert them to Engram format. Zero-friction migration.
+
 ---
 
 ## Comparison
@@ -460,13 +484,15 @@ server {
 | LLM reranker | ✅ | ❌ | ❌ |
 | Fact extraction + auto-tagging | ✅ | ✅ | ❌ |
 | Conversation extraction | ✅ | ✅ | ❌ |
+| Episodic memory | ✅ | ❌ | ❌ |
+| Conversation log + search | ✅ | ❌ | ❌ |
 | Multi-tenant + API keys | ✅ | ✅ | ❌ |
 | Spaces / collections | ✅ | ❌ | ✅ |
 | Entities & projects | ✅ | ❌ | ❌ |
 | Webhooks & digests | ✅ | ❌ | ❌ |
 | Cross-instance sync | ✅ | ❌ | ❌ |
-| MCP server + CLI | ✅ | ❌ | ❌ |
 | URL ingest | ✅ | ❌ | ❌ |
+| Import from Mem0 / Supermemory | ✅ | — | — |
 | Self-hosted | ✅ | ✅ | ✅ |
 | No external API needed | ✅ | ❌ | ❌ |
 | SQLite (zero deps) | ✅ | ❌ | ❌ |
