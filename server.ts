@@ -1942,6 +1942,7 @@ const server = Bun.serve({
           prompt_templates: true,
           auto_tagging: !!LLM_API_KEY,
           mem0_import: true,
+          supermemory_import: true,
         },
         db_size_mb: Math.round(dbSize / 1048576 * 100) / 100,
       });
@@ -3409,6 +3410,79 @@ ${memoryBlock}
         return json({ imported, source: "mem0" });
       } catch (e: any) {
         return errorResponse(`Mem0 import failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // SUPERMEMORY IMPORT — v4.2
+    // ========================================================================
+
+    if (url.pathname === "/import/supermemory" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const body = await req.json() as any;
+        // Supermemory formats:
+        //   v1 API: { documents: [{ content, spaces?, type?, createdAt?, metadata? }] }
+        //   Export: { memories: [{ content/text, space?, tags?, ...}] }
+        //   Raw array: [{ content, ... }]
+        const items = body.documents || body.memories || body.data || (Array.isArray(body) ? body : null);
+        if (!items || !Array.isArray(items)) {
+          return errorResponse("Expected documents/memories array. Accepted shapes: { documents: [...] }, { memories: [...] }, or raw array");
+        }
+
+        let imported = 0, skipped = 0;
+        for (const item of items) {
+          const content = item.content || item.text || item.description || item.raw;
+          if (!content?.trim()) { skipped++; continue; }
+
+          // Map supermemory type → engram category
+          const typeMap: Record<string, string> = {
+            note: "general", tweet: "discovery", page: "discovery",
+            document: "task", bookmark: "discovery", conversation: "state",
+          };
+          const category = item.category
+            || typeMap[item.type?.toLowerCase()]
+            || (item.space?.toLowerCase() === "work" ? "task" : null)
+            || "general";
+
+          // Supermemory spaces → tags
+          const tags: string[] = ["supermemory-import"];
+          if (item.spaces && Array.isArray(item.spaces)) {
+            for (const s of item.spaces) tags.push(String(s).toLowerCase());
+          } else if (item.space) {
+            tags.push(String(item.space).toLowerCase());
+          }
+          if (item.tags && Array.isArray(item.tags)) {
+            for (const t of item.tags) tags.push(String(t).toLowerCase());
+          }
+          if (item.type) tags.push(item.type.toLowerCase());
+
+          const importance = item.importance || item.metadata?.importance || 5;
+          const source = item.source || item.metadata?.source || "supermemory-import";
+
+          let embBuffer: Buffer | null = null;
+          let embArray: Float32Array | null = null;
+          try {
+            embArray = await embed(content.trim());
+            embBuffer = embeddingToBuffer(embArray);
+          } catch {}
+
+          const result = insertMemory.get(
+            content.trim(), category, source, null, importance, embBuffer,
+            1, 1, null, null, 1, 0, 0, null, null, 0
+          ) as { id: number; created_at: string };
+
+          db.prepare(
+            "UPDATE memories SET user_id = ?, tags = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
+          ).run(auth.user_id, JSON.stringify([...new Set(tags)]), crypto.randomUUID(), result.id);
+
+          if (embArray) await autoLink(result.id, embArray);
+          imported++;
+        }
+
+        return json({ imported, skipped, source: "supermemory" });
+      } catch (e: any) {
+        return errorResponse(`Supermemory import failed: ${e.message}`, 500);
       }
     }
 
