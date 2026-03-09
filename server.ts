@@ -363,6 +363,43 @@ try {
   `);
 } catch {}
 
+// v4.5 — Digests, Reflections, Contradiction tracking
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS digests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL DEFAULT 1,
+      schedule TEXT NOT NULL DEFAULT 'daily',
+      webhook_url TEXT NOT NULL,
+      webhook_secret TEXT,
+      include_stats BOOLEAN NOT NULL DEFAULT 1,
+      include_new_memories BOOLEAN NOT NULL DEFAULT 1,
+      include_contradictions BOOLEAN NOT NULL DEFAULT 1,
+      include_reflections BOOLEAN NOT NULL DEFAULT 1,
+      last_sent_at TEXT,
+      next_send_at TEXT,
+      active BOOLEAN NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_digests_next ON digests(next_send_at) WHERE active = 1;
+    CREATE INDEX IF NOT EXISTS idx_digests_user ON digests(user_id);
+
+    CREATE TABLE IF NOT EXISTS reflections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL DEFAULT 1,
+      content TEXT NOT NULL,
+      themes TEXT,
+      period_start TEXT NOT NULL,
+      period_end TEXT NOT NULL,
+      memory_count INTEGER NOT NULL DEFAULT 0,
+      source_memory_ids TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_reflections_user ON reflections(user_id);
+    CREATE INDEX IF NOT EXISTS idx_reflections_period ON reflections(period_end DESC);
+  `);
+} catch {}
+
 // ============================================================================
 // SCHEMA v4 — Multi-tenant: users, API keys, spaces
 // ============================================================================
@@ -1831,6 +1868,141 @@ const GUI_HTML = await Bun.file(import.meta.dir + "/engram-gui.html").text();
 const LOGIN_HTML = await Bun.file(import.meta.dir + "/engram-login.html").text();
 
 // ============================================================================
+// DIGEST HELPERS
+// ============================================================================
+
+async function buildDigestPayload(digest: any, userId: number): Promise<any> {
+  const now = new Date();
+  const sinceStr = digest.last_sent_at || new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString().replace("T", " ").replace("Z", "");
+
+  const payload: any = {
+    type: "engram_digest",
+    schedule: digest.schedule,
+    generated_at: now.toISOString(),
+    period_since: sinceStr,
+  };
+
+  if (digest.include_stats) {
+    const total = (db.prepare("SELECT COUNT(*) as c FROM memories WHERE is_forgotten = 0 AND user_id = ?").get(userId) as any).c;
+    const newCount = (db.prepare("SELECT COUNT(*) as c FROM memories WHERE created_at > ? AND user_id = ?").get(sinceStr, userId) as any).c;
+    const archivedCount = (db.prepare("SELECT COUNT(*) as c FROM memories WHERE is_archived = 1 AND updated_at > ? AND user_id = ?").get(sinceStr, userId) as any).c;
+    const updatedCount = (db.prepare("SELECT COUNT(*) as c FROM memories WHERE updated_at > ? AND created_at <= ? AND user_id = ?").get(sinceStr, sinceStr, userId) as any).c;
+
+    payload.stats = { total_memories: total, new: newCount, updated: updatedCount, archived: archivedCount };
+  }
+
+  if (digest.include_new_memories) {
+    const newMems = db.prepare(
+      `SELECT id, content, category, importance, tags, created_at
+       FROM memories WHERE created_at > ? AND is_forgotten = 0 AND user_id = ?
+       ORDER BY importance DESC, created_at DESC LIMIT 20`
+    ).all(sinceStr, userId) as any[];
+
+    payload.new_memories = newMems.map(m => ({
+      id: m.id, content: m.content.substring(0, 300), category: m.category,
+      importance: m.importance, tags: m.tags ? JSON.parse(m.tags) : [],
+    }));
+  }
+
+  if (digest.include_contradictions) {
+    const contras = db.prepare(
+      `SELECT ml.source_id, ml.target_id,
+         ms.content as a_content, mt.content as b_content
+       FROM memory_links ml
+       JOIN memories ms ON ml.source_id = ms.id
+       JOIN memories mt ON ml.target_id = mt.id
+       WHERE ml.type = 'contradicts' AND ml.created_at > ? AND ms.is_forgotten = 0 AND mt.is_forgotten = 0
+       ORDER BY ml.created_at DESC LIMIT 10`
+    ).all(sinceStr) as any[];
+
+    payload.contradictions = contras.map(c => ({
+      memory_a: { id: c.source_id, content: c.a_content.substring(0, 200) },
+      memory_b: { id: c.target_id, content: c.b_content.substring(0, 200) },
+    }));
+  }
+
+  if (digest.include_reflections) {
+    const refl = db.prepare(
+      `SELECT content, themes, period_start, period_end, created_at FROM reflections
+       WHERE user_id = ? AND created_at > ? ORDER BY created_at DESC LIMIT 1`
+    ).get(userId, sinceStr) as any;
+
+    if (refl) {
+      payload.reflection = {
+        content: refl.content,
+        themes: refl.themes ? JSON.parse(refl.themes) : [],
+        period: { start: refl.period_start, end: refl.period_end },
+      };
+    }
+  }
+
+  return payload;
+}
+
+async function sendDigestWebhook(digest: any, payload: any): Promise<void> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (digest.webhook_secret) {
+    const encoder = new TextEncoder();
+    const key = await crypto.subtle.importKey("raw", encoder.encode(digest.webhook_secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(JSON.stringify(payload)));
+    headers["X-Engram-Signature"] = Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  try {
+    const resp = await fetch(digest.webhook_url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (resp.ok) {
+      db.prepare("UPDATE digests SET last_sent_at = datetime('now'), next_send_at = ? WHERE id = ?").run(
+        calculateNextSend(digest.schedule), digest.id
+      );
+    } else {
+      db.prepare("UPDATE digests SET next_send_at = ? WHERE id = ?").run(
+        calculateNextSend(digest.schedule), digest.id
+      );
+      console.error(`Digest #${digest.id} webhook returned ${resp.status}`);
+    }
+  } catch (e: any) {
+    db.prepare("UPDATE digests SET next_send_at = ? WHERE id = ?").run(
+      calculateNextSend(digest.schedule), digest.id
+    );
+    console.error(`Digest #${digest.id} webhook failed: ${e.message}`);
+  }
+}
+
+function calculateNextSend(schedule: string): string {
+  const now = new Date();
+  let next: Date;
+  if (schedule === "hourly") next = new Date(now.getTime() + 60 * 60 * 1000);
+  else if (schedule === "weekly") next = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  else next = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  return next.toISOString().replace("T", " ").replace("Z", "");
+}
+
+async function processScheduledDigests(): Promise<number> {
+  const nowStr = new Date().toISOString().replace("T", " ").replace("Z", "");
+  const due = db.prepare(
+    `SELECT * FROM digests WHERE active = 1 AND next_send_at <= ? ORDER BY next_send_at ASC LIMIT 10`
+  ).all(nowStr) as any[];
+
+  let sent = 0;
+  for (const digest of due) {
+    try {
+      const payload = await buildDigestPayload(digest, digest.user_id);
+      await sendDigestWebhook(digest, payload);
+      sent++;
+    } catch (e: any) {
+      console.error(`Digest #${digest.id} processing failed: ${e.message}`);
+    }
+  }
+  return sent;
+}
+
+// ============================================================================
 // SERVER
 // ============================================================================
 
@@ -2131,7 +2303,7 @@ const server = Bun.serve({
       const dbSize = Bun.file(DB_PATH).size;
       return json({
         status: "ok",
-        version: 4.4,
+        version: 4.5,
         memories: memCount.count,
         embedded: embCount.count,
         unembedded: noEmbCount,
@@ -2172,6 +2344,13 @@ const server = Bun.serve({
           conversation_extraction: !!LLM_API_KEY,
           derived_memories: !!LLM_API_KEY,
           graph: true,
+          url_ingest: true,
+          contradiction_detection: true,
+          contradiction_resolution: !!LLM_API_KEY,
+          time_travel: true,
+          smart_context: true,
+          reflections: !!LLM_API_KEY,
+          scheduled_digests: true,
         },
         db_size_mb: Math.round(dbSize / 1048576 * 100) / 100,
       });
@@ -2313,6 +2492,976 @@ If no meaningful facts, return {"facts": []}`;
         });
       } catch (e: any) {
         return errorResponse(`Conversation extraction failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // INGEST — Extract memories from URLs or text blobs
+    // ========================================================================
+
+    if (url.pathname === "/ingest" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      if (!LLM_API_KEY) return errorResponse("LLM not configured — /ingest requires fact extraction", 400);
+      try {
+        const body = await req.json() as any;
+        const { url: ingestUrl, text: ingestText, entity_ids, project_ids, episode_id, source } = body;
+
+        if (!ingestUrl && !ingestText) {
+          return errorResponse("Provide 'url' (string) or 'text' (string)");
+        }
+
+        let rawText = "";
+        let ingestSource = source || "ingest";
+        let title = "";
+
+        // --- Fetch URL ---
+        if (ingestUrl) {
+          if (typeof ingestUrl !== "string" || !ingestUrl.match(/^https?:\/\//)) {
+            return errorResponse("url must be a valid http/https URL");
+          }
+          try {
+            const resp = await fetch(ingestUrl, {
+              headers: { "User-Agent": "Engram/4.4 (memory ingest)" },
+              redirect: "follow",
+              signal: AbortSignal.timeout(15000),
+            });
+            if (!resp.ok) return errorResponse(`Fetch failed: ${resp.status} ${resp.statusText}`, 502);
+
+            const contentType = resp.headers.get("content-type") || "";
+            const raw = await resp.text();
+
+            if (contentType.includes("html")) {
+              // Extract title
+              const titleMatch = raw.match(/<title[^>]*>([^<]+)<\/title>/i);
+              title = titleMatch ? titleMatch[1].trim() : new URL(ingestUrl).hostname;
+
+              // Strip HTML to text
+              rawText = raw
+                .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+                .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+                .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, "")
+                .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, "")
+                .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, "")
+                .replace(/<aside[^>]*>[\s\S]*?<\/aside>/gi, "")
+                .replace(/<!--[\s\S]*?-->/g, "")
+                .replace(/<br\s*\/?>/gi, "\n")
+                .replace(/<\/p>/gi, "\n\n")
+                .replace(/<\/div>/gi, "\n")
+                .replace(/<\/li>/gi, "\n")
+                .replace(/<\/h[1-6]>/gi, "\n\n")
+                .replace(/<[^>]+>/g, " ")
+                .replace(/&nbsp;/g, " ")
+                .replace(/&amp;/g, "&")
+                .replace(/&lt;/g, "<")
+                .replace(/&gt;/g, ">")
+                .replace(/&quot;/g, '"')
+                .replace(/&#39;/g, "'")
+                .replace(/\n{3,}/g, "\n\n")
+                .replace(/ {2,}/g, " ")
+                .trim();
+            } else {
+              // Plain text, JSON, etc — use as-is
+              rawText = raw.trim();
+              title = new URL(ingestUrl).pathname.split("/").pop() || ingestUrl;
+            }
+            ingestSource = `url:${ingestUrl}`;
+          } catch (fetchErr: any) {
+            return errorResponse(`Fetch error: ${fetchErr.message}`, 502);
+          }
+        }
+
+        // --- Raw text ---
+        if (ingestText) {
+          if (typeof ingestText !== "string" || ingestText.trim().length === 0) {
+            return errorResponse("text must be a non-empty string");
+          }
+          rawText = ingestText.trim();
+          title = body.title || rawText.substring(0, 60).replace(/\n/g, " ");
+          ingestSource = source || "text";
+        }
+
+        // Truncate to ~12K chars for LLM context
+        const MAX_INGEST = 12000;
+        const truncated = rawText.length > MAX_INGEST;
+        if (truncated) rawText = rawText.substring(0, MAX_INGEST);
+
+        // --- Chunk into segments for extraction ---
+        const CHUNK_SIZE = 3000;
+        const CHUNK_OVERLAP = 200;
+        const chunks: string[] = [];
+        if (rawText.length <= CHUNK_SIZE) {
+          chunks.push(rawText);
+        } else {
+          let pos = 0;
+          while (pos < rawText.length) {
+            let end = Math.min(pos + CHUNK_SIZE, rawText.length);
+            // Try to break at paragraph or sentence boundary
+            if (end < rawText.length) {
+              const paraBreak = rawText.lastIndexOf("\n\n", end);
+              if (paraBreak > pos + CHUNK_SIZE * 0.5) end = paraBreak;
+              else {
+                const sentBreak = rawText.lastIndexOf(". ", end);
+                if (sentBreak > pos + CHUNK_SIZE * 0.5) end = sentBreak + 1;
+              }
+            }
+            chunks.push(rawText.substring(pos, end));
+            pos = end > pos ? end - CHUNK_OVERLAP : end + 1;
+            if (pos >= rawText.length) break;
+          }
+        }
+
+        // --- Extract facts from each chunk ---
+        const allFacts: Array<{ id: number; content: string; category: string }> = [];
+        let chunkNum = 0;
+
+        for (const chunk of chunks) {
+          chunkNum++;
+          const extractionPrompt = `You are a fact extraction engine. Analyze this text and extract distinct, atomic facts worth remembering long-term.
+
+Source: ${title}${ingestUrl ? ` (${ingestUrl})` : ""}
+Chunk ${chunkNum}/${chunks.length}${truncated ? " (document was truncated)" : ""}
+
+Rules:
+- Each fact should be ONE self-contained statement. Under 50 words each.
+- Skip boilerplate, navigation text, ads, cookie notices, and filler.
+- Preserve specific numbers, names, dates, and technical details.
+- For each fact, classify:
+  - category: task|discovery|decision|state|issue|general
+  - importance: 1-10
+  - is_static: true if permanent/rarely-changing, false if temporal
+  - tags: 2-5 lowercase keyword tags
+- If the text has no meaningful facts, return {"facts": []}
+
+Return JSON:
+{
+  "facts": [
+    {
+      "content": "extracted fact as a clear statement",
+      "category": "discovery",
+      "importance": 7,
+      "is_static": true,
+      "tags": ["keyword1", "keyword2"]
+    }
+  ]
+}`;
+
+          const llmResp = await callLLM(extractionPrompt, chunk);
+          if (!llmResp) continue;
+
+          let extracted: { facts: Array<any> };
+          try {
+            const cleaned = llmResp.replace(/```json\n?|\n?```/g, "").trim();
+            try {
+              extracted = JSON.parse(cleaned);
+            } catch {
+              const jsonMatch = cleaned.match(/\{[\s\S]*"facts"[\s\S]*\}/);
+              if (jsonMatch) extracted = JSON.parse(jsonMatch[0]);
+              else continue;
+            }
+          } catch { continue; }
+
+          if (!extracted.facts?.length) continue;
+
+          for (const fact of extracted.facts) {
+            if (!fact.content?.trim()) continue;
+
+            let embBuffer: Buffer | null = null;
+            let embArray: Float32Array | null = null;
+            try {
+              embArray = await embed(fact.content.trim());
+              embBuffer = embeddingToBuffer(embArray);
+            } catch {}
+
+            const result = insertMemory.get(
+              fact.content.trim(), fact.category || "general", ingestSource, null,
+              fact.importance || DEFAULT_IMPORTANCE, embBuffer,
+              1, 1, null, null, 1, fact.is_static ? 1 : 0, 0,
+              null, null, 0
+            ) as { id: number; created_at: string };
+
+            const syncId = crypto.randomUUID();
+            const tags = fact.tags?.length ? JSON.stringify(fact.tags) : null;
+            db.prepare(
+              "UPDATE memories SET user_id = ?, space_id = ?, tags = ?, episode_id = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
+            ).run(auth.user_id, auth.space_id || null, tags, episode_id || null, syncId, result.id);
+
+            if (entity_ids) for (const eid of entity_ids) linkMemoryEntity.run(result.id, eid);
+            if (project_ids) for (const pid of project_ids) linkMemoryProject.run(result.id, pid);
+
+            if (embArray) await autoLink(result.id, embArray);
+
+            if (LLM_API_KEY) {
+              (async () => {
+                try {
+                  const extraction = await extractFacts(result.id, fact.content.trim(), embArray!);
+                  if (extraction) processExtractionResult(result.id, extraction, embArray!);
+                } catch {}
+              })();
+            }
+
+            emitWebhookEvent("memory.created", {
+              id: result.id, content: fact.content.trim(), category: fact.category || "general",
+              importance: fact.importance || DEFAULT_IMPORTANCE, source: ingestSource,
+            }, auth.user_id);
+
+            allFacts.push({ id: result.id, content: fact.content.trim(), category: fact.category || "general" });
+          }
+        }
+
+        return json({
+          ingested: allFacts.length,
+          facts: allFacts,
+          source: ingestSource,
+          title,
+          chunks_processed: chunks.length,
+          truncated,
+        });
+      } catch (e: any) {
+        return errorResponse(`Ingest failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // CONTRADICTION DETECTION — find conflicting memories
+    // ========================================================================
+
+    if (url.pathname === "/contradictions" && method === "GET") {
+      try {
+        const threshold = Number(url.searchParams.get("threshold") || 0.6);
+        const limitParam = Math.min(Number(url.searchParams.get("limit") || 30), 100);
+        const useLLM = url.searchParams.get("verify") === "true" && !!LLM_API_KEY;
+
+        // Get all contradicts-type links first (already detected by fact extraction)
+        const knownContradictions = db.prepare(
+          `SELECT ml.source_id, ml.target_id, ml.similarity,
+             ms.content as source_content, ms.category as source_category, ms.created_at as source_created,
+             mt.content as target_content, mt.category as target_category, mt.created_at as target_created
+           FROM memory_links ml
+           JOIN memories ms ON ml.source_id = ms.id
+           JOIN memories mt ON ml.target_id = mt.id
+           WHERE ml.type = 'contradicts' AND ms.is_forgotten = 0 AND mt.is_forgotten = 0
+           ORDER BY ml.created_at DESC LIMIT ?`
+        ).all(limitParam) as any[];
+
+        const contradictions: Array<{
+          memory_a: { id: number; content: string; category: string; created_at: string };
+          memory_b: { id: number; content: string; category: string; created_at: string };
+          similarity: number;
+          source: string;
+          verified?: boolean;
+          explanation?: string;
+        }> = [];
+
+        // Add known contradictions
+        for (const c of knownContradictions) {
+          contradictions.push({
+            memory_a: { id: c.source_id, content: c.source_content, category: c.source_category, created_at: c.source_created },
+            memory_b: { id: c.target_id, content: c.target_content, category: c.target_category, created_at: c.target_created },
+            similarity: c.similarity,
+            source: "link",
+          });
+        }
+
+        // Scan for potential contradictions: high similarity but different content patterns
+        // Same category memories with high embedding similarity often contain updates/contradictions
+        if (contradictions.length < limitParam) {
+          const allMems = getLatestEmbeddings.all() as Array<{
+            id: number; content: string; category: string; importance: number;
+            embedding: Buffer; is_static: boolean; source_count: number;
+          }>;
+
+          const seenPairs = new Set(contradictions.map(c =>
+            `${Math.min(c.memory_a.id, c.memory_b.id)}-${Math.max(c.memory_a.id, c.memory_b.id)}`
+          ));
+
+          const candidates: Array<{ a: any; b: any; sim: number }> = [];
+
+          for (let i = 0; i < allMems.length && candidates.length < limitParam * 3; i++) {
+            const embA = bufferToEmbedding(allMems[i].embedding);
+            for (let j = i + 1; j < allMems.length; j++) {
+              const pairKey = `${Math.min(allMems[i].id, allMems[j].id)}-${Math.max(allMems[i].id, allMems[j].id)}`;
+              if (seenPairs.has(pairKey)) continue;
+
+              // Same or related category + high similarity = potential contradiction
+              if (allMems[i].category !== allMems[j].category && threshold < 0.8) continue;
+
+              const embB = bufferToEmbedding(allMems[j].embedding);
+              const sim = cosineSimilarity(embA, embB);
+
+              // Sweet spot: similar enough to be about the same thing (>0.6) but not identical (>0.95)
+              if (sim >= threshold && sim < 0.95) {
+                candidates.push({ a: allMems[i], b: allMems[j], sim });
+                seenPairs.add(pairKey);
+              }
+            }
+          }
+
+          candidates.sort((x, y) => y.sim - x.sim);
+          const toVerify = candidates.slice(0, limitParam - contradictions.length);
+
+          if (useLLM && toVerify.length > 0) {
+            // Batch verify with LLM
+            const pairs = toVerify.map((c, i) =>
+              `[Pair ${i}]\nA (#${c.a.id}): ${c.a.content.substring(0, 300)}\nB (#${c.b.id}): ${c.b.content.substring(0, 300)}`
+            ).join("\n\n");
+
+            const verifyPrompt = `You detect contradictions between memory pairs. For each pair, determine if they CONTRADICT each other (state conflicting facts about the same thing).
+
+NOT contradictions: updates (B supersedes A), extensions (B adds to A), or unrelated.
+IS a contradiction: A says X, B says NOT-X or a different value for the same property.
+
+Return JSON array:
+[
+  { "pair": 0, "contradicts": true/false, "explanation": "brief reason" },
+  ...
+]
+
+Only include pairs that are actual contradictions.`;
+
+            try {
+              const resp = await callLLM(verifyPrompt, pairs);
+              const cleaned = resp.replace(/```json\n?|\n?```/g, "").trim();
+              const results = JSON.parse(cleaned) as Array<{ pair: number; contradicts: boolean; explanation: string }>;
+
+              for (const r of results) {
+                if (r.contradicts && toVerify[r.pair]) {
+                  const c = toVerify[r.pair];
+                  contradictions.push({
+                    memory_a: { id: c.a.id, content: c.a.content, category: c.a.category, created_at: "" },
+                    memory_b: { id: c.b.id, content: c.b.content, category: c.b.category, created_at: "" },
+                    similarity: Math.round(c.sim * 1000) / 1000,
+                    source: "scan",
+                    verified: true,
+                    explanation: r.explanation,
+                  });
+                }
+              }
+            } catch (llmErr: any) {
+              // Fall back to returning unverified candidates
+              for (const c of toVerify) {
+                contradictions.push({
+                  memory_a: { id: c.a.id, content: c.a.content, category: c.a.category, created_at: "" },
+                  memory_b: { id: c.b.id, content: c.b.content, category: c.b.category, created_at: "" },
+                  similarity: Math.round(c.sim * 1000) / 1000,
+                  source: "scan",
+                  verified: false,
+                });
+              }
+            }
+          } else {
+            for (const c of toVerify) {
+              contradictions.push({
+                memory_a: { id: c.a.id, content: c.a.content, category: c.a.category, created_at: "" },
+                memory_b: { id: c.b.id, content: c.b.content, category: c.b.category, created_at: "" },
+                similarity: Math.round(c.sim * 1000) / 1000,
+                source: "scan",
+              });
+            }
+          }
+        }
+
+        return json({
+          contradictions: contradictions.slice(0, limitParam),
+          total: contradictions.length,
+          threshold,
+          verified: useLLM,
+        });
+      } catch (e: any) {
+        return errorResponse(`Contradiction scan failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // CONTRADICTION RESOLUTION — resolve a specific contradiction
+    // ========================================================================
+
+    if (url.pathname === "/contradictions/resolve" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const body = await req.json() as any;
+        const { memory_a_id, memory_b_id, resolution } = body;
+        // resolution: "keep_a" | "keep_b" | "keep_both" | "merge"
+
+        if (!memory_a_id || !memory_b_id || !resolution) {
+          return errorResponse("memory_a_id, memory_b_id, and resolution (keep_a|keep_b|keep_both|merge) required");
+        }
+
+        const memA = getMemory.get(memory_a_id) as any;
+        const memB = getMemory.get(memory_b_id) as any;
+        if (!memA || !memB) return errorResponse("One or both memories not found", 404);
+
+        if (resolution === "keep_a") {
+          markArchived.run(memory_b_id);
+          insertLink.run(memory_a_id, memory_b_id, 1.0, "resolves");
+          // Remove contradicts links
+          db.prepare("DELETE FROM memory_links WHERE type = 'contradicts' AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))").run(memory_a_id, memory_b_id, memory_b_id, memory_a_id);
+          return json({ resolved: true, kept: memory_a_id, archived: memory_b_id });
+        }
+
+        if (resolution === "keep_b") {
+          markArchived.run(memory_a_id);
+          insertLink.run(memory_b_id, memory_a_id, 1.0, "resolves");
+          db.prepare("DELETE FROM memory_links WHERE type = 'contradicts' AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))").run(memory_a_id, memory_b_id, memory_b_id, memory_a_id);
+          return json({ resolved: true, kept: memory_b_id, archived: memory_a_id });
+        }
+
+        if (resolution === "keep_both") {
+          // Remove the contradiction link, mark as intentional
+          db.prepare("DELETE FROM memory_links WHERE type = 'contradicts' AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))").run(memory_a_id, memory_b_id, memory_b_id, memory_a_id);
+          insertLink.run(memory_a_id, memory_b_id, 0.9, "related");
+          return json({ resolved: true, action: "kept_both", linked: true });
+        }
+
+        if (resolution === "merge" && LLM_API_KEY) {
+          const mergeResp = await callLLM(
+            `Merge these two contradicting memories into a single accurate memory. Preserve the most recent/correct information. Return JSON: {"content": "merged text", "category": "category"}`,
+            `Memory A (#${memA.id}, created ${memA.created_at}): ${memA.content}\n\nMemory B (#${memB.id}, created ${memB.created_at}): ${memB.content}`
+          );
+          const cleaned = mergeResp.replace(/```json\n?|\n?```/g, "").trim();
+          const merged = JSON.parse(cleaned) as { content: string; category: string };
+
+          let embBuffer: Buffer | null = null;
+          let embArray: Float32Array | null = null;
+          try { embArray = await embed(merged.content); embBuffer = embeddingToBuffer(embArray); } catch {}
+
+          const result = insertMemory.get(
+            merged.content, merged.category || memA.category, "contradiction-merge", null,
+            Math.max(memA.importance, memB.importance), embBuffer,
+            1, 1, null, null, (memA.source_count || 1) + (memB.source_count || 1), 0, 0, null, null, 0
+          ) as { id: number; created_at: string };
+          db.prepare("UPDATE memories SET user_id = ? WHERE id = ?").run(auth.user_id, result.id);
+
+          markArchived.run(memory_a_id);
+          markArchived.run(memory_b_id);
+          insertLink.run(result.id, memory_a_id, 1.0, "resolves");
+          insertLink.run(result.id, memory_b_id, 1.0, "resolves");
+          db.prepare("DELETE FROM memory_links WHERE type = 'contradicts' AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))").run(memory_a_id, memory_b_id, memory_b_id, memory_a_id);
+
+          if (embArray) await autoLink(result.id, embArray);
+
+          return json({ resolved: true, merged_memory_id: result.id, content: merged.content, archived: [memory_a_id, memory_b_id] });
+        }
+
+        return errorResponse("Invalid resolution. Use: keep_a, keep_b, keep_both, merge");
+      } catch (e: any) {
+        return errorResponse(`Resolution failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // TIME-TRAVEL — query memory state at a point in time
+    // ========================================================================
+
+    if (url.pathname === "/timetravel" && method === "POST") {
+      try {
+        const body = await req.json() as any;
+        const { as_of, query, category, limit: lim } = body;
+
+        if (!as_of) return errorResponse("as_of (ISO datetime) required");
+
+        const asOfDate = new Date(as_of);
+        if (isNaN(asOfDate.getTime())) return errorResponse("as_of must be valid ISO datetime");
+
+        const asOfStr = asOfDate.toISOString().replace("T", " ").replace("Z", "");
+        const resultLimit = Math.min(Number(lim) || 50, 200);
+
+        // Get memories that existed at as_of, considering version chains
+        // A memory was "current" at time T if:
+        // 1. It was created before T
+        // 2. It was either still is_latest OR was superseded after T
+        let timeMemories: any[];
+
+        if (query) {
+          // Semantic search within the time window
+          const embQ = await embed(query);
+          const allMems = db.prepare(
+            `SELECT id, content, category, source, importance, embedding, created_at, updated_at,
+               version, is_latest, root_memory_id, parent_memory_id, is_static, is_forgotten, tags,
+               is_archived, confidence, decay_score
+             FROM memories
+             WHERE created_at <= ? AND is_forgotten = 0 AND embedding IS NOT NULL AND user_id = ?
+             ORDER BY created_at DESC`
+          ).all(asOfStr, auth.user_id) as any[];
+
+          // For version chains, find which version was current at as_of
+          const rootLatest = new Map<number, any>(); // root_id -> best version at as_of
+          const standalone: any[] = [];
+
+          for (const m of allMems) {
+            if (m.root_memory_id) {
+              const rootId = m.root_memory_id;
+              const existing = rootLatest.get(rootId);
+              if (!existing || new Date(m.created_at) > new Date(existing.created_at)) {
+                rootLatest.set(rootId, m);
+              }
+            } else if (!m.parent_memory_id) {
+              // Check if this was later superseded — if so, check if superseded after as_of
+              const laterVersion = db.prepare(
+                `SELECT id, created_at FROM memories WHERE parent_memory_id = ? AND created_at <= ? ORDER BY created_at ASC LIMIT 1`
+              ).get(m.id, asOfStr) as any;
+
+              if (!laterVersion) {
+                standalone.push(m); // No later version at that time — this was current
+              }
+              // If there IS a later version, that version will be picked up by the root chain logic
+            }
+          }
+
+          const candidates = [...standalone, ...Array.from(rootLatest.values())];
+
+          // Score by semantic similarity
+          const scored = candidates.map(m => {
+            const emb = bufferToEmbedding(m.embedding);
+            const sim = cosineSimilarity(embQ, emb);
+            return { ...m, similarity: sim, embedding: undefined };
+          }).filter(m => m.similarity > 0.3);
+
+          scored.sort((a, b) => b.similarity - a.similarity);
+          timeMemories = scored.slice(0, resultLimit);
+        } else {
+          // Just list memories as of that time
+          let catFilter = "";
+          const params: any[] = [asOfStr, auth.user_id];
+          if (category) {
+            catFilter = " AND category = ?";
+            params.push(category);
+          }
+          params.push(resultLimit);
+
+          timeMemories = db.prepare(
+            `SELECT id, content, category, source, importance, created_at, updated_at,
+               version, is_latest, root_memory_id, is_static, tags, confidence
+             FROM memories
+             WHERE created_at <= ? AND is_forgotten = 0 AND user_id = ?${catFilter}
+             AND (is_latest = 1 OR updated_at > ?)
+             ORDER BY created_at DESC LIMIT ?`
+          ).all(...[...params.slice(0, -1), asOfStr, ...params.slice(-1)]) as any[];
+        }
+
+        // Count stats at that time
+        const statsAtTime = db.prepare(
+          `SELECT COUNT(*) as total,
+             SUM(CASE WHEN is_static = 1 THEN 1 ELSE 0 END) as static_count,
+             SUM(CASE WHEN category = 'task' THEN 1 ELSE 0 END) as tasks,
+             SUM(CASE WHEN category = 'state' THEN 1 ELSE 0 END) as states,
+             SUM(CASE WHEN category = 'decision' THEN 1 ELSE 0 END) as decisions,
+             SUM(CASE WHEN category = 'discovery' THEN 1 ELSE 0 END) as discoveries,
+             SUM(CASE WHEN category = 'issue' THEN 1 ELSE 0 END) as issues
+           FROM memories WHERE created_at <= ? AND is_forgotten = 0 AND user_id = ?`
+        ).get(asOfStr, auth.user_id) as any;
+
+        return json({
+          as_of: as_of,
+          query: query || null,
+          memories: timeMemories.map(m => ({
+            id: m.id,
+            content: m.content,
+            category: m.category,
+            source: m.source,
+            importance: m.importance,
+            version: m.version,
+            is_static: !!m.is_static,
+            tags: m.tags ? JSON.parse(m.tags) : [],
+            created_at: m.created_at,
+            similarity: m.similarity || undefined,
+          })),
+          stats: statsAtTime,
+          total_returned: timeMemories.length,
+        });
+      } catch (e: any) {
+        return errorResponse(`Time-travel failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // SMART CONTEXT BUILDER — optimal RAG context within token budget
+    // ========================================================================
+
+    if (url.pathname === "/context" && method === "POST") {
+      try {
+        const body = await req.json() as any;
+        const { query, max_tokens, include_static, include_recent, strategy } = body;
+
+        if (!query || typeof query !== "string") return errorResponse("query (string) required");
+
+        const tokenBudget = Math.min(Number(max_tokens) || 4000, 32000);
+        const includeStatic = include_static !== false; // default true
+        const includeRecent = include_recent !== false; // default true
+        const contextStrategy = strategy || "balanced"; // balanced | precision | breadth
+
+        // Rough token estimation: ~4 chars per token
+        const estimateTokens = (text: string) => Math.ceil(text.length / 4);
+
+        interface ContextBlock {
+          id: number;
+          content: string;
+          category: string;
+          score: number;
+          source: string; // "static" | "semantic" | "recent" | "linked"
+          tokens: number;
+        }
+
+        const blocks: ContextBlock[] = [];
+        let usedTokens = 0;
+
+        // Phase 1: Static facts (always highest priority — these define identity/config)
+        if (includeStatic) {
+          const statics = getStaticMemories.all(auth.user_id) as any[];
+          for (const s of statics) {
+            const tokens = estimateTokens(s.content);
+            if (usedTokens + tokens > tokenBudget * 0.4) break; // cap statics at 40% of budget
+            blocks.push({
+              id: s.id, content: s.content, category: s.category,
+              score: 100, source: "static", tokens,
+            });
+            usedTokens += tokens;
+          }
+        }
+
+        // Phase 2: Semantic search (core relevance)
+        const semanticBudget = contextStrategy === "precision" ? 0.5 : contextStrategy === "breadth" ? 0.3 : 0.4;
+        const semanticLimit = contextStrategy === "precision" ? 30 : contextStrategy === "breadth" ? 50 : 40;
+        const semanticResults = await hybridSearch(query, semanticLimit, false, true, RERANKER_ENABLED && !!LLM_API_KEY);
+
+        const seenIds = new Set(blocks.map(b => b.id));
+        for (const r of semanticResults) {
+          if (seenIds.has(r.id)) continue;
+          const tokens = estimateTokens(r.content);
+          if (usedTokens + tokens > tokenBudget * (0.4 + semanticBudget)) break;
+          blocks.push({
+            id: r.id, content: r.content, category: r.category,
+            score: r.combined_score || r.semantic_score || 0, source: "semantic", tokens,
+          });
+          seenIds.add(r.id);
+          usedTokens += tokens;
+        }
+
+        // Phase 3: Linked memories (expand context graph)
+        if (contextStrategy !== "precision" && usedTokens < tokenBudget * 0.85) {
+          const semanticIds = blocks.filter(b => b.source === "semantic").slice(0, 5).map(b => b.id);
+          for (const sid of semanticIds) {
+            const linked = getLinksFor.all(sid, sid) as any[];
+            for (const l of linked) {
+              if (seenIds.has(l.id) || l.is_forgotten) continue;
+              const tokens = estimateTokens(l.content);
+              if (usedTokens + tokens > tokenBudget * 0.9) break;
+              blocks.push({
+                id: l.id, content: l.content, category: l.category,
+                score: l.similarity * 50, source: "linked", tokens,
+              });
+              seenIds.add(l.id);
+              usedTokens += tokens;
+            }
+          }
+        }
+
+        // Phase 4: Recent memories (temporal context)
+        if (includeRecent && usedTokens < tokenBudget * 0.95) {
+          const recent = getRecentDynamicMemories.all(auth.user_id, 10) as any[];
+          for (const r of recent) {
+            if (seenIds.has(r.id)) continue;
+            const tokens = estimateTokens(r.content);
+            if (usedTokens + tokens > tokenBudget) break;
+            blocks.push({
+              id: r.id, content: r.content, category: r.category,
+              score: 10, source: "recent", tokens,
+            });
+            seenIds.add(r.id);
+            usedTokens += tokens;
+          }
+        }
+
+        // Track access for all included memories
+        for (const b of blocks) trackAccess.run(b.id);
+
+        // Build formatted context string
+        const contextParts: string[] = [];
+        const staticBlocks = blocks.filter(b => b.source === "static");
+        const semanticBlocks = blocks.filter(b => b.source === "semantic");
+        const linkedBlocks = blocks.filter(b => b.source === "linked");
+        const recentBlocks = blocks.filter(b => b.source === "recent");
+
+        if (staticBlocks.length > 0) {
+          contextParts.push("## Permanent Facts\n" + staticBlocks.map(b => `- ${b.content}`).join("\n"));
+        }
+        if (semanticBlocks.length > 0) {
+          contextParts.push("## Relevant Memories\n" + semanticBlocks.map(b => `- [${b.category}] ${b.content}`).join("\n"));
+        }
+        if (linkedBlocks.length > 0) {
+          contextParts.push("## Related Context\n" + linkedBlocks.map(b => `- ${b.content}`).join("\n"));
+        }
+        if (recentBlocks.length > 0) {
+          contextParts.push("## Recent Activity\n" + recentBlocks.map(b => `- [${b.created_at || ""}] ${b.content}`).join("\n"));
+        }
+
+        return json({
+          context: contextParts.join("\n\n"),
+          blocks: blocks.map(b => ({ id: b.id, category: b.category, source: b.source, score: Math.round(b.score * 100) / 100, tokens: b.tokens })),
+          token_estimate: usedTokens,
+          token_budget: tokenBudget,
+          utilization: Math.round(usedTokens / tokenBudget * 100) / 100,
+          strategy: contextStrategy,
+          breakdown: {
+            static: staticBlocks.length,
+            semantic: semanticBlocks.length,
+            linked: linkedBlocks.length,
+            recent: recentBlocks.length,
+          },
+        });
+      } catch (e: any) {
+        return errorResponse(`Context build failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // MEMORY REFLECTIONS — periodic meta-analysis
+    // ========================================================================
+
+    if (url.pathname === "/reflect" && method === "POST") {
+      if (!LLM_API_KEY) return errorResponse("LLM not configured — /reflect requires inference", 400);
+      try {
+        const body = await req.json() as any;
+        const period = body.period || "week"; // day | week | month
+        const force = body.force === true;
+
+        const now = new Date();
+        let periodStart: Date;
+        if (period === "day") periodStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+        else if (period === "month") periodStart = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+        else periodStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+        const periodStartStr = periodStart.toISOString().replace("T", " ").replace("Z", "");
+        const periodEndStr = now.toISOString().replace("T", " ").replace("Z", "");
+
+        // Check if we already reflected on this period
+        if (!force) {
+          const existing = db.prepare(
+            `SELECT id, content, themes, created_at FROM reflections
+             WHERE user_id = ? AND period_start >= ? ORDER BY created_at DESC LIMIT 1`
+          ).get(auth.user_id, periodStartStr) as any;
+          if (existing) {
+            return json({
+              reflection: existing.content,
+              themes: existing.themes ? JSON.parse(existing.themes) : [],
+              period: { start: periodStartStr, end: periodEndStr },
+              cached: true,
+              id: existing.id,
+            });
+          }
+        }
+
+        // Gather memories from the period
+        const periodMemories = db.prepare(
+          `SELECT id, content, category, importance, tags, created_at, is_static, confidence
+           FROM memories WHERE created_at >= ? AND created_at <= ? AND is_forgotten = 0 AND user_id = ?
+           ORDER BY importance DESC, created_at DESC LIMIT 100`
+        ).all(periodStartStr, periodEndStr, auth.user_id) as any[];
+
+        if (periodMemories.length < 3) {
+          return json({
+            reflection: null,
+            message: `Only ${periodMemories.length} memories in the ${period} period — need at least 3 for reflection`,
+            period: { start: periodStartStr, end: periodEndStr },
+          });
+        }
+
+        // Get category distribution
+        const categories: Record<string, number> = {};
+        for (const m of periodMemories) {
+          categories[m.category] = (categories[m.category] || 0) + 1;
+        }
+
+        const memoryList = periodMemories.map(m =>
+          `[#${m.id} ${m.category} imp=${m.importance}] ${m.content.substring(0, 200)}`
+        ).join("\n");
+
+        const reflectPrompt = `You are a reflective intelligence analyzing a collection of memories from a ${period} period. Generate a meta-analysis that identifies:
+
+1. **Key Themes**: The 3-5 dominant themes or areas of focus
+2. **Progress Summary**: What was accomplished and what moved forward
+3. **Patterns**: Recurring patterns, habits, or tendencies
+4. **Unresolved Items**: Things mentioned but not completed or resolved
+5. **Insights**: Non-obvious connections or observations
+
+Category distribution: ${JSON.stringify(categories)}
+Memory count: ${periodMemories.length}
+Period: ${periodStartStr} to ${periodEndStr}
+
+Return JSON:
+{
+  "reflection": "2-3 paragraph natural language reflection",
+  "themes": ["theme1", "theme2", "theme3"],
+  "progress": ["completed item 1", "completed item 2"],
+  "patterns": ["pattern 1", "pattern 2"],
+  "unresolved": ["unresolved item 1"],
+  "insight": "one key non-obvious insight"
+}`;
+
+        const resp = await callLLM(reflectPrompt, memoryList);
+        const cleaned = resp.replace(/```json\n?|\n?```/g, "").trim();
+        let result: any;
+        try {
+          result = JSON.parse(cleaned);
+        } catch {
+          const jsonMatch = cleaned.match(/\{[\s\S]*"reflection"[\s\S]*\}/);
+          if (jsonMatch) result = JSON.parse(jsonMatch[0]);
+          else return errorResponse("LLM returned unparseable reflection", 500);
+        }
+
+        // Store the reflection
+        const reflectionId = db.prepare(
+          `INSERT INTO reflections (user_id, content, themes, period_start, period_end, memory_count, source_memory_ids)
+           VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`
+        ).get(
+          auth.user_id,
+          result.reflection,
+          JSON.stringify(result.themes || []),
+          periodStartStr,
+          periodEndStr,
+          periodMemories.length,
+          JSON.stringify(periodMemories.map((m: any) => m.id))
+        ) as { id: number };
+
+        // Also store the reflection as a memory for future recall
+        let embBuffer: Buffer | null = null;
+        let embArray: Float32Array | null = null;
+        try { embArray = await embed(result.reflection); embBuffer = embeddingToBuffer(embArray); } catch {}
+
+        const reflectionMem = insertMemory.get(
+          `[Reflection: ${period}ly, ${periodStartStr.substring(0, 10)} to ${periodEndStr.substring(0, 10)}] ${result.reflection}`,
+          "discovery", "reflection", null, 7, embBuffer,
+          1, 1, null, null, periodMemories.length, 1, 0, null, null, 1
+        ) as { id: number; created_at: string };
+        db.prepare("UPDATE memories SET user_id = ?, tags = ? WHERE id = ?").run(
+          auth.user_id,
+          JSON.stringify(["reflection", period, ...(result.themes || []).slice(0, 3)]),
+          reflectionMem.id
+        );
+        if (embArray) await autoLink(reflectionMem.id, embArray);
+
+        emitWebhookEvent("reflection.created", {
+          id: reflectionId.id,
+          period,
+          themes: result.themes,
+          memory_count: periodMemories.length,
+        }, auth.user_id);
+
+        return json({
+          id: reflectionId.id,
+          memory_id: reflectionMem.id,
+          reflection: result.reflection,
+          themes: result.themes || [],
+          progress: result.progress || [],
+          patterns: result.patterns || [],
+          unresolved: result.unresolved || [],
+          insight: result.insight || null,
+          period: { start: periodStartStr, end: periodEndStr },
+          memories_analyzed: periodMemories.length,
+          cached: false,
+        });
+      } catch (e: any) {
+        return errorResponse(`Reflection failed: ${e.message}`, 500);
+      }
+    }
+
+    if (url.pathname === "/reflections" && method === "GET") {
+      const limitParam = Math.min(Number(url.searchParams.get("limit") || 10), 50);
+      const reflections = db.prepare(
+        `SELECT id, content, themes, period_start, period_end, memory_count, created_at
+         FROM reflections WHERE user_id = ? ORDER BY created_at DESC LIMIT ?`
+      ).all(auth.user_id, limitParam) as any[];
+
+      return json({
+        reflections: reflections.map(r => ({
+          ...r,
+          themes: r.themes ? JSON.parse(r.themes) : [],
+        })),
+        total: reflections.length,
+      });
+    }
+
+    // ========================================================================
+    // SCHEDULED DIGESTS — webhook delivery of memory summaries
+    // ========================================================================
+
+    if (url.pathname === "/digests" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const body = await req.json() as any;
+        const { webhook_url, webhook_secret, schedule, include_stats, include_new_memories, include_contradictions, include_reflections } = body;
+
+        if (!webhook_url || typeof webhook_url !== "string" || !webhook_url.match(/^https?:\/\//)) {
+          return errorResponse("webhook_url (valid http/https URL) required");
+        }
+
+        const sched = ["hourly", "daily", "weekly"].includes(schedule) ? schedule : "daily";
+
+        // Calculate next send time
+        const now = new Date();
+        let nextSend: Date;
+        if (sched === "hourly") nextSend = new Date(now.getTime() + 60 * 60 * 1000);
+        else if (sched === "weekly") nextSend = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+        else nextSend = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+        const nextSendStr = nextSend.toISOString().replace("T", " ").replace("Z", "");
+
+        const result = db.prepare(
+          `INSERT INTO digests (user_id, schedule, webhook_url, webhook_secret, include_stats, include_new_memories, include_contradictions, include_reflections, next_send_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, created_at`
+        ).get(
+          auth.user_id, sched, webhook_url, webhook_secret || null,
+          include_stats !== false ? 1 : 0,
+          include_new_memories !== false ? 1 : 0,
+          include_contradictions !== false ? 1 : 0,
+          include_reflections !== false ? 1 : 0,
+          nextSendStr
+        ) as { id: number; created_at: string };
+
+        return json({
+          id: result.id,
+          schedule: sched,
+          webhook_url,
+          next_send_at: nextSendStr,
+          created_at: result.created_at,
+        });
+      } catch (e: any) {
+        return errorResponse(`Digest creation failed: ${e.message}`, 500);
+      }
+    }
+
+    if (url.pathname === "/digests" && method === "GET") {
+      const digests = db.prepare(
+        `SELECT id, schedule, webhook_url, include_stats, include_new_memories,
+           include_contradictions, include_reflections, last_sent_at, next_send_at, active, created_at
+         FROM digests WHERE user_id = ? ORDER BY created_at DESC`
+      ).all(auth.user_id) as any[];
+      return json({ digests });
+    }
+
+    if (url.pathname.match(/^\/digests\/\d+$/) && method === "DELETE") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      const digestId = Number(url.pathname.split("/")[2]);
+      db.prepare("DELETE FROM digests WHERE id = ? AND user_id = ?").run(digestId, auth.user_id);
+      return json({ deleted: true, id: digestId });
+    }
+
+    if (url.pathname === "/digests/send" && method === "POST") {
+      // Manually trigger a digest send (for testing)
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const body = await req.json() as any;
+        const digestId = body.digest_id;
+        if (!digestId) return errorResponse("digest_id required");
+
+        const digest = db.prepare("SELECT * FROM digests WHERE id = ? AND user_id = ?").get(digestId, auth.user_id) as any;
+        if (!digest) return errorResponse("Digest not found", 404);
+
+        const payload = await buildDigestPayload(digest, auth.user_id);
+        await sendDigestWebhook(digest, payload);
+
+        return json({ sent: true, digest_id: digestId, payload });
+      } catch (e: any) {
+        return errorResponse(`Digest send failed: ${e.message}`, 500);
       }
     }
 
@@ -4542,7 +5691,17 @@ if (LLM_API_KEY) {
 sweepExpiredMemories();
 updateDecayScores(); // Initial decay score calculation
 
-console.log(`Engram v4.4 listening on ${HOST}:${PORT}`);
+// Digest scheduler — check every 5 minutes for due digests
+setInterval(async () => {
+  try {
+    const sent = await processScheduledDigests();
+    if (sent > 0) console.log(`Digest scheduler: sent ${sent} digest(s)`);
+  } catch (e: any) {
+    console.error("Digest scheduler error:", e.message);
+  }
+}, 5 * 60 * 1000);
+
+console.log(`Engram v4.5 listening on ${HOST}:${PORT}`);
 console.log(`Database: ${DB_PATH}`);
 console.log(`Embedding model: ${EMBEDDING_MODEL} (${EMBEDDING_DIM}d)`);
 console.log(`LLM: ${LLM_API_KEY ? `${LLM_MODEL} via ${LLM_URL}` : "not configured"}`);
