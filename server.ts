@@ -136,12 +136,16 @@ const v3Columns: [string, string][] = [
   ["forget_after", "TEXT"],
   ["forget_reason", "TEXT"],
   ["is_inference", "BOOLEAN NOT NULL DEFAULT 0"],
+  ["is_archived", "BOOLEAN NOT NULL DEFAULT 0"],
 ];
 for (const [col, def] of v3Columns) {
   try { db.exec(`ALTER TABLE memories ADD COLUMN ${col} ${def}`); } catch {}
 }
 try { db.exec("ALTER TABLE memories ADD COLUMN importance INTEGER NOT NULL DEFAULT 5"); } catch {}
 try { db.exec("ALTER TABLE memories ADD COLUMN embedding BLOB"); } catch {}
+
+// v3.1 indexes
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_archived ON memories(is_archived) WHERE is_archived = 1"); } catch {}
 
 // v3 indexes
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_root ON memories(root_memory_id)"); } catch {}
@@ -241,7 +245,7 @@ const getAllEmbeddings = db.prepare(
 
 const getLatestEmbeddings = db.prepare(
   `SELECT id, content, category, importance, embedding, is_static, source_count
-   FROM memories WHERE embedding IS NOT NULL AND is_forgotten = 0 AND is_latest = 1`
+   FROM memories WHERE embedding IS NOT NULL AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1`
 );
 
 const searchMemoriesFTS = db.prepare(
@@ -259,15 +263,15 @@ const searchMemoriesFTS = db.prepare(
 const listRecent = db.prepare(
   `SELECT id, content, category, source, session_id, importance, created_at,
      version, is_latest, parent_memory_id, root_memory_id, source_count,
-     is_static, is_forgotten, is_inference, forget_after
-   FROM memories WHERE is_forgotten = 0 ORDER BY created_at DESC LIMIT ?`
+     is_static, is_forgotten, is_inference, forget_after, is_archived
+   FROM memories WHERE is_forgotten = 0 AND is_archived = 0 ORDER BY created_at DESC LIMIT ?`
 );
 
 const listByCategory = db.prepare(
   `SELECT id, content, category, source, session_id, importance, created_at,
      version, is_latest, parent_memory_id, root_memory_id, source_count,
-     is_static, is_forgotten, is_inference, forget_after
-   FROM memories WHERE category = ? AND is_forgotten = 0 ORDER BY created_at DESC LIMIT ?`
+     is_static, is_forgotten, is_inference, forget_after, is_archived
+   FROM memories WHERE category = ? AND is_forgotten = 0 AND is_archived = 0 ORDER BY created_at DESC LIMIT ?`
 );
 
 const deleteMemory = db.prepare(`DELETE FROM memories WHERE id = ?`);
@@ -276,7 +280,7 @@ const getMemory = db.prepare(`SELECT * FROM memories WHERE id = ?`);
 const getMemoryWithoutEmbedding = db.prepare(
   `SELECT id, content, category, source, session_id, importance, created_at, updated_at,
      version, is_latest, parent_memory_id, root_memory_id, source_count,
-     is_static, is_forgotten, forget_after, forget_reason, is_inference
+     is_static, is_forgotten, forget_after, forget_reason, is_inference, is_archived
    FROM memories WHERE id = ?`
 );
 
@@ -298,6 +302,14 @@ const incrementSourceCount = db.prepare(
 // Forgetting
 const markForgotten = db.prepare(
   `UPDATE memories SET is_forgotten = 1, updated_at = datetime('now') WHERE id = ?`
+);
+
+const markArchived = db.prepare(
+  `UPDATE memories SET is_archived = 1, updated_at = datetime('now') WHERE id = ?`
+);
+
+const markUnarchived = db.prepare(
+  `UPDATE memories SET is_archived = 0, updated_at = datetime('now') WHERE id = ?`
 );
 
 const getExpiredMemories = db.prepare(
@@ -336,13 +348,13 @@ const getNoEmbedding = db.prepare(
 // Profile queries
 const getStaticMemories = db.prepare(
   `SELECT id, content, category, source_count, created_at, updated_at
-   FROM memories WHERE is_static = 1 AND is_forgotten = 0 AND is_latest = 1
+   FROM memories WHERE is_static = 1 AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1
    ORDER BY source_count DESC, updated_at DESC`
 );
 
 const getRecentDynamicMemories = db.prepare(
   `SELECT id, content, category, source_count, created_at
-   FROM memories WHERE is_static = 0 AND is_forgotten = 0 AND is_latest = 1
+   FROM memories WHERE is_static = 0 AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1
    ORDER BY created_at DESC LIMIT ?`
 );
 
@@ -953,269 +965,44 @@ function sanitizeFTS(query: string): string {
 }
 
 // ============================================================================
+// WEB GUI AUTH
+// ============================================================================
+
+const GUI_PASSWORD = process.env.MEGAMIND_GUI_PASSWORD || "changeme";
+const GUI_HMAC_SECRET = "81d4f671221dfd9dc454642a7ca3c8310dbd0a4a0529547ca00c8fa7955de18e";
+const GUI_COOKIE_MAX_AGE = 7 * 24 * 60 * 60;
+
+function guiSignCookie(ts: number): string {
+  const h = new Bun.CryptoHasher("sha256");
+  h.update(GUI_HMAC_SECRET + ":" + String(ts));
+  return ts + "." + h.digest("hex");
+}
+
+function guiVerifyCookie(cookie: string): boolean {
+  const dot = cookie.indexOf(".");
+  if (dot < 1) return false;
+  const ts = cookie.substring(0, dot), sig = cookie.substring(dot + 1);
+  const t = parseInt(ts);
+  if (isNaN(t) || Date.now() / 1000 - t > GUI_COOKIE_MAX_AGE) return false;
+  const h = new Bun.CryptoHasher("sha256");
+  h.update(GUI_HMAC_SECRET + ":" + ts);
+  return h.digest("hex") === sig;
+}
+
+function guiAuthed(req: Request): boolean {
+  const ck = (req.headers.get("cookie") || "")
+    .split(";").map(c => c.trim())
+    .find(c => c.startsWith("megamind_auth="));
+  if (!ck) return false;
+  return guiVerifyCookie(ck.split("=").slice(1).join("="));
+}
+
+// ============================================================================
 // WEB GUI HTML
 // ============================================================================
 
-const GUI_HTML = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MegaMind v3</title>
-<script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"><\/script>
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0a0a0f; color: #e0e0e0; overflow: hidden; height: 100vh; }
-#app { display: grid; grid-template-columns: 1fr 360px; grid-template-rows: 48px 1fr; height: 100vh; }
-#toolbar { grid-column: 1 / -1; background: #12121a; border-bottom: 1px solid #2a2a3a; display: flex; align-items: center; padding: 0 16px; gap: 12px; }
-#toolbar h1 { font-size: 16px; font-weight: 600; color: #8b5cf6; margin-right: 16px; }
-#toolbar input { background: #1a1a2a; border: 1px solid #2a2a3a; border-radius: 6px; padding: 6px 12px; color: #e0e0e0; font-size: 13px; width: 280px; outline: none; }
-#toolbar input:focus { border-color: #8b5cf6; }
-#toolbar button { background: #8b5cf6; color: white; border: none; border-radius: 6px; padding: 6px 14px; font-size: 13px; cursor: pointer; }
-#toolbar button:hover { background: #7c3aed; }
-#toolbar .stats { margin-left: auto; font-size: 12px; color: #888; display: flex; gap: 14px; }
-#toolbar .stats span { color: #8b5cf6; font-weight: 600; }
-.filter-group { display: flex; gap: 4px; }
-.filter-btn { background: #1a1a2a; border: 1px solid #2a2a3a; border-radius: 4px; padding: 3px 8px; font-size: 11px; cursor: pointer; color: #aaa; }
-.filter-btn.active { background: #8b5cf6; border-color: #8b5cf6; color: white; }
-#cy { background: #0a0a0f; }
-#sidebar { background: #12121a; border-left: 1px solid #2a2a3a; overflow-y: auto; padding: 16px; }
-#sidebar h2 { font-size: 14px; color: #8b5cf6; margin-bottom: 12px; }
-#sidebar .empty { color: #555; font-size: 13px; text-align: center; padding-top: 40px; }
-.detail-card { background: #1a1a2a; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
-.detail-card .label { font-size: 11px; color: #666; text-transform: uppercase; margin-bottom: 4px; }
-.detail-card .value { font-size: 13px; line-height: 1.5; word-break: break-word; }
-.detail-card .value.content { max-height: 200px; overflow-y: auto; white-space: pre-wrap; }
-.badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; margin-right: 4px; }
-.badge.task { background: #1e3a5f; color: #5b9bd5; }
-.badge.discovery { background: #1e4d3a; color: #5bd5a0; }
-.badge.decision { background: #4d3a1e; color: #d5a05b; }
-.badge.state { background: #3a1e4d; color: #a05bd5; }
-.badge.issue { background: #4d1e1e; color: #d55b5b; }
-.badge.general { background: #2a2a3a; color: #aaa; }
-.badge.static { background: #1e3a1e; color: #5bd55b; }
-.badge.forgotten { background: #3a1e1e; color: #d55b5b; }
-.badge.latest { background: #1e1e3a; color: #5b5bd5; }
-.link-item { background: #1a1a2a; border-radius: 6px; padding: 8px; margin-bottom: 6px; cursor: pointer; }
-.link-item:hover { background: #222236; }
-.link-item .type { font-size: 10px; font-weight: 600; text-transform: uppercase; }
-.link-item .type.similarity { color: #888; }
-.link-item .type.updates { color: #ef4444; }
-.link-item .type.extends { color: #3b82f6; }
-.link-item .type.derives { color: #22c55e; }
-.link-item .preview { font-size: 12px; color: #aaa; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.version-chain { display: flex; flex-direction: column; gap: 4px; }
-.version-item { background: #1a1a2a; border-radius: 6px; padding: 6px 8px; font-size: 12px; cursor: pointer; border-left: 3px solid #2a2a3a; }
-.version-item.current { border-left-color: #8b5cf6; background: #1e1e2e; }
-.version-item .ver { color: #8b5cf6; font-weight: 600; }
-</style>
-</head>
-<body>
-<div id="app">
-  <div id="toolbar">
-    <h1>MegaMind v3</h1>
-    <input id="search" placeholder="Search memories..." />
-    <button onclick="doSearch()">Search</button>
-    <div class="filter-group">
-      <button class="filter-btn active" data-filter="all" onclick="setFilter('all',this)">All</button>
-      <button class="filter-btn" data-filter="latest" onclick="setFilter('latest',this)">Latest</button>
-      <button class="filter-btn" data-filter="static" onclick="setFilter('static',this)">Static</button>
-      <button class="filter-btn" data-filter="forgotten" onclick="setFilter('forgotten',this)">Forgotten</button>
-    </div>
-    <div class="stats">
-      <div>Memories: <span id="stat-mem">0</span></div>
-      <div>Links: <span id="stat-links">0</span></div>
-      <div>Static: <span id="stat-static">0</span></div>
-      <div>Forgotten: <span id="stat-forgotten">0</span></div>
-    </div>
-  </div>
-  <div id="cy"></div>
-  <div id="sidebar">
-    <h2>Memory Inspector</h2>
-    <div class="empty" id="sidebar-empty">Click a node to inspect</div>
-    <div id="sidebar-content" style="display:none"></div>
-  </div>
-</div>
-<script>
-const BASE = location.origin;
-let cy, graphData, currentFilter = 'all';
-
-const CATEGORY_COLORS = {
-  task: '#5b9bd5', discovery: '#5bd5a0', decision: '#d5a05b',
-  state: '#a05bd5', issue: '#d55b5b', general: '#888'
-};
-const LINK_COLORS = { similarity: '#444', updates: '#ef4444', extends: '#3b82f6', derives: '#22c55e' };
-
-async function loadGraph() {
-  const [gRes, sRes] = await Promise.all([
-    fetch(BASE + '/graph').then(r => r.json()),
-    fetch(BASE + '/stats').then(r => r.json())
-  ]);
-  graphData = gRes;
-  document.getElementById('stat-mem').textContent = sRes.memories?.total ?? 0;
-  document.getElementById('stat-links').textContent = sRes.links?.total ?? 0;
-  document.getElementById('stat-static').textContent = sRes.memories?.static ?? 0;
-  document.getElementById('stat-forgotten').textContent = sRes.memories?.forgotten ?? 0;
-  renderGraph();
-}
-
-function renderGraph() {
-  const nodes = [], edges = [];
-  const mems = graphData.memories || [];
-  const links = graphData.links || [];
-
-  for (const m of mems) {
-    if (currentFilter === 'latest' && !m.is_latest) continue;
-    if (currentFilter === 'static' && !m.is_static) continue;
-    if (currentFilter === 'forgotten' && !m.is_forgotten) continue;
-    if (currentFilter === 'all' && m.is_forgotten) continue;
-    const color = CATEGORY_COLORS[m.category] || '#888';
-    const size = 12 + Math.min(m.importance * 3, 24) + Math.min((m.source_count - 1) * 2, 10);
-    const opacity = m.is_forgotten ? 0.3 : m.is_latest ? 1 : 0.6;
-    nodes.push({ data: {
-      id: 'n' + m.id, memId: m.id, label: m.content.slice(0, 40),
-      color, size, opacity, category: m.category, is_static: m.is_static,
-      is_forgotten: m.is_forgotten, is_latest: m.is_latest, version: m.version
-    }});
-  }
-
-  const nodeIds = new Set(nodes.map(n => n.data.memId));
-  for (const l of links) {
-    if (!nodeIds.has(l.source_id) || !nodeIds.has(l.target_id)) continue;
-    const color = LINK_COLORS[l.type] || '#444';
-    const width = l.type === 'similarity' ? 1 : 2;
-    edges.push({ data: {
-      id: 'e' + l.source_id + '_' + l.target_id + '_' + l.type,
-      source: 'n' + l.source_id, target: 'n' + l.target_id,
-      color, width, type: l.type, similarity: l.similarity
-    }});
-  }
-
-  if (cy) cy.destroy();
-  cy = cytoscape({
-    container: document.getElementById('cy'),
-    elements: { nodes, edges },
-    style: [
-      { selector: 'node', style: {
-        'background-color': 'data(color)', 'width': 'data(size)', 'height': 'data(size)',
-        'label': 'data(label)', 'font-size': '8px', 'color': '#aaa',
-        'text-valign': 'bottom', 'text-margin-y': 4, 'opacity': 'data(opacity)',
-        'border-width': 1, 'border-color': '#333',
-        'text-max-width': '80px', 'text-wrap': 'ellipsis'
-      }},
-      { selector: 'edge', style: {
-        'line-color': 'data(color)', 'width': 'data(width)',
-        'curve-style': 'bezier', 'opacity': 0.6,
-        'target-arrow-shape': 'triangle', 'target-arrow-color': 'data(color)',
-        'arrow-scale': 0.6
-      }},
-      { selector: 'node:selected', style: {
-        'border-width': 3, 'border-color': '#8b5cf6', 'z-index': 999
-      }}
-    ],
-    layout: { name: 'cose', nodeRepulsion: 8000, idealEdgeLength: 100, animate: false },
-    minZoom: 0.1, maxZoom: 5
-  });
-
-  cy.on('tap', 'node', async (e) => {
-    const memId = e.target.data('memId');
-    const res = await fetch(BASE + '/memory/' + memId).then(r => r.json());
-    showDetail(res);
-  });
-
-  cy.on('tap', (e) => { if (e.target === cy) hideDetail(); });
-}
-
-function showDetail(mem) {
-  document.getElementById('sidebar-empty').style.display = 'none';
-  const el = document.getElementById('sidebar-content');
-  el.style.display = 'block';
-
-  let badges = '<span class="badge ' + mem.category + '">' + mem.category + '</span>';
-  if (mem.is_static) badges += '<span class="badge static">static</span>';
-  if (mem.is_forgotten) badges += '<span class="badge forgotten">forgotten</span>';
-  if (mem.is_latest) badges += '<span class="badge latest">latest</span>';
-
-  let html = '<div class="detail-card"><div class="label">ID #' + mem.id + ' v' + (mem.version||1) + ' | source_count: ' + (mem.source_count||1) + '</div>' + badges + '</div>';
-  html += '<div class="detail-card"><div class="label">Content</div><div class="value content">' + escHtml(mem.content) + '</div></div>';
-  html += '<div class="detail-card"><div class="label">Source</div><div class="value">' + (mem.source||'unknown') + '</div></div>';
-  html += '<div class="detail-card"><div class="label">Importance</div><div class="value">' + mem.importance + '/10</div></div>';
-  html += '<div class="detail-card"><div class="label">Created</div><div class="value">' + mem.created_at + '</div></div>';
-
-  if (mem.forget_after) {
-    html += '<div class="detail-card"><div class="label">Forget After</div><div class="value">' + mem.forget_after + (mem.forget_reason ? ' (' + escHtml(mem.forget_reason) + ')' : '') + '</div></div>';
-  }
-
-  if (mem.version_chain && mem.version_chain.length > 0) {
-    html += '<div class="detail-card"><div class="label">Version Chain</div><div class="version-chain">';
-    for (const v of mem.version_chain) {
-      const cls = v.id === mem.id ? 'current' : '';
-      html += '<div class="version-item ' + cls + '" onclick="loadMem(' + v.id + ')"><span class="ver">v' + v.version + '</span> #' + v.id + (v.is_latest ? ' (latest)' : '') + '<br><span style="color:#888;font-size:11px">' + escHtml(v.content.slice(0, 60)) + '</span></div>';
-    }
-    html += '</div></div>';
-  }
-
-  if (mem.links && mem.links.length > 0) {
-    html += '<div class="detail-card"><div class="label">Links (' + mem.links.length + ')</div>';
-    for (const l of mem.links) {
-      html += '<div class="link-item" onclick="loadMem(' + l.id + ')"><span class="type ' + l.type + '">' + l.type + '</span> <span style="color:#666;font-size:10px">' + (l.similarity||0).toFixed(3) + '</span><div class="preview">#' + l.id + ' ' + escHtml(l.content.slice(0, 80)) + '</div></div>';
-    }
-    html += '</div>';
-  }
-
-  el.innerHTML = html;
-}
-
-async function loadMem(id) {
-  const res = await fetch(BASE + '/memory/' + id).then(r => r.json());
-  showDetail(res);
-  cy.$('#n' + id).select();
-}
-
-function hideDetail() {
-  document.getElementById('sidebar-empty').style.display = 'block';
-  document.getElementById('sidebar-content').style.display = 'none';
-}
-
-function setFilter(f, btn) {
-  currentFilter = f;
-  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  renderGraph();
-}
-
-async function doSearch() {
-  const q = document.getElementById('search').value.trim();
-  if (!q) { loadGraph(); return; }
-  const res = await fetch(BASE + '/search', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query: q, limit: 30, include_links: true, expand_relationships: true })
-  }).then(r => r.json());
-
-  if (res.results && res.results.length > 0) {
-    cy.nodes().style('opacity', 0.15);
-    cy.edges().style('opacity', 0.05);
-    for (const r of res.results) {
-      const node = cy.$('#n' + r.id);
-      if (node.length) {
-        node.style('opacity', 1);
-        node.connectedEdges().style('opacity', 0.6);
-        node.connectedEdges().connectedNodes().style('opacity', 0.5);
-      }
-    }
-    showDetail(res.results[0]);
-    const first = cy.$('#n' + res.results[0].id);
-    if (first.length) { cy.animate({ center: { eles: first }, zoom: 2 }, { duration: 300 }); }
-  }
-}
-
-document.getElementById('search').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
-function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-loadGraph();
-<\/script>
-</body>
-</html>`;
+const GUI_HTML = await Bun.file(import.meta.dir + "/megamind-gui.html").text();
+const LOGIN_HTML = await Bun.file(import.meta.dir + "/megamind-login.html").text();
 
 // ============================================================================
 // SERVER
@@ -1243,12 +1030,38 @@ const server = Bun.serve({
     }
 
     // ========================================================================
+    // WEB GUI AUTH
+    // ========================================================================
+    if (url.pathname === "/gui/auth" && method === "POST") {
+      try {
+        const body = await req.json() as { password?: string };
+        if (body.password === GUI_PASSWORD) {
+          const cookie = guiSignCookie(Math.floor(Date.now() / 1000));
+          return new Response(JSON.stringify({ ok: true }), {
+            headers: {
+              "Content-Type": "application/json",
+              "Set-Cookie": `megamind_auth=${cookie}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${GUI_COOKIE_MAX_AGE}`
+            }
+          });
+        }
+        return json({ error: "Invalid password" }, 401);
+      } catch { return json({ error: "Bad request" }, 400); }
+    }
+
+    if (url.pathname === "/gui/logout" && method === "GET") {
+      return new Response(LOGIN_HTML, {
+        headers: { "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "megamind_auth=; Path=/; HttpOnly; Max-Age=0" }
+      });
+    }
+
+    // ========================================================================
     // WEB GUI
     // ========================================================================
     if ((url.pathname === "/" || url.pathname === "/gui") && method === "GET") {
-      return new Response(GUI_HTML, {
-        headers: { "Content-Type": "text/html; charset=utf-8" },
-      });
+      if (guiAuthed(req)) {
+        return new Response(GUI_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+      }
+      return new Response(LOGIN_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
 
     // ========================================================================
@@ -1264,6 +1077,7 @@ const server = Bun.serve({
       const forgottenCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_forgotten = 1").get() as { count: number };
       const staticCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_static = 1 AND is_forgotten = 0").get() as { count: number };
       const versionedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE version > 1").get() as { count: number };
+      const archivedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_archived = 1 AND is_forgotten = 0").get() as { count: number };
       const dbSize = Bun.file(DB_PATH).size;
       return json({
         status: "ok",
@@ -1273,6 +1087,7 @@ const server = Bun.serve({
         unembedded: noEmbCount,
         links: linkCount.count,
         forgotten: forgottenCount.count,
+        archived: archivedCount.count,
         static: staticCount.count,
         versioned: versionedCount.count,
         conversations: convCount.count,
@@ -1413,6 +1228,314 @@ const server = Bun.serve({
         db.prepare("UPDATE memories SET forget_reason = ? WHERE id = ?").run(body.reason, id);
       }
       return json({ forgotten: true, id });
+    }
+
+    // ========================================================================
+    // ARCHIVE / UNARCHIVE
+    // ========================================================================
+
+    if (url.pathname.match(/^\/memory\/\d+\/archive$/) && method === "POST") {
+      const id = Number(url.pathname.split("/")[2]);
+      if (isNaN(id)) return errorResponse("Invalid id");
+      const mem = getMemoryWithoutEmbedding.get(id) as any;
+      if (!mem) return errorResponse("Not found", 404);
+      markArchived.run(id);
+      return json({ archived: true, id });
+    }
+
+    if (url.pathname.match(/^\/memory\/\d+\/unarchive$/) && method === "POST") {
+      const id = Number(url.pathname.split("/")[2]);
+      if (isNaN(id)) return errorResponse("Invalid id");
+      const mem = getMemoryWithoutEmbedding.get(id) as any;
+      if (!mem) return errorResponse("Not found", 404);
+      markUnarchived.run(id);
+      return json({ unarchived: true, id });
+    }
+
+    // ========================================================================
+    // UPDATE (versioned) — creates new version via version chain
+    // ========================================================================
+
+    if (url.pathname.match(/^\/memory\/\d+\/update$/) && method === "POST") {
+      try {
+        const id = Number(url.pathname.split("/")[2]);
+        if (isNaN(id)) return errorResponse("Invalid id");
+        const existing = getMemoryWithoutEmbedding.get(id) as any;
+        if (!existing) return errorResponse("Not found", 404);
+        if (existing.is_forgotten) return errorResponse("Cannot update a forgotten memory", 400);
+
+        const body = await req.json() as any;
+        const newContent = body.content;
+        if (!newContent || typeof newContent !== "string" || newContent.trim().length === 0) {
+          return errorResponse("content is required and must be a non-empty string");
+        }
+
+        const category = body.category || existing.category;
+        const imp = body.importance ? Math.max(1, Math.min(10, Number(body.importance))) : existing.importance;
+
+        // Embed the new content
+        let embBuffer: Buffer | null = null;
+        let embArray: Float32Array | null = null;
+        try {
+          embArray = await embed(newContent.trim());
+          embBuffer = embeddingToBuffer(embArray);
+        } catch (e: any) {
+          console.error("Embedding failed for update:", e.message);
+        }
+
+        // Determine version chain
+        const rootId = existing.root_memory_id || existing.id;
+        const newVersion = (existing.version || 1) + 1;
+
+        // Mark the old memory as superseded
+        markSuperseded.run(id);
+
+        // Insert the new version
+        const result = insertMemory.get(
+          newContent.trim(),
+          category,
+          existing.source,
+          existing.session_id,
+          imp,
+          embBuffer,
+          newVersion,      // version
+          1,               // is_latest
+          id,              // parent_memory_id
+          rootId,          // root_memory_id
+          existing.source_count || 1,
+          existing.is_static ? 1 : 0,
+          0,               // is_forgotten
+          null,            // forget_after
+          null,            // forget_reason
+          existing.is_inference ? 1 : 0
+        ) as { id: number; created_at: string };
+
+        // Link old -> new as "updates"
+        insertLink.run(result.id, id, 1.0, "updates");
+
+        // Auto-link new version
+        let linked = 0;
+        if (embArray) {
+          linked = await autoLink(result.id, embArray);
+        }
+
+        console.log(`Memory #${id} updated -> #${result.id} (v${newVersion}, root=#${rootId})`);
+
+        return json({
+          updated: true,
+          old_id: id,
+          new_id: result.id,
+          version: newVersion,
+          root_id: rootId,
+          linked,
+          embedded: !!embBuffer,
+        });
+      } catch (e: any) {
+        return errorResponse(`Update failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // DUPLICATES — find near-duplicate memory clusters
+    // ========================================================================
+
+    if (url.pathname === "/duplicates" && method === "GET") {
+      try {
+        const threshold = Number(url.searchParams.get("threshold") || 0.85);
+        const limitParam = Math.min(Number(url.searchParams.get("limit") || 50), 200);
+
+        const allMems = getLatestEmbeddings.all() as Array<{
+          id: number; content: string; category: string; importance: number;
+          embedding: Buffer; is_static: boolean; source_count: number;
+        }>;
+
+        // Find clusters of similar memories
+        const clusters: Array<{
+          anchor: { id: number; content: string; category: string };
+          duplicates: Array<{ id: number; content: string; category: string; similarity: number }>;
+        }> = [];
+        const seen = new Set<number>();
+
+        for (let i = 0; i < allMems.length; i++) {
+          if (seen.has(allMems[i].id)) continue;
+          const embA = bufferToEmbedding(allMems[i].embedding);
+          const dupes: Array<{ id: number; content: string; category: string; similarity: number }> = [];
+
+          for (let j = i + 1; j < allMems.length; j++) {
+            if (seen.has(allMems[j].id)) continue;
+            const embB = bufferToEmbedding(allMems[j].embedding);
+            const sim = cosineSimilarity(embA, embB);
+            if (sim >= threshold) {
+              dupes.push({
+                id: allMems[j].id,
+                content: allMems[j].content.substring(0, 200),
+                category: allMems[j].category,
+                similarity: Math.round(sim * 1000) / 1000,
+              });
+              seen.add(allMems[j].id);
+            }
+          }
+
+          if (dupes.length > 0) {
+            seen.add(allMems[i].id);
+            clusters.push({
+              anchor: {
+                id: allMems[i].id,
+                content: allMems[i].content.substring(0, 200),
+                category: allMems[i].category,
+              },
+              duplicates: dupes,
+            });
+            if (clusters.length >= limitParam) break;
+          }
+        }
+
+        return json({ threshold, clusters, total_clusters: clusters.length });
+      } catch (e: any) {
+        return errorResponse(`Duplicate scan failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // DEDUPLICATE — merge duplicate clusters (keep anchor, archive dupes)
+    // ========================================================================
+
+    if (url.pathname === "/deduplicate" && method === "POST") {
+      try {
+        const body = await req.json() as any;
+        const threshold = Number(body.threshold || 0.85);
+        const dryRun = body.dry_run !== false; // default to dry run for safety
+        const maxMerge = Math.min(Number(body.max_merge || 50), 500);
+
+        const allMems = getLatestEmbeddings.all() as Array<{
+          id: number; content: string; category: string; importance: number;
+          embedding: Buffer; is_static: boolean; source_count: number;
+        }>;
+
+        const merged: Array<{ kept: number; archived: number[]; similarity: number }> = [];
+        const seen = new Set<number>();
+        let totalArchived = 0;
+
+        for (let i = 0; i < allMems.length && merged.length < maxMerge; i++) {
+          if (seen.has(allMems[i].id)) continue;
+          const embA = bufferToEmbedding(allMems[i].embedding);
+          const dupes: Array<{ id: number; similarity: number; source_count: number }> = [];
+
+          for (let j = i + 1; j < allMems.length; j++) {
+            if (seen.has(allMems[j].id)) continue;
+            const embB = bufferToEmbedding(allMems[j].embedding);
+            const sim = cosineSimilarity(embA, embB);
+            if (sim >= threshold) {
+              dupes.push({ id: allMems[j].id, similarity: sim, source_count: allMems[j].source_count || 1 });
+              seen.add(allMems[j].id);
+            }
+          }
+
+          if (dupes.length > 0) {
+            seen.add(allMems[i].id);
+
+            if (!dryRun) {
+              // Aggregate source_count to the kept memory
+              let totalSourceCount = allMems[i].source_count || 1;
+              for (const d of dupes) {
+                totalSourceCount += (d.source_count || 1) - 1;
+                markArchived.run(d.id);
+                insertLink.run(allMems[i].id, d.id, d.similarity, "derives");
+                totalArchived++;
+              }
+              db.prepare("UPDATE memories SET source_count = ?, updated_at = datetime('now') WHERE id = ?")
+                .run(totalSourceCount, allMems[i].id);
+            }
+
+            merged.push({
+              kept: allMems[i].id,
+              archived: dupes.map(d => d.id),
+              similarity: Math.round(dupes[0].similarity * 1000) / 1000,
+            });
+          }
+        }
+
+        return json({
+          dry_run: dryRun,
+          threshold,
+          clusters_found: merged.length,
+          total_archived: dryRun ? 0 : totalArchived,
+          merges: merged,
+        });
+      } catch (e: any) {
+        return errorResponse(`Dedup failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // SMART RECALL — context-aware memory retrieval for plugin
+    // ========================================================================
+
+    if (url.pathname === "/recall" && method === "POST") {
+      try {
+        const body = await req.json() as any;
+        const context = body.context || ""; // user's first message or topic
+        const limit = Math.min(Number(body.limit) || 20, 50);
+
+        const results: Map<number, { memory: any; score: number; source: string }> = new Map();
+
+        // 1. Static facts (always included, highest priority)
+        const staticFacts = getStaticMemories.all() as Array<any>;
+        for (const sf of staticFacts) {
+          results.set(sf.id, { memory: sf, score: 100, source: "static" });
+        }
+
+        // 2. Semantic search against context (if provided)
+        if (context.trim()) {
+          const semanticResults = await hybridSearch(context, limit, false, true, true);
+          for (const sr of semanticResults) {
+            if (!results.has(sr.id)) {
+              results.set(sr.id, { memory: sr, score: sr.score * 50, source: "semantic" });
+            }
+          }
+        }
+
+        // 3. High-importance recent memories (fill remaining slots)
+        const recentImportant = db.prepare(
+          `SELECT id, content, category, source, importance, created_at, source_count, is_static
+           FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1
+           ORDER BY importance DESC, created_at DESC LIMIT ?`
+        ).all(limit) as Array<any>;
+        for (const ri of recentImportant) {
+          if (!results.has(ri.id)) {
+            results.set(ri.id, { memory: ri, score: ri.importance * 2, source: "important" });
+          }
+        }
+
+        // 4. Recent activity (fill any remaining)
+        const recent = listRecent.all(Math.min(limit, 15)) as Array<any>;
+        for (const r of recent) {
+          if (!results.has(r.id)) {
+            results.set(r.id, { memory: r, score: 1, source: "recent" });
+          }
+        }
+
+        // Sort by score descending, limit
+        const sorted = Array.from(results.values())
+          .sort((a, b) => b.score - a.score)
+          .slice(0, limit);
+
+        return json({
+          memories: sorted.map(s => ({
+            ...s.memory,
+            recall_source: s.source,
+            recall_score: Math.round(s.score * 100) / 100,
+          })),
+          breakdown: {
+            static: sorted.filter(s => s.source === "static").length,
+            semantic: sorted.filter(s => s.source === "semantic").length,
+            important: sorted.filter(s => s.source === "important").length,
+            recent: sorted.filter(s => s.source === "recent").length,
+          },
+        });
+      } catch (e: any) {
+        return errorResponse(`Smart recall failed: ${e.message}`, 500);
+      }
     }
 
     if (url.pathname.startsWith("/memory/") && method === "GET") {
@@ -1705,6 +1828,7 @@ const server = Bun.serve({
       const staticCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_static = 1 AND is_forgotten = 0").get() as { count: number };
       const dynamicCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_static = 0 AND is_forgotten = 0").get() as { count: number };
       const versionedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE version > 1").get() as { count: number };
+      const archivedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_archived = 1 AND is_forgotten = 0").get() as { count: number };
       const inferenceCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_inference = 1").get() as { count: number };
 
       const linkTypes = db.prepare(
@@ -1727,6 +1851,7 @@ const server = Bun.serve({
           total: memCount.count,
           embedded: embCount.count,
           forgotten: forgottenCount.count,
+          archived: archivedCount.count,
           static: staticCount.count,
           dynamic: dynamicCount.count,
           versioned: versionedCount.count,
@@ -1772,7 +1897,7 @@ setInterval(() => {
 
 sweepExpiredMemories();
 
-console.log(`MegaMind v3 listening on ${HOST}:${PORT}`);
+console.log(`MegaMind v3.1 listening on ${HOST}:${PORT}`);
 console.log(`Database: ${DB_PATH}`);
 console.log(`Embedding model: ${EMBEDDING_MODEL} (${EMBEDDING_DIM}d)`);
 console.log(`LLM: ${LLM_API_KEY ? `${LLM_MODEL} via ${LLM_URL}` : "not configured"}`);
