@@ -1120,7 +1120,7 @@ function generateApiKey(): { key: string; prefix: string; hash: string } {
 // ============================================================================
 
 const GUI_PASSWORD = process.env.ENGRAM_GUI_PASSWORD || process.env.MEGAMIND_GUI_PASSWORD || "changeme";
-const GUI_HMAC_SECRET = "81d4f671221dfd9dc454642a7ca3c8310dbd0a4a0529547ca00c8fa7955de18e";
+const GUI_HMAC_SECRET = process.env.ENGRAM_HMAC_SECRET || crypto.randomUUID() + crypto.randomUUID();
 const GUI_COOKIE_MAX_AGE = 7 * 24 * 60 * 60;
 
 function guiSignCookie(ts: number): string {
