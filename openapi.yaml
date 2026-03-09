@@ -1,0 +1,952 @@
+openapi: 3.1.0
+info:
+  title: Engram
+  description: |
+    Persistent memory for AI agents. Store, search, recall, and link memories with
+    automatic embedding, fact extraction, versioning, and graph visualization.
+  version: 4.0.0
+  contact:
+    name: Engram
+    url: https://engram.lol
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:4200
+    description: Local development
+  - url: https://your-instance.example.com
+    description: Production
+
+security:
+  - BearerAuth: []
+  - {}
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: "API key with `eg_` prefix. Get one via POST /keys."
+
+  schemas:
+    Memory:
+      type: object
+      properties:
+        id:
+          type: integer
+        content:
+          type: string
+        category:
+          type: string
+          enum: [task, discovery, decision, state, issue, general]
+        source:
+          type: string
+        session_id:
+          type: string
+          nullable: true
+        importance:
+          type: integer
+          minimum: 1
+          maximum: 10
+        created_at:
+          type: string
+          format: date-time
+        version:
+          type: integer
+        is_latest:
+          type: boolean
+        parent_memory_id:
+          type: integer
+          nullable: true
+        root_memory_id:
+          type: integer
+          nullable: true
+        source_count:
+          type: integer
+        is_static:
+          type: boolean
+        is_forgotten:
+          type: boolean
+        is_inference:
+          type: boolean
+        is_archived:
+          type: boolean
+        forget_after:
+          type: string
+          nullable: true
+
+    SearchResult:
+      allOf:
+        - $ref: '#/components/schemas/Memory'
+        - type: object
+          properties:
+            score:
+              type: number
+              description: Similarity score (0-1)
+
+    StoreResponse:
+      type: object
+      properties:
+        stored:
+          type: boolean
+        id:
+          type: integer
+        created_at:
+          type: string
+        importance:
+          type: integer
+        linked:
+          type: integer
+          description: Number of auto-generated links
+        embedded:
+          type: boolean
+        fact_extraction:
+          type: string
+          enum: [queued, skipped, disabled]
+
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        email:
+          type: string
+          nullable: true
+        is_admin:
+          type: boolean
+        created_at:
+          type: string
+        memory_count:
+          type: integer
+        key_count:
+          type: integer
+
+    ApiKey:
+      type: object
+      properties:
+        id:
+          type: integer
+        key_prefix:
+          type: string
+        name:
+          type: string
+        scopes:
+          type: string
+        rate_limit:
+          type: integer
+        is_active:
+          type: boolean
+        last_used_at:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+
+    Space:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+        memory_count:
+          type: integer
+
+    Profile:
+      type: object
+      properties:
+        static_facts:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+              content:
+                type: string
+              category:
+                type: string
+              source_count:
+                type: integer
+        recent_activity:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+              content:
+                type: string
+              category:
+                type: string
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      description: Returns system status and counts. No auth required.
+      tags: [System]
+      security: []
+      responses:
+        '200':
+          description: System health
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                  version:
+                    type: integer
+                  memories:
+                    type: integer
+                  embedded:
+                    type: integer
+                  links:
+                    type: integer
+                  forgotten:
+                    type: integer
+                  archived:
+                    type: integer
+                  conversations:
+                    type: integer
+                  messages:
+                    type: integer
+
+  /stats:
+    get:
+      summary: Detailed statistics
+      description: Comprehensive stats breakdown with category counts, link types, etc.
+      tags: [System]
+      responses:
+        '200':
+          description: Detailed stats
+
+  /store:
+    post:
+      summary: Store a memory
+      description: |
+        Stores a new memory with automatic embedding, linking, and optional fact extraction.
+        Memories are automatically checked for duplicates and linked to related memories.
+      tags: [Memories]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+                  description: The memory content
+                category:
+                  type: string
+                  enum: [task, discovery, decision, state, issue, general]
+                  default: general
+                source:
+                  type: string
+                  description: Source identifier (e.g., agent name)
+                  default: unknown
+                session_id:
+                  type: string
+                  description: Session grouping ID
+                importance:
+                  type: integer
+                  minimum: 1
+                  maximum: 10
+                  default: 5
+      responses:
+        '200':
+          description: Memory stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StoreResponse'
+
+  /search:
+    post:
+      summary: Semantic search
+      description: |
+        Hybrid search combining embedding similarity and full-text search.
+        Returns memories ranked by relevance.
+      tags: [Memories]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                limit:
+                  type: integer
+                  default: 10
+                  maximum: 50
+                threshold:
+                  type: number
+                  description: Minimum similarity threshold (0-1)
+                  default: 0.3
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SearchResult'
+
+  /recall:
+    post:
+      summary: Contextual recall
+      description: |
+        Intelligent memory retrieval for agent context injection.
+        Combines static facts, semantic matches, high-importance memories,
+        and recent activity into a prioritized context window.
+      tags: [Memories]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                limit:
+                  type: integer
+                  default: 25
+                  maximum: 100
+      responses:
+        '200':
+          description: Recalled context
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  memories:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Memory'
+                  breakdown:
+                    type: object
+                    properties:
+                      static_facts:
+                        type: integer
+                      semantic_matches:
+                        type: integer
+                      important:
+                        type: integer
+                      recent:
+                        type: integer
+
+  /list:
+    get:
+      summary: List memories
+      description: List recent memories, optionally filtered by category.
+      tags: [Memories]
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+        - name: category
+          in: query
+          schema:
+            type: string
+            enum: [task, discovery, decision, state, issue, general]
+      responses:
+        '200':
+          description: Memory list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Memory'
+
+  /profile:
+    get:
+      summary: User profile
+      description: Returns static facts and recent activity for context injection.
+      tags: [Memories]
+      parameters:
+        - name: summary
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: Generate LLM summary (requires LLM configured)
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+
+  /graph:
+    get:
+      summary: Memory graph
+      description: Returns all memories and links for graph visualization.
+      tags: [Memories]
+      responses:
+        '200':
+          description: Graph data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  memories:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Memory'
+                  links:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        source_id:
+                          type: integer
+                        target_id:
+                          type: integer
+                        similarity:
+                          type: number
+                        type:
+                          type: string
+
+  /memory/{id}/update:
+    post:
+      summary: Update (version) a memory
+      description: Creates a new version of an existing memory, preserving the version chain.
+      tags: [Memories]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+                category:
+                  type: string
+      responses:
+        '200':
+          description: Memory updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  updated:
+                    type: boolean
+                  new_id:
+                    type: integer
+                  old_id:
+                    type: integer
+                  version:
+                    type: integer
+
+  /memory/{id}/forget:
+    post:
+      summary: Forget a memory
+      description: Marks a memory as forgotten (soft delete).
+      tags: [Memories]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Memory forgotten
+
+  /memory/{id}/archive:
+    post:
+      summary: Archive a memory
+      description: Archives a memory — hidden from recall but still searchable.
+      tags: [Memories]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Memory archived
+
+  /memory/{id}/unarchive:
+    post:
+      summary: Unarchive a memory
+      tags: [Memories]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Memory unarchived
+
+  /duplicates:
+    get:
+      summary: Find duplicate memories
+      description: Clusters semantically similar memories above a similarity threshold.
+      tags: [Maintenance]
+      parameters:
+        - name: threshold
+          in: query
+          schema:
+            type: number
+            default: 0.92
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Duplicate clusters
+
+  /deduplicate:
+    post:
+      summary: Auto-deduplicate
+      description: Automatically merges duplicate memory clusters, keeping the highest-importance version.
+      tags: [Maintenance]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                threshold:
+                  type: number
+                  default: 0.92
+                dry_run:
+                  type: boolean
+                  default: false
+      responses:
+        '200':
+          description: Deduplication results
+
+  /sweep:
+    post:
+      summary: Run forget sweep
+      description: Manually trigger the auto-forget sweep for memories past their expiration.
+      tags: [Maintenance]
+      responses:
+        '200':
+          description: Sweep results
+
+  /backfill:
+    post:
+      summary: Backfill embeddings
+      description: Generate embeddings for any memories missing them.
+      tags: [Maintenance]
+      responses:
+        '200':
+          description: Backfill started
+
+  /export:
+    get:
+      summary: Export all memories
+      description: Full export of memories and links as JSON or JSONL.
+      tags: [Data]
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [json, jsonl]
+            default: json
+      responses:
+        '200':
+          description: Export data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: string
+                  exported_at:
+                    type: string
+                  memories:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Memory'
+                  links:
+                    type: array
+                  stats:
+                    type: object
+
+  /import:
+    post:
+      summary: Bulk import memories
+      description: Import an array of memories with automatic embedding.
+      tags: [Data]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                memories:
+                  type: array
+                  items:
+                    type: object
+                    required: [content]
+                    properties:
+                      content:
+                        type: string
+                      category:
+                        type: string
+                      source:
+                        type: string
+                      importance:
+                        type: integer
+                      is_static:
+                        type: boolean
+      responses:
+        '200':
+          description: Import results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  imported:
+                    type: integer
+                  failed:
+                    type: integer
+                  total:
+                    type: integer
+
+  /users:
+    post:
+      summary: Create user
+      description: Admin only. Creates a new user with a default space.
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username]
+              properties:
+                username:
+                  type: string
+                email:
+                  type: string
+      responses:
+        '200':
+          description: User created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                  username:
+                    type: string
+                  created_at:
+                    type: string
+        '403':
+          description: Admin required
+    get:
+      summary: List users
+      description: Admin only. Lists all users with memory and key counts.
+      tags: [Admin]
+      responses:
+        '200':
+          description: User list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/User'
+
+  /keys:
+    post:
+      summary: Create API key
+      description: |
+        Creates a new API key. The full key is returned only once — save it immediately.
+        Keys use the `eg_` prefix.
+      tags: [Auth]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  default: default
+                scopes:
+                  type: string
+                  default: "read,write"
+                  description: "Comma-separated: read, write, admin"
+                user_id:
+                  type: integer
+                  description: Target user (admin only)
+                rate_limit:
+                  type: integer
+                  default: 120
+                  description: Requests per minute
+      responses:
+        '200':
+          description: Key created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key:
+                    type: string
+                    description: "Full API key (eg_...). Save immediately — cannot be retrieved again."
+                  name:
+                    type: string
+                  scopes:
+                    type: string
+                  rate_limit:
+                    type: integer
+                  user_id:
+                    type: integer
+    get:
+      summary: List API keys
+      description: Lists all API keys for the authenticated user. Key values are not returned.
+      tags: [Auth]
+      responses:
+        '200':
+          description: Key list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ApiKey'
+
+  /keys/{id}:
+    delete:
+      summary: Revoke API key
+      tags: [Auth]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Key revoked
+
+  /spaces:
+    post:
+      summary: Create space
+      description: Creates a named memory space for organizing memories.
+      tags: [Spaces]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+      responses:
+        '200':
+          description: Space created
+    get:
+      summary: List spaces
+      tags: [Spaces]
+      responses:
+        '200':
+          description: Space list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  spaces:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Space'
+
+  /spaces/{id}:
+    delete:
+      summary: Delete space
+      description: Cannot delete the default space.
+      tags: [Spaces]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Space deleted
+
+  /conversations:
+    post:
+      summary: Create conversation
+      tags: [Conversations]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent]
+              properties:
+                agent:
+                  type: string
+                session_id:
+                  type: string
+                title:
+                  type: string
+                metadata:
+                  type: object
+      responses:
+        '200':
+          description: Conversation created
+    get:
+      summary: List conversations
+      tags: [Conversations]
+      parameters:
+        - name: agent
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Conversation list
+
+  /conversations/bulk:
+    post:
+      summary: Store messages in bulk
+      tags: [Conversations]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [conversation_id, messages]
+              properties:
+                conversation_id:
+                  type: integer
+                messages:
+                  type: array
+                  items:
+                    type: object
+                    required: [role, content]
+                    properties:
+                      role:
+                        type: string
+                        enum: [user, assistant, system, tool]
+                      content:
+                        type: string
+                      metadata:
+                        type: object
+      responses:
+        '200':
+          description: Messages stored
+
+  /messages/search:
+    post:
+      summary: Search conversation messages
+      tags: [Conversations]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                limit:
+                  type: integer
+                  default: 20
+      responses:
+        '200':
+          description: Message search results
+
+tags:
+  - name: Memories
+    description: Core memory operations — store, search, recall, list, update
+  - name: Data
+    description: Import and export
+  - name: Auth
+    description: API key management
+  - name: Spaces
+    description: Memory space organization
+  - name: Conversations
+    description: Conversation and message tracking
+  - name: Maintenance
+    description: Deduplication, embedding backfill, forget sweeps
+  - name: Admin
+    description: User management (admin only)
+  - name: System
+    description: Health checks and statistics
