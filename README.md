@@ -337,7 +337,7 @@ Engram includes a WebGL graph visualization at `/gui`. Login with your `ENGRAM_G
 
 ### Storage
 
-All data lives in a single SQLite file (`data/megamind.db` in Docker, or `./megamind.db` from source). Back it up however you back up files.
+All data lives in a single SQLite file (`data/memory.db` in Docker, or `./memory.db` from source). Back it up however you back up files.
 
 ### Reverse Proxy
 

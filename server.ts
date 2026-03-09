@@ -1119,7 +1119,7 @@ function generateApiKey(): { key: string; prefix: string; hash: string } {
 // WEB GUI AUTH
 // ============================================================================
 
-const GUI_PASSWORD = process.env.ENGRAM_GUI_PASSWORD || process.env.MEGAMIND_GUI_PASSWORD || "changeme";
+const GUI_PASSWORD = process.env.ENGRAM_GUI_PASSWORD || process.env.MEGAMIND_GUI_PASSWORD /* legacy fallback */ || "changeme";
 const GUI_HMAC_SECRET = process.env.ENGRAM_HMAC_SECRET || crypto.randomUUID() + crypto.randomUUID();
 const GUI_COOKIE_MAX_AGE = 7 * 24 * 60 * 60;
 
