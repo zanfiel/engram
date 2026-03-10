@@ -174,6 +174,118 @@
   #list-toggle:hover { background: rgba(129,140,248,0.12); color: #818cf8; border-color: rgba(129,140,248,0.2); }
   #list-toggle.active { background: rgba(129,140,248,0.15); color: #818cf8; border-color: rgba(129,140,248,0.3); box-shadow: 0 0 16px rgba(129,140,248,0.1); }
 
+  /* Inbox Panel */
+  #inbox-panel {
+    position: fixed; top: 56px; left: -460px; width: 440px; height: calc(100vh - 56px); z-index: 15;
+    background: rgba(15,20,25,0.92);
+    backdrop-filter: blur(32px) saturate(1.6);
+    -webkit-backdrop-filter: blur(32px) saturate(1.6);
+    border-right: 1px solid rgba(255,255,255,0.05);
+    box-shadow: 12px 0 60px rgba(0,0,0,0.4);
+    transition: left 0.5s cubic-bezier(0.16,1,0.3,1);
+    overflow-y: auto; display: flex; flex-direction: column;
+  }
+  #inbox-panel.open { left: 0; }
+  #inbox-panel::-webkit-scrollbar { width: 4px; }
+  #inbox-panel::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 2px; }
+  .inbox-header {
+    padding: 16px 18px 12px; border-bottom: 1px solid rgba(255,255,255,0.04);
+    display: flex; flex-direction: column; gap: 10px; flex-shrink: 0;
+  }
+  .inbox-title {
+    display: flex; align-items: center; gap: 10px;
+  }
+  .inbox-title h2 {
+    font-size: 13px; font-weight: 600; color: #e2e4e9;
+    letter-spacing: 0.5px; text-transform: uppercase;
+  }
+  .inbox-count {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #f97316;
+    background: rgba(249,115,22,0.1); padding: 2px 8px; border-radius: 6px;
+    border: 1px solid rgba(249,115,22,0.15);
+  }
+  .inbox-actions {
+    display: flex; gap: 6px;
+  }
+  .inbox-action-btn {
+    padding: 5px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.06);
+    background: rgba(255,255,255,0.03); color: #94a3b8; font-size: 10px;
+    font-family: 'Inter', sans-serif; cursor: pointer; font-weight: 500;
+    transition: all 0.2s;
+  }
+  .inbox-action-btn:hover { background: rgba(255,255,255,0.06); color: #e2e4e9; }
+  .inbox-action-btn.approve-all { border-color: rgba(52,211,153,0.2); color: #34d399; }
+  .inbox-action-btn.approve-all:hover { background: rgba(52,211,153,0.1); }
+  .inbox-action-btn.reject-all { border-color: rgba(248,113,113,0.2); color: #f87171; }
+  .inbox-action-btn.reject-all:hover { background: rgba(248,113,113,0.1); }
+  .inbox-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .inbox-card {
+    padding: 14px 16px; margin-bottom: 6px; border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.04);
+    background: rgba(255,255,255,0.015);
+    transition: all 0.25s cubic-bezier(0.16,1,0.3,1);
+    position: relative;
+  }
+  .inbox-card:hover {
+    background: rgba(255,255,255,0.035);
+    border-color: rgba(255,255,255,0.08);
+  }
+  .inbox-card.selected {
+    border-color: rgba(129,140,248,0.3);
+    background: rgba(129,140,248,0.06);
+  }
+  .inbox-card-header {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+  }
+  .inbox-card-header input[type="checkbox"] {
+    accent-color: #818cf8; width: 14px; height: 14px; cursor: pointer;
+  }
+  .inbox-card-meta {
+    font-family: 'JetBrains Mono', monospace; font-size: 9px; color: #3a3a50; letter-spacing: 0.3px;
+  }
+  .inbox-card-cat {
+    display: inline-block; padding: 1px 6px; border-radius: 4px;
+    font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+    margin-left: 6px;
+  }
+  .inbox-card-content {
+    font-size: 12px; line-height: 1.6; color: #c8ccd4;
+    max-height: 120px; overflow: hidden; margin-bottom: 10px;
+    word-wrap: break-word;
+  }
+  .inbox-card-content.expanded { max-height: none; }
+  .inbox-card-actions {
+    display: flex; gap: 6px; align-items: center;
+  }
+  .inbox-btn {
+    padding: 4px 10px; border-radius: 6px; font-size: 10px; font-weight: 600;
+    cursor: pointer; transition: all 0.2s; font-family: 'Inter', sans-serif;
+    border: 1px solid transparent;
+  }
+  .inbox-btn.approve {
+    background: rgba(52,211,153,0.1); color: #34d399; border-color: rgba(52,211,153,0.2);
+  }
+  .inbox-btn.approve:hover { background: rgba(52,211,153,0.2); }
+  .inbox-btn.edit {
+    background: rgba(129,140,248,0.1); color: #818cf8; border-color: rgba(129,140,248,0.2);
+  }
+  .inbox-btn.edit:hover { background: rgba(129,140,248,0.2); }
+  .inbox-btn.reject {
+    background: rgba(248,113,113,0.08); color: #f87171; border-color: rgba(248,113,113,0.15);
+  }
+  .inbox-btn.reject:hover { background: rgba(248,113,113,0.15); }
+  .inbox-empty {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 300px; color: #3a3a50; text-align: center;
+  }
+  .inbox-empty svg { margin-bottom: 12px; opacity: 0.3; }
+  .inbox-empty p { font-size: 13px; }
+  .inbox-empty small { font-size: 11px; color: #2a2a3a; margin-top: 4px; }
+  #inbox-toggle.active {
+    background: rgba(249,115,22,0.15); color: #f97316; border-color: rgba(249,115,22,0.3);
+    box-shadow: 0 0 16px rgba(249,115,22,0.1);
+  }
+
   #list-panel {
     position: fixed; top: 0; left: -420px; width: 420px; height: 100vh; z-index: 15;
     background: rgba(8,11,18,0.96);
@@ -469,6 +581,21 @@
   <button id="list-toggle" onclick="toggleListPanel()" title="Memory List (L)">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
   </button>
+  <button id="inbox-toggle" onclick="toggleInboxPanel()" title="Review Queue (I)" style="
+    width: 34px; height: 34px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.06);
+    background: rgba(255,255,255,0.03); color: #94a3b8; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; position: relative;
+    transition: all 0.3s cubic-bezier(0.16,1,0.3,1);
+  ">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
+    <span id="inbox-badge" style="
+      display: none; position: absolute; top: -4px; right: -4px;
+      min-width: 16px; height: 16px; border-radius: 8px; padding: 0 4px;
+      background: linear-gradient(135deg, #f97316, #ef4444);
+      color: white; font-size: 9px; font-weight: 700; font-family: 'JetBrains Mono', monospace;
+      line-height: 16px; text-align: center;
+    "></span>
+  </button>
   <h1><span class="logo-glow">Eng<span>ram</span></span></h1>
   <div id="search-box">
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
@@ -555,6 +682,23 @@
       ">Save</button>
     </div>
   </div>
+</div>
+
+<!-- Inbox / Review Queue Panel -->
+<div id="inbox-panel">
+  <div class="inbox-header">
+    <div class="inbox-title">
+      <h2>Review Queue</h2>
+      <span class="inbox-count" id="inbox-count">0 pending</span>
+      <button onclick="toggleInboxPanel()" style="background:none;border:none;color:#94a3b8;font-size:18px;cursor:pointer;margin-left:auto;padding:2px 6px;line-height:1;opacity:0.7" onmouseover="this.style.opacity='1';this.style.color='#f87171'" onmouseout="this.style.opacity='0.7';this.style.color='#94a3b8'">&times;</button>
+    </div>
+    <div class="inbox-actions">
+      <button class="inbox-action-btn" onclick="inboxSelectAll()">Select All</button>
+      <button class="inbox-action-btn approve-all" onclick="inboxBulkApprove()">&#10003; Approve Selected</button>
+      <button class="inbox-action-btn reject-all" onclick="inboxBulkReject()">&#10005; Reject Selected</button>
+    </div>
+  </div>
+  <div class="inbox-list" id="inbox-list"></div>
 </div>
 
 <!-- List Panel (Left) -->
@@ -3708,6 +3852,238 @@ window.addEventListener('resize', function() {
 buildBackground();
 buildSky();
 loadData();
+
+// ========================================================================
+// INBOX / REVIEW QUEUE — v5.1
+// ========================================================================
+var inboxPanelOpen = false;
+var inboxItems = [];
+var inboxSelected = new Set();
+
+function toggleInboxPanel() {
+  inboxPanelOpen = !inboxPanelOpen;
+  document.getElementById('inbox-panel').classList.toggle('open', inboxPanelOpen);
+  document.getElementById('inbox-toggle').classList.toggle('active', inboxPanelOpen);
+  if (inboxPanelOpen) {
+    if (listPanelOpen) toggleListPanel();
+    loadInbox();
+  }
+}
+
+async function loadInbox() {
+  try {
+    var resp = await fetch('/inbox?limit=100');
+    var data = await resp.json();
+    inboxItems = data.pending || [];
+    inboxSelected.clear();
+    renderInbox();
+    updateInboxBadge(data.total || 0);
+  } catch (e) { console.error('Failed to load inbox:', e); }
+}
+
+function updateInboxBadge(count) {
+  var badge = document.getElementById('inbox-badge');
+  var countEl = document.getElementById('inbox-count');
+  if (count > 0) {
+    badge.style.display = 'block';
+    badge.textContent = count > 99 ? '99+' : count;
+    countEl.textContent = count + ' pending';
+  } else {
+    badge.style.display = 'none';
+    countEl.textContent = '0 pending';
+  }
+}
+
+var inboxCatColors = {
+  task: { bg: 'rgba(129,140,248,0.12)', color: '#818cf8' },
+  state: { bg: 'rgba(52,211,153,0.12)', color: '#34d399' },
+  discovery: { bg: 'rgba(251,191,36,0.12)', color: '#fbbf24' },
+  decision: { bg: 'rgba(244,114,182,0.12)', color: '#f472b6' },
+  issue: { bg: 'rgba(248,113,113,0.12)', color: '#f87171' },
+  general: { bg: 'rgba(148,163,184,0.12)', color: '#94a3b8' },
+};
+
+function inboxEsc(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function inboxTimeAgo(dateStr) {
+  var d = new Date(dateStr + 'Z');
+  var diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 60) return Math.floor(diff) + 's ago';
+  if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+  return Math.floor(diff/86400) + 'd ago';
+}
+
+function renderInbox() {
+  var container = document.getElementById('inbox-list');
+  if (!inboxItems.length) {
+    container.innerHTML = '<div class="inbox-empty">' +
+      '<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>' +
+      '<p>Inbox empty</p><small>All memories have been reviewed</small></div>';
+    return;
+  }
+  var html = '';
+  for (var i = 0; i < inboxItems.length; i++) {
+    var m = inboxItems[i];
+    var cc = inboxCatColors[m.category] || inboxCatColors.general;
+    var checked = inboxSelected.has(m.id) ? ' checked' : '';
+    var sel = inboxSelected.has(m.id) ? ' selected' : '';
+    var tags = '';
+    if (m.tags && m.tags.length) {
+      tags = '<div style="margin-top:6px;display:flex;gap:4px;flex-wrap:wrap">';
+      for (var t = 0; t < m.tags.length && t < 5; t++) {
+        tags += '<span style="font-size:9px;padding:1px 6px;border-radius:4px;background:rgba(255,255,255,0.04);color:#555">' + inboxEsc(m.tags[t]) + '</span>';
+      }
+      tags += '</div>';
+    }
+    html += '<div class="inbox-card' + sel + '" data-id="' + m.id + '">' +
+      '<div class="inbox-card-header">' +
+        '<input type="checkbox" onchange="inboxToggleSelect(' + m.id + ')"' + checked + '>' +
+        '<span class="inbox-card-meta">#' + m.id + ' &middot; ' + inboxEsc(m.source || 'unknown') + ' &middot; ' + inboxTimeAgo(m.created_at) + '</span>' +
+        '<span class="inbox-card-cat" style="background:' + cc.bg + ';color:' + cc.color + '">' + inboxEsc(m.category) + '</span>' +
+      '</div>' +
+      '<div class="inbox-card-content" onclick="this.classList.toggle('expanded')">' + inboxEsc(m.content) + '</div>' +
+      tags +
+      '<div class="inbox-card-actions">' +
+        '<button class="inbox-btn approve" onclick="inboxApprove(' + m.id + ')">&#10003; Approve</button>' +
+        '<button class="inbox-btn edit" onclick="inboxEdit(' + m.id + ')">&#9998; Edit</button>' +
+        '<button class="inbox-btn reject" onclick="inboxReject(' + m.id + ')">&#10005; Reject</button>' +
+      '</div>' +
+    '</div>';
+  }
+  container.innerHTML = html;
+}
+
+function inboxToggleSelect(id) {
+  if (inboxSelected.has(id)) inboxSelected.delete(id);
+  else inboxSelected.add(id);
+  document.querySelectorAll('.inbox-card').forEach(function(c) {
+    var cid = Number(c.dataset.id);
+    c.classList.toggle('selected', inboxSelected.has(cid));
+    var cb = c.querySelector('input[type="checkbox"]');
+    if (cb) cb.checked = inboxSelected.has(cid);
+  });
+}
+
+function inboxSelectAll() {
+  var allSelected = inboxSelected.size === inboxItems.length;
+  inboxSelected.clear();
+  if (!allSelected) for (var i = 0; i < inboxItems.length; i++) inboxSelected.add(inboxItems[i].id);
+  renderInbox();
+}
+
+async function inboxApprove(id) {
+  try {
+    await fetch('/inbox/' + id + '/approve', { method: 'POST' });
+    inboxItems = inboxItems.filter(function(m) { return m.id !== id; });
+    inboxSelected.delete(id);
+    renderInbox();
+    updateInboxBadge(inboxItems.length);
+    inboxToast('Memory #' + id + ' approved', 'success');
+  } catch (e) { inboxToast('Approve failed: ' + e.message, 'error'); }
+}
+
+async function inboxReject(id) {
+  if (!confirm('Reject memory #' + id + '? It will be archived.')) return;
+  try {
+    await fetch('/inbox/' + id + '/reject', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: 'Rejected from inbox review' })
+    });
+    inboxItems = inboxItems.filter(function(m) { return m.id !== id; });
+    inboxSelected.delete(id);
+    renderInbox();
+    updateInboxBadge(inboxItems.length);
+    inboxToast('Memory #' + id + ' rejected', 'info');
+  } catch (e) { inboxToast('Reject failed: ' + e.message, 'error'); }
+}
+
+async function inboxEdit(id) {
+  var mem = inboxItems.find(function(m) { return m.id === id; });
+  if (!mem) return;
+  var newContent = prompt('Edit memory content:', mem.content);
+  if (newContent === null) return;
+  if (!newContent.trim()) { inboxToast('Content cannot be empty', 'error'); return; }
+  try {
+    await fetch('/inbox/' + id + '/edit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: newContent.trim() })
+    });
+    inboxItems = inboxItems.filter(function(m) { return m.id !== id; });
+    inboxSelected.delete(id);
+    renderInbox();
+    updateInboxBadge(inboxItems.length);
+    inboxToast('Memory #' + id + ' edited & approved', 'success');
+  } catch (e) { inboxToast('Edit failed: ' + e.message, 'error'); }
+}
+
+async function inboxBulkApprove() {
+  var ids = Array.from(inboxSelected);
+  if (!ids.length) { inboxToast('No memories selected', 'info'); return; }
+  try {
+    await fetch('/inbox/bulk', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: ids, action: 'approve' })
+    });
+    inboxItems = inboxItems.filter(function(m) { return !inboxSelected.has(m.id); });
+    inboxSelected.clear();
+    renderInbox();
+    updateInboxBadge(inboxItems.length);
+    inboxToast(ids.length + ' memories approved', 'success');
+  } catch (e) { inboxToast('Bulk approve failed: ' + e.message, 'error'); }
+}
+
+async function inboxBulkReject() {
+  var ids = Array.from(inboxSelected);
+  if (!ids.length) { inboxToast('No memories selected', 'info'); return; }
+  if (!confirm('Reject ' + ids.length + ' memories?')) return;
+  try {
+    await fetch('/inbox/bulk', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: ids, action: 'reject' })
+    });
+    inboxItems = inboxItems.filter(function(m) { return !inboxSelected.has(m.id); });
+    inboxSelected.clear();
+    renderInbox();
+    updateInboxBadge(inboxItems.length);
+    inboxToast(ids.length + ' memories rejected', 'info');
+  } catch (e) { inboxToast('Bulk reject failed: ' + e.message, 'error'); }
+}
+
+function inboxToast(msg, type) {
+  var toast = document.createElement('div');
+  var colors = { success: '#34d399', error: '#f87171', info: '#818cf8' };
+  var c = colors[type] || colors.info;
+  toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);padding:10px 20px;' +
+    'border-radius:10px;font-size:12px;font-family:Inter,sans-serif;z-index:9999;' +
+    'background:rgba(15,20,25,0.95);border:1px solid ' + c + '30;color:' + c + ';' +
+    'backdrop-filter:blur(20px);box-shadow:0 8px 32px rgba(0,0,0,0.4);transition:opacity 0.3s';
+  toast.textContent = msg;
+  document.body.appendChild(toast);
+  setTimeout(function() { toast.style.opacity = '0'; }, 2500);
+  setTimeout(function() { toast.remove(); }, 3000);
+}
+
+// Keyboard shortcut: I to toggle inbox
+document.addEventListener('keydown', function(e) {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.key === 'i' || e.key === 'I') { e.preventDefault(); toggleInboxPanel(); }
+});
+
+// Poll inbox count every 30 seconds
+setInterval(async function() {
+  try { var r = await fetch('/inbox?limit=1'); var d = await r.json(); updateInboxBadge(d.total||0); } catch(e){}
+}, 30000);
+
+// Initial inbox badge load
+(async function() {
+  try { var r = await fetch('/inbox?limit=1'); var d = await r.json(); updateInboxBadge(d.total||0); } catch(e){}
+})();
+// END INBOX
+
 </script>
 </body>
 </html>

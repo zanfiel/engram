@@ -629,7 +629,7 @@ const getMemory = db.prepare(`SELECT * FROM memories WHERE id = ?`);
 const getMemoryWithoutEmbedding = db.prepare(
   `SELECT id, content, category, source, session_id, importance, created_at, updated_at,
      version, is_latest, parent_memory_id, root_memory_id, source_count,
-     is_static, is_forgotten, forget_after, forget_reason, is_inference, is_archived
+     is_static, is_forgotten, forget_after, forget_reason, is_inference, is_archived, status
    FROM memories WHERE id = ?`
 );
 
