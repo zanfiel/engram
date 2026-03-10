@@ -2609,7 +2609,7 @@ const server = Bun.serve({
       const dbSize = Bun.file(DB_PATH).size;
       return json({
         status: "ok",
-        version: 4.5,
+        version: 5.0,
         memories: memCount.count,
         embedded: embCount.count,
         unembedded: noEmbCount,
@@ -6112,7 +6112,7 @@ setInterval(async () => {
   }
 }, 5 * 60 * 1000);
 
-console.log(`Engram v4.5 listening on ${HOST}:${PORT}`);
+console.log(`Engram v5.0 listening on ${HOST}:${PORT}`);
 console.log(`Database: ${DB_PATH}`);
 console.log(`Embedding model: ${EMBEDDING_MODEL} (${EMBEDDING_DIM}d)`);
 console.log(`LLM: ${LLM_API_KEY ? `${LLM_MODEL} via ${LLM_URL}` : "not configured"}`);
