@@ -474,7 +474,7 @@ server {
 | URL ingest | ✅ | ❌ | ❌ |
 | Import from Mem0 / Supermemory | ✅ | — | — |
 | Self-hosted | ✅ | ✅ | ✅ |
-| SQLite-based (zero deps) | ✅ | ❌ | ❌ |
+| libsql / SQLite (zero deps) | ✅ | ❌ | ❌ |
 
 ---
 
