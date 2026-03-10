@@ -3888,55 +3888,19 @@ Return JSON:
           initFSRS.last_review_at, result.id
         );
 
-        let linked = 0;
-        if (embArray) {
-          writeVec(result.id, embArray);
-          linked = await autoLink(result.id, embArray);
-        }
-
-        // Async fact extraction (non-blocking)
-        if (LLM_API_KEY && embArray) {
-          const capturedEmbArray = embArray;
-          (async () => {
-            try {
-              const allMems = getLatestEmbeddings.all() as Array<{
-                id: number; content: string; category: string; importance: number; embedding: Buffer;
-              }>;
-              const similarities: Array<{ id: number; content: string; category: string; score: number }> = [];
-              for (const mem of allMems) {
-                if (mem.id === result.id || !mem.embedding) continue;
-                const memEmb = bufferToEmbedding(mem.embedding);
-                const sim = cosineSimilarity(capturedEmbArray, memEmb);
-                if (sim > 0.4) {
-                  similarities.push({ id: mem.id, content: mem.content, category: mem.category, score: sim });
-                }
-              }
-              similarities.sort((a, b) => b.score - a.score);
-              const top3 = similarities.slice(0, 3);
-
-              const extraction = await extractFacts(content.trim(), category || "general", top3);
-              if (extraction) {
-                processExtractionResult(result.id, extraction, capturedEmbArray);
-                console.log(`Fact extraction complete for memory #${result.id}: ${extraction.relation_to_existing.type}`);
-              }
-            } catch (e: any) {
-              console.error(`Async fact extraction failed for #${result.id}:`, e.message);
-            }
-          })();
-        }
-
-        // Emit webhook event
+        // Emit webhook event (sync, fast)
         emitWebhookEvent("memory.created", {
           id: result.id, content: content.trim(), category: category || "general",
           importance: imp, tags: tagsJson ? JSON.parse(tagsJson) : [], episode_id: episodeId,
         }, auth.user_id);
 
-        return json({
+        // Return response IMMEDIATELY — vector indexing + autoLink + fact extraction happen async
+        const response = json({
           stored: true,
           id: result.id,
           created_at: result.created_at,
           importance: imp,
-          linked,
+          linked: 0, // will be computed async
           embedded: !!embBuffer,
           tags: tagsJson ? JSON.parse(tagsJson) : [],
           episode_id: episodeId,
@@ -3944,6 +3908,62 @@ Return JSON:
           fact_extraction: LLM_API_KEY ? "queued" : "disabled",
           status: memStatus,
         });
+
+        // === ASYNC POST-STORE PIPELINE (non-blocking) ===
+        // CRITICAL: Use setTimeout(0) to defer heavy work to NEXT event loop tick.
+        // Without this, synchronous libsql calls (writeVec, autoLink) block the 
+        // response from being flushed, defeating the async pattern.
+        if (embArray) {
+          const capturedEmbArray = embArray;
+          const capturedMemId = result.id;
+          const capturedContent = content.trim();
+          const capturedCategory = category || "general";
+          setTimeout(async () => {
+            try {
+              // 1. Write vector column (slow — libsql FLOAT32 index update)
+              const _t1 = Date.now();
+              writeVec(capturedMemId, capturedEmbArray);
+              console.log(`[store #${capturedMemId}] writeVec: ${Date.now() - _t1}ms`);
+
+              // 2. Auto-link to similar memories (slow — vector_top_k + cosine)
+              const _t2 = Date.now();
+              const linked = await autoLink(capturedMemId, capturedEmbArray);
+              console.log(`[store #${capturedMemId}] autoLink: ${Date.now() - _t2}ms, linked=${linked}`);
+
+              // 3. Fact extraction via LLM (slowest — external API call)
+              if (LLM_API_KEY) {
+                try {
+                  const allMems = getLatestEmbeddings.all() as Array<{
+                    id: number; content: string; category: string; importance: number; embedding: Buffer;
+                  }>;
+                  const similarities: Array<{ id: number; content: string; category: string; score: number }> = [];
+                  for (const mem of allMems) {
+                    if (mem.id === capturedMemId || !mem.embedding) continue;
+                    const memEmb = bufferToEmbedding(mem.embedding);
+                    const sim = cosineSimilarity(capturedEmbArray, memEmb);
+                    if (sim > 0.4) {
+                      similarities.push({ id: mem.id, content: mem.content, category: mem.category, score: sim });
+                    }
+                  }
+                  similarities.sort((a, b) => b.score - a.score);
+                  const top3 = similarities.slice(0, 3);
+
+                  const extraction = await extractFacts(capturedContent, capturedCategory, top3);
+                  if (extraction) {
+                    processExtractionResult(capturedMemId, extraction, capturedEmbArray);
+                    console.log(`Fact extraction complete for memory #${capturedMemId}: ${extraction.relation_to_existing.type}`);
+                  }
+                } catch (e: any) {
+                  console.error(`Fact extraction failed for #${capturedMemId}:`, e.message);
+                }
+              }
+            } catch (e: any) {
+              console.error(`Async post-store pipeline failed for #${capturedMemId}:`, e.message);
+            }
+          }, 0);
+        }
+
+        return response;
       } catch (e: any) {
         return errorResponse(`Failed to store: ${e.message}`, 500);
       }
