@@ -291,6 +291,10 @@ for (const [col, def] of v42Columns) {
 }
 try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_sync_id ON memories(sync_id) WHERE sync_id IS NOT NULL"); } catch {}
 
+// v5.1 — Review queue: status column (pending/approved/rejected)
+try { db.exec("ALTER TABLE memories ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'"); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)"); } catch {}
+
 // v5.0 — FSRS-6 spaced repetition columns
 const v50Columns: [string, string][] = [
   ["fsrs_stability", "REAL"],
@@ -590,7 +594,7 @@ const getAllEmbeddings = db.prepare(
 
 const getLatestEmbeddings = db.prepare(
   `SELECT id, content, category, importance, embedding, is_static, source_count
-   FROM memories WHERE embedding IS NOT NULL AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1`
+   FROM memories WHERE embedding IS NOT NULL AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND status = 'approved'`
 );
 
 const searchMemoriesFTS = db.prepare(
@@ -608,15 +612,15 @@ const searchMemoriesFTS = db.prepare(
 const listRecent = db.prepare(
   `SELECT id, content, category, source, session_id, importance, created_at,
      version, is_latest, parent_memory_id, root_memory_id, source_count,
-     is_static, is_forgotten, is_inference, forget_after, is_archived
-   FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND user_id = ? ORDER BY created_at DESC LIMIT ?`
+     is_static, is_forgotten, is_inference, forget_after, is_archived, status
+   FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND status != 'pending' AND user_id = ? ORDER BY created_at DESC LIMIT ?`
 );
 
 const listByCategory = db.prepare(
   `SELECT id, content, category, source, session_id, importance, created_at,
      version, is_latest, parent_memory_id, root_memory_id, source_count,
-     is_static, is_forgotten, is_inference, forget_after, is_archived
-   FROM memories WHERE category = ? AND is_forgotten = 0 AND is_archived = 0 AND user_id = ? ORDER BY created_at DESC LIMIT ?`
+     is_static, is_forgotten, is_inference, forget_after, is_archived, status
+   FROM memories WHERE category = ? AND is_forgotten = 0 AND is_archived = 0 AND status != 'pending' AND user_id = ? ORDER BY created_at DESC LIMIT ?`
 );
 
 const deleteMemory = db.prepare(`DELETE FROM memories WHERE id = ?`);
@@ -693,7 +697,7 @@ const getNoEmbedding = db.prepare(
 // Profile queries
 const getStaticMemories = db.prepare(
   `SELECT id, content, category, source_count, created_at, updated_at
-   FROM memories WHERE is_static = 1 AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?
+   FROM memories WHERE is_static = 1 AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND status = 'approved' AND user_id = ?
    ORDER BY source_count DESC, updated_at DESC`
 );
 
@@ -745,6 +749,22 @@ const getByTag = db.prepare(
 
 const getAllTags = db.prepare(
   `SELECT DISTINCT tags FROM memories WHERE tags IS NOT NULL AND is_forgotten = 0 AND is_archived = 0 AND user_id = ?`
+);
+
+// Inbox / Review queue prepared statements
+const listPending = db.prepare(
+  `SELECT id, content, category, source, session_id, importance, created_at, tags, confidence, decay_score, status
+   FROM memories WHERE status = 'pending' AND is_forgotten = 0 AND user_id = ?
+   ORDER BY created_at DESC LIMIT ? OFFSET ?`
+);
+const countPending = db.prepare(
+  `SELECT COUNT(*) as count FROM memories WHERE status = 'pending' AND is_forgotten = 0 AND user_id = ?`
+);
+const approveMemory = db.prepare(
+  `UPDATE memories SET status = 'approved', updated_at = datetime('now') WHERE id = ? AND user_id = ?`
+);
+const rejectMemory = db.prepare(
+  `UPDATE memories SET status = 'rejected', is_archived = 1, updated_at = datetime('now') WHERE id = ? AND user_id = ?`
 );
 
 // Episodes
@@ -2601,6 +2621,8 @@ const server = Bun.serve({
       const staticCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_static = 1 AND is_forgotten = 0").get() as { count: number };
       const versionedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE version > 1").get() as { count: number };
       const archivedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_archived = 1 AND is_forgotten = 0").get() as { count: number };
+      const pendingCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE status = 'pending' AND is_forgotten = 0").get() as { count: number };
+      const rejectedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE status = 'rejected'").get() as { count: number };
       const episodeCount = db.prepare("SELECT COUNT(*) as count FROM episodes").get() as { count: number };
       const consolidationCount = db.prepare("SELECT COUNT(*) as count FROM consolidations").get() as { count: number };
       const taggedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE tags IS NOT NULL AND is_forgotten = 0").get() as { count: number };
@@ -2616,6 +2638,8 @@ const server = Bun.serve({
         links: linkCount.count,
         forgotten: forgottenCount.count,
         archived: archivedCount.count,
+          pending: pendingCount.count,
+          rejected: rejectedCount.count,
         static: staticCount.count,
         versioned: versionedCount.count,
         tagged: taggedCount.count,
@@ -3834,9 +3858,10 @@ Return JSON:
 
         // Set user_id, space_id, tags, episode_id, sync_id, confidence
         const syncId = crypto.randomUUID();
+        const memStatus = body.status === "pending" ? "pending" : "approved";
         db.prepare(
-          "UPDATE memories SET user_id = ?, space_id = ?, tags = ?, episode_id = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
-        ).run(auth.user_id, auth.space_id || null, tagsJson, episodeId, syncId, result.id);
+          "UPDATE memories SET user_id = ?, space_id = ?, tags = ?, episode_id = ?, sync_id = ?, confidence = 1.0, status = ? WHERE id = ?"
+        ).run(auth.user_id, auth.space_id || null, tagsJson, episodeId, syncId, memStatus, result.id);
 
         // Link to entities and projects if provided
         const entityIds = body.entity_ids as number[] | undefined;
@@ -3917,6 +3942,7 @@ Return JSON:
           episode_id: episodeId,
           decay_score: decayScore,
           fact_extraction: LLM_API_KEY ? "queued" : "disabled",
+          status: memStatus,
         });
       } catch (e: any) {
         return errorResponse(`Failed to store: ${e.message}`, 500);
@@ -5587,7 +5613,18 @@ If no meaningful inferences, return {"derived": []}`;
             confidence: mem.confidence,
             group: mem.category,
             size: Math.max(3, mem.importance * 1.5),
-          });
+            source: mem.source,
+            created_at: mem.created_at,
+            is_static: mem.is_static,
+            is_forgotten: mem.is_forgotten,
+            is_archived: mem.is_archived,
+            parent_memory_id: mem.parent_memory_id,
+            source_count: mem.source_count,
+            content: mem.content,
+            version: mem.version,
+            tags: mem.tags,
+            forget_after: mem.forget_after,
+          } as any);
 
           // Get links
           if (currentDepth < depth) {
@@ -5990,6 +6027,8 @@ If no meaningful inferences, return {"derived": []}`;
       const dynamicCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_static = 0 AND is_forgotten = 0").get() as { count: number };
       const versionedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE version > 1").get() as { count: number };
       const archivedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_archived = 1 AND is_forgotten = 0").get() as { count: number };
+      const pendingCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE status = 'pending' AND is_forgotten = 0").get() as { count: number };
+      const rejectedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE status = 'rejected'").get() as { count: number };
       const inferenceCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_inference = 1").get() as { count: number };
 
       const linkTypes = db.prepare(
@@ -6013,6 +6052,8 @@ If no meaningful inferences, return {"derived": []}`;
           embedded: embCount.count,
           forgotten: forgottenCount.count,
           archived: archivedCount.count,
+          pending: pendingCount.count,
+          rejected: rejectedCount.count,
           static: staticCount.count,
           dynamic: dynamicCount.count,
           versioned: versionedCount.count,
@@ -6034,7 +6075,112 @@ If no meaningful inferences, return {"derived": []}`;
       });
     }
 
-    return errorResponse("Not found", 404);
+    // ========================================================================
+    // INBOX / REVIEW QUEUE — v5.1
+    // ========================================================================
+
+    // List pending memories
+    if (url.pathname === "/inbox" && method === "GET") {
+      const limit = Math.min(Number(url.searchParams.get("limit") || 50), 200);
+      const offset = Number(url.searchParams.get("offset") || 0);
+      const pending = listPending.all(auth.user_id, limit, offset) as any[];
+      const total = (countPending.get(auth.user_id) as { count: number }).count;
+      for (const p of pending) {
+        try { if (p.tags) p.tags = JSON.parse(p.tags); } catch { p.tags = []; }
+      }
+      return json({ pending, count: pending.length, total, offset, limit });
+    }
+
+    // Approve a pending memory
+    if (url.pathname.match(/^\/inbox\/\d+\/approve$/) && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      const id = Number(url.pathname.split("/")[2]);
+      const mem = getMemoryWithoutEmbedding.get(id) as any;
+      if (!mem) return errorResponse("Not found", 404);
+      if (mem.status !== "pending") return errorResponse(`Memory is already ${mem.status}`, 400);
+      approveMemory.run(id, auth.user_id);
+      emitWebhookEvent("memory.approved", { id }, auth.user_id);
+      return json({ approved: true, id });
+    }
+
+    // Reject a pending memory
+    if (url.pathname.match(/^\/inbox\/\d+\/reject$/) && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      const id = Number(url.pathname.split("/")[2]);
+      const mem = getMemoryWithoutEmbedding.get(id) as any;
+      if (!mem) return errorResponse("Not found", 404);
+      if (mem.status !== "pending") return errorResponse(`Memory is already ${mem.status}`, 400);
+      const body = await req.json().catch(() => ({})) as any;
+      rejectMemory.run(id, auth.user_id);
+      if (body.reason) {
+        db.prepare("UPDATE memories SET forget_reason = ? WHERE id = ?").run(body.reason, id);
+      }
+      emitWebhookEvent("memory.rejected", { id, reason: body.reason || null }, auth.user_id);
+      return json({ rejected: true, id });
+    }
+
+    // Edit + approve in one shot
+    if (url.pathname.match(/^\/inbox\/\d+\/edit$/) && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const id = Number(url.pathname.split("/")[2]);
+        const mem = getMemoryWithoutEmbedding.get(id) as any;
+        if (!mem) return errorResponse("Not found", 404);
+        const body = await req.json() as any;
+
+        const sets: string[] = ["status = 'approved'", "updated_at = datetime('now')"];
+        const vals: any[] = [];
+        if (body.content?.trim()) { sets.push("content = ?"); vals.push(body.content.trim()); }
+        if (body.category) { sets.push("category = ?"); vals.push(body.category); }
+        if (body.importance) { sets.push("importance = ?"); vals.push(Math.max(1, Math.min(10, Number(body.importance)))); }
+        if (body.tags) {
+          const tags = Array.isArray(body.tags) ? body.tags : body.tags.split(",");
+          sets.push("tags = ?");
+          vals.push(JSON.stringify(tags.map((t: any) => String(t).trim().toLowerCase()).filter(Boolean)));
+        }
+        vals.push(id);
+        db.prepare(`UPDATE memories SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+
+        // Re-embed if content changed
+        if (body.content?.trim()) {
+          try {
+            const emb = await embed(body.content.trim());
+            updateMemoryEmbedding.run(embeddingToBuffer(emb), id);
+            try { updateMemoryVec.run(embeddingToVectorJSON(emb), id); } catch {}
+          } catch {}
+        }
+
+        emitWebhookEvent("memory.approved", { id, edited: true }, auth.user_id);
+        return json({ approved: true, edited: true, id });
+      } catch (e: any) {
+        return errorResponse(`Edit failed: ${e.message}`, 500);
+      }
+    }
+
+    // Bulk approve/reject
+    if (url.pathname === "/inbox/bulk" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const body = await req.json() as any;
+        const ids = body.ids;
+        const action = body.action; // "approve" or "reject"
+        if (!Array.isArray(ids) || !ids.length) return errorResponse("ids array required");
+        if (action !== "approve" && action !== "reject") return errorResponse("action must be 'approve' or 'reject'");
+
+        let count = 0;
+        const stmt = action === "approve" ? approveMemory : rejectMemory;
+        for (const id of ids) {
+          stmt.run(id, auth.user_id);
+          count++;
+        }
+        emitWebhookEvent(`memory.bulk_${action}`, { ids, count }, auth.user_id);
+        return json({ action, count, ids });
+      } catch (e: any) {
+        return errorResponse(`Bulk ${(await req.json().catch(() => ({}))).action || "action"} failed: ${e.message}`, 500);
+      }
+    }
+
+        return errorResponse("Not found", 404);
   },
 });
 
@@ -6112,7 +6258,7 @@ setInterval(async () => {
   }
 }, 5 * 60 * 1000);
 
-console.log(`Engram v5.0 listening on ${HOST}:${PORT}`);
+console.log(`Engram v5.1 listening on ${HOST}:${PORT}`);
 console.log(`Database: ${DB_PATH}`);
 console.log(`Embedding model: ${EMBEDDING_MODEL} (${EMBEDDING_DIM}d)`);
 console.log(`LLM: ${LLM_API_KEY ? `${LLM_MODEL} via ${LLM_URL}` : "not configured"}`);
