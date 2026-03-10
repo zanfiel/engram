@@ -60,7 +60,68 @@ const context = await engram.recall("setting up the user's editor");
 - 🔄 **Sync & import** — cross-instance sync, import from Mem0 / Supermemory
 - 📥 **URL ingest** — extract facts from web pages or text blobs
 - 🛠️ **MCP server & CLI** — IDE integrations + terminal workflows
+- 📥 **Review queue / inbox** — auto-detected memories land in review; explicit stores bypass
+- 🔒 **Security hardening** — auth required by default, body/content limits, IP allowlists, timing-safe auth
+- 📋 **Audit trail** — every mutation logged (who, what, when, from where)
+- 📊 **Structured JSON logging** — configurable log levels, request IDs, zero raw console output
+- 🛡️ **Security headers** — X-Content-Type-Options, X-Frame-Options, Referrer-Policy on all responses
+- 💾 **Backup & checkpoint** — download SQLite DB via API, manual WAL checkpoint, graceful shutdown
 - 🐳 **One-command deploy** — `docker compose up`
+
+---
+
+## What's New in v5.2
+
+### Security Hardening
+
+Engram v5.2 locks down the API surface:
+
+- **Auth required by default** — unauthenticated requests are rejected. Set `ENGRAM_OPEN_ACCESS=1` for backwards-compatible single-user mode.
+- **Body size limits** — 1MB per request, 100KB per memory content (configurable).
+- **GUI auth rate limiting** — 5 attempts per minute, 10-minute lockout after breach.
+- **Timing-safe password comparison** — `crypto.timingSafeEqual` for GUI auth.
+- **Security headers** — `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy` on every response.
+- **CORS origin pinning** — `ENGRAM_CORS_ORIGIN` instead of wildcard `*`.
+- **IP allowlisting** — `ENGRAM_ALLOWED_IPS` restricts access to specific addresses.
+- **HMAC secret persistence** — generated secret survives restarts (stored in `data/.hmac_secret`).
+
+### Audit Trail
+
+Every mutation is logged to the `audit_log` table:
+
+```bash
+curl http://localhost:4200/audit?limit=5 \
+  -H "Authorization: Bearer eg_your_key"
+```
+
+Tracked actions: `memory.store`, `memory.delete`, `memory.archive`, `memory.unarchive`, `memory.forget`, `inbox.approve`, `inbox.reject`, `gui.delete`, `gui_auth_fail`, `checkpoint`, `backup`.
+
+Each entry includes: `user_id`, `action`, `target_type`, `target_id`, `details`, `ip`, `request_id`, `created_at`.
+
+### Structured Logging
+
+All log output is now JSON with configurable levels:
+
+```json
+{"level":"info","ts":"2026-03-10T09:32:06Z","msg":"server_started","version":"5.2","port":4200}
+{"level":"info","ts":"2026-03-10T09:32:07Z","msg":"req","method":"POST","path":"/store","status":200,"ms":"4.2"}
+```
+
+Levels: `debug`, `info`, `warn`, `error`, `none`. Set via `ENGRAM_LOG_LEVEL`.
+
+### Review Queue (v5.1)
+
+Memories from auto-detection land in a review inbox. Explicit `memory_store` calls bypass review.
+
+- `GET /inbox` — list pending memories
+- `POST /inbox/:id/approve` / `reject` / `edit`
+- `POST /inbox/bulk` — bulk approve/reject
+
+### New Infrastructure Endpoints
+
+- `POST /checkpoint` — manual WAL checkpoint (admin)
+- `GET /backup` — download SQLite database file (admin)
+- `GET /audit` — query audit log (admin, filterable, paginated)
 
 ---
 
@@ -229,9 +290,9 @@ curl http://localhost:4200/fsrs/state?id=42 \
 
 ### Authentication
 
-All endpoints accept `Authorization: Bearer eg_...` header. Without a key, requests default to the owner account (single-user mode).
+All endpoints require `Authorization: Bearer eg_...` header by default. Set `ENGRAM_OPEN_ACCESS=1` for unauthenticated single-user mode.
 
-Use `X-Space: space-name` header to scope operations to a specific memory space.
+Use `X-Space: space-name` header to scope operations to a specific memory space. Every response includes an `X-Request-Id` header for correlation.
 
 ### Core Endpoints
 
@@ -328,12 +389,25 @@ Use `X-Space: space-name` header to scope operations to a specific memory space.
 | `GET` | `/spaces` | List spaces |
 | `DELETE` | `/spaces/:id` | Delete space |
 
+### Review Queue
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/inbox` | List pending memories |
+| `POST` | `/inbox/:id/approve` | Approve a pending memory |
+| `POST` | `/inbox/:id/reject` | Reject (archive + set reason) |
+| `POST` | `/inbox/:id/edit` | Edit content + auto-approve |
+| `POST` | `/inbox/bulk` | Bulk approve/reject |
+
 ### System
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/health` | Health check (30+ feature flags) |
 | `GET` | `/stats` | Detailed statistics |
+| `GET` | `/audit` | Query audit log (admin) |
+| `POST` | `/checkpoint` | Manual WAL checkpoint (admin) |
+| `GET` | `/backup` | Download SQLite database (admin) |
 
 ---
 
@@ -416,14 +490,25 @@ Engram includes a WebGL graph visualization at `/gui`. Login with your `ENGRAM_G
 |----------|---------|-------------|
 | `ENGRAM_PORT` / `ZANMEMORY_PORT` | `4200` | Server port |
 | `ENGRAM_HOST` / `ZANMEMORY_HOST` | `0.0.0.0` | Bind address |
-| `ENGRAM_GUI_PASSWORD` / `MEGAMIND_GUI_PASSWORD` | `changeme` | GUI login password |
+| `ENGRAM_GUI_PASSWORD` | `changeme` | GUI login password |
+| `ENGRAM_OPEN_ACCESS` | `0` | Set `1` for unauthenticated single-user mode |
+| `ENGRAM_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, `none` |
+| `ENGRAM_CORS_ORIGIN` | `*` | Pin to your domain in production |
+| `ENGRAM_MAX_BODY_SIZE` | `1048576` | Max request body (bytes) |
+| `ENGRAM_MAX_CONTENT_SIZE` | `102400` | Max memory content (bytes) |
+| `ENGRAM_ALLOWED_IPS` | — | Comma-separated IP allowlist |
+| `ENGRAM_HOT_RELOAD` | `0` | Set `1` to reload GUI from disk each request |
 | `LLM_URL` | — | OpenAI-compatible API URL |
 | `LLM_API_KEY` | — | API key for LLM |
 | `LLM_MODEL` | — | Model name (e.g., `gpt-4o`, `claude-sonnet-4-20250514`) |
 
 ### Storage
 
-All data lives in a single libsql database (`data/memory.db`). The file includes both the SQLite data and vector index. Back it up however you back up files.
+All data lives in a single libsql database (`data/memory.db`). The file includes both the SQLite data and vector index.
+
+**Backup:** `GET /backup` returns a downloadable copy (admin required). WAL checkpoints every 5 minutes and on graceful shutdown. Manual checkpoint via `POST /checkpoint`.
+
+**Audit:** `GET /audit` shows all mutations — who stored, deleted, archived, or modified memories, from which IP, with request IDs.
 
 ### Reverse Proxy
 
@@ -473,6 +558,10 @@ server {
 | Cross-instance sync | ✅ | ❌ | ❌ |
 | URL ingest | ✅ | ❌ | ❌ |
 | Import from Mem0 / Supermemory | ✅ | — | — |
+| Review queue / inbox | ✅ | ❌ | ❌ |
+| Audit trail | ✅ | ❌ | ❌ |
+| Structured JSON logging | ✅ | ❌ | ❌ |
+| API backup & WAL checkpoint | ✅ | ❌ | ❌ |
 | Self-hosted | ✅ | ✅ | ✅ |
 | libsql / SQLite (zero deps) | ✅ | ❌ | ❌ |
 
