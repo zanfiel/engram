@@ -1,0 +1,25 @@
+services:
+  engram:
+    build: .
+    container_name: engram
+    restart: unless-stopped
+    ports:
+      - "4200:4200"
+    volumes:
+      - engram-data:/app/data
+    environment:
+      - ENGRAM_PORT=4200
+      - ENGRAM_GUI_PASSWORD=${ENGRAM_GUI_PASSWORD:-changeme}
+      # Optional: LLM for fact extraction
+      # - LLM_URL=http://host.docker.internal:4100/v1/chat/completions
+      # - LLM_API_KEY=your-key
+      # - LLM_MODEL=claude-sonnet-4-20250514
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4200/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+volumes:
+  engram-data:
