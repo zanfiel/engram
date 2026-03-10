@@ -36,6 +36,35 @@ const API_KEY_PREFIX = "eg_";
 const DEFAULT_RATE_LIMIT = 120; // requests per minute
 const RATE_WINDOW_MS = 60_000;
 
+// Security config
+const OPEN_ACCESS = process.env.ENGRAM_OPEN_ACCESS === "1";
+const CORS_ORIGIN = process.env.ENGRAM_CORS_ORIGIN || "*";
+const MAX_BODY_SIZE = Number(process.env.ENGRAM_MAX_BODY_SIZE || 1_048_576); // 1MB default
+const MAX_CONTENT_SIZE = Number(process.env.ENGRAM_MAX_CONTENT_SIZE || 102_400); // 100KB per memory
+const ALLOWED_IPS = (process.env.ENGRAM_ALLOWED_IPS || "").split(",").map(s => s.trim()).filter(Boolean);
+const GUI_AUTH_MAX_ATTEMPTS = 5;
+const GUI_AUTH_WINDOW_MS = 60_000; // 1 minute
+const GUI_AUTH_LOCKOUT_MS = 600_000; // 10 min lockout after max attempts
+
+// Logging config
+const LOG_LEVEL_MAP: Record<string, number> = { debug: 0, info: 1, warn: 2, error: 3, none: 4 };
+const LOG_LEVEL = LOG_LEVEL_MAP[process.env.ENGRAM_LOG_LEVEL || "info"] ?? 1;
+
+// Structured logger
+const log = {
+  debug: (...args: any[]) => { if (LOG_LEVEL <= 0) console.log(JSON.stringify({ level: "debug", ts: new Date().toISOString(), ...logPayload(args) })); },
+  info: (...args: any[]) => { if (LOG_LEVEL <= 1) console.log(JSON.stringify({ level: "info", ts: new Date().toISOString(), ...logPayload(args) })); },
+  warn: (...args: any[]) => { if (LOG_LEVEL <= 2) console.warn(JSON.stringify({ level: "warn", ts: new Date().toISOString(), ...logPayload(args) })); },
+  error: (...args: any[]) => { if (LOG_LEVEL <= 3) console.error(JSON.stringify({ level: "error", ts: new Date().toISOString(), ...logPayload(args) })); },
+};
+function logPayload(args: any[]): Record<string, any> {
+  if (args.length === 1 && typeof args[0] === "object") return args[0];
+  return { msg: args.map(a => typeof a === "string" ? a : JSON.stringify(a)).join(" ") };
+}
+
+// GUI auth rate limiting state
+const guiAuthAttempts = new Map<string, { count: number; first: number; locked_until: number }>();
+
 // Ensure data directory exists
 await Bun.$`mkdir -p ${DATA_DIR}`;
 
@@ -47,11 +76,11 @@ let embedder: FeatureExtractionPipeline | null = null;
 
 async function initEmbedder(): Promise<void> {
   const start = Date.now();
-  console.log("Loading embedding model...");
+  log.info({ msg: "loading_embedding_model", model: EMBEDDING_MODEL });
   embedder = await pipeline("feature-extraction", EMBEDDING_MODEL, {
     dtype: "fp32",
   }) as FeatureExtractionPipeline;
-  console.log(`Embedding model loaded in ${Date.now() - start}ms (${EMBEDDING_MODEL})`);
+  log.info({ msg: "embedding_model_loaded", model: EMBEDDING_MODEL, ms: Date.now() - start });
 }
 
 async function embed(text: string): Promise<Float32Array> {
@@ -295,6 +324,34 @@ try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_sync_id ON memorie
 try { db.exec("ALTER TABLE memories ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'"); } catch {}
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)"); } catch {}
 
+
+// Audit log table
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      action TEXT NOT NULL,
+      target_type TEXT,
+      target_id INTEGER,
+      details TEXT,
+      ip TEXT,
+      request_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_log(target_type, target_id)");
+} catch {}
+
+const insertAudit = db.prepare(
+  "INSERT INTO audit_log (user_id, action, target_type, target_id, details, ip, request_id) VALUES (?, ?, ?, ?, ?, ?, ?)"
+);
+function audit(userId: number | null, action: string, targetType: string | null, targetId: number | null, details: string | null, ip: string | null, requestId: string | null) {
+  try { insertAudit.run(userId, action, targetType, targetId, details, ip, requestId); } catch {}
+}
+
 // v5.0 — FSRS-6 spaced repetition columns
 const v50Columns: [string, string][] = [
   ["fsrs_stability", "REAL"],
@@ -483,14 +540,14 @@ try { db.exec("CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id
 const defaultUser = db.prepare("SELECT id FROM users WHERE id = 1").get();
 if (!defaultUser) {
   db.exec("INSERT INTO users (id, username, is_admin) VALUES (1, 'owner', 1)");
-  console.log("Created default owner user (id=1)");
+  log.info({ msg: "created_default_user", id: 1 });
 }
 
 // Ensure default space for owner
 const defaultSpace = db.prepare("SELECT id FROM spaces WHERE user_id = 1 AND name = 'default'").get();
 if (!defaultSpace) {
   db.exec("INSERT INTO spaces (user_id, name, description) VALUES (1, 'default', 'Default memory space')");
-  console.log("Created default space for owner");
+  log.info({ msg: "created_default_space" });
 }
 
 // ============================================================================
@@ -1136,7 +1193,7 @@ async function extractFacts(
     const result = JSON.parse(jsonStr) as FactExtractionResult;
     return result;
   } catch (e: any) {
-    console.error("Fact extraction failed:", e.message);
+    log.error({ msg: "fact_extraction_failed", error: e.message });
     return null;
   }
 }
@@ -1158,7 +1215,7 @@ function processExtractionResult(
       incrementSourceCount.run(rel.existing_memory_id);
       markSuperseded.run(newMemoryId);
       insertLink.run(newMemoryId, rel.existing_memory_id, 1.0, "derives");
-      console.log(`Memory #${newMemoryId} is duplicate of #${rel.existing_memory_id}, incremented source_count`);
+      log.debug({ msg: "duplicate_detected", new_id: newMemoryId, existing_id: rel.existing_memory_id });
       return;
     }
   }
@@ -1175,31 +1232,31 @@ function processExtractionResult(
       ).run(newVersion, rootId, existing.id, newMemoryId);
       insertLink.run(newMemoryId, rel.existing_memory_id, 1.0, "updates");
       propagateConfidence(newMemoryId, "updates", rel.existing_memory_id);
-      console.log(`Memory #${newMemoryId} updates #${rel.existing_memory_id} (v${newVersion}, root=#${rootId})`);
+      log.debug({ msg: "memory_updated", new_id: newMemoryId, existing_id: rel.existing_memory_id, version: newVersion, root: rootId });
     }
   }
 
   if (rel.type === "extends" && rel.existing_memory_id) {
     insertLink.run(newMemoryId, rel.existing_memory_id, 0.9, "extends");
     propagateConfidence(newMemoryId, "extends", rel.existing_memory_id);
-    console.log(`Memory #${newMemoryId} extends #${rel.existing_memory_id}`);
+    log.debug({ msg: "memory_extends", new_id: newMemoryId, existing_id: rel.existing_memory_id });
   }
 
   if (rel.type === "contradicts" && rel.existing_memory_id) {
     insertLink.run(newMemoryId, rel.existing_memory_id, 0.85, "contradicts");
     insertLink.run(rel.existing_memory_id, newMemoryId, 0.85, "contradicts");
     propagateConfidence(newMemoryId, "contradicts", rel.existing_memory_id);
-    console.log(`Memory #${newMemoryId} contradicts #${rel.existing_memory_id}`);
+    log.info({ msg: "memory_contradicts", new_id: newMemoryId, existing_id: rel.existing_memory_id });
   }
 
   if (rel.type === "caused_by" && rel.existing_memory_id) {
     insertLink.run(newMemoryId, rel.existing_memory_id, 0.8, "caused_by");
-    console.log(`Memory #${newMemoryId} caused by #${rel.existing_memory_id}`);
+    log.debug({ msg: "memory_caused_by", new_id: newMemoryId, cause: rel.existing_memory_id });
   }
 
   if (rel.type === "prerequisite_for" && rel.existing_memory_id) {
     insertLink.run(rel.existing_memory_id, newMemoryId, 0.8, "prerequisite_for");
-    console.log(`Memory #${rel.existing_memory_id} is prerequisite for #${newMemoryId}`);
+    log.debug({ msg: "memory_prerequisite", prerequisite: rel.existing_memory_id, for_id: newMemoryId });
   }
 
   // Apply fact classifications to the memory
@@ -1228,7 +1285,7 @@ function processExtractionResult(
       if (mem?.tags) try { existing = JSON.parse(mem.tags); } catch {}
       const merged = [...new Set([...existing, ...inferred])];
       db.prepare("UPDATE memories SET tags = ? WHERE id = ?").run(JSON.stringify(merged), newMemoryId);
-      console.log(`Auto-tagged memory #${newMemoryId}: [${merged.join(", ")}]`);
+      log.debug({ msg: "auto_tagged", id: newMemoryId, tags: merged });
     }
   }
 }
@@ -1573,10 +1630,10 @@ async function consolidateCluster(
 
     writeVec(summaryMem.id, embArray);
     await autoLink(summaryMem.id, embArray);
-    console.log(`Consolidated ${archived} memories into #${summaryMem.id}: "${result.title}"`);
+    log.info({ msg: "consolidated", archived, summary_id: summaryMem.id, title: result.title });
     return { summaryId: summaryMem.id, archivedCount: archived };
   } catch (e: any) {
-    console.error(`Consolidation failed for cluster around #${centerMemoryId}:`, e.message);
+    log.error({ msg: "consolidation_failed", center_id: centerMemoryId, error: e.message });
     return null;
   }
 }
@@ -1742,7 +1799,7 @@ async function hybridSearch(
       }
     }
   } catch (e: any) {
-    console.error("Vector search failed:", e.message);
+    log.error({ msg: "vector_search_failed", error: e.message });
   }
 
   // 2. FTS5 keyword search
@@ -1956,7 +2013,7 @@ function sweepExpiredMemories(): number {
   const expired = getExpiredMemories.all() as Array<{ id: number; content: string; forget_reason: string }>;
   for (const mem of expired) {
     markForgotten.run(mem.id);
-    console.log(`Auto-forgot memory #${mem.id}: ${mem.forget_reason || "expired"}`);
+    log.debug({ msg: "auto_forgot", id: mem.id, reason: mem.forget_reason || "expired" });
   }
   return expired.length;
 }
@@ -2006,7 +2063,7 @@ async function generateProfile(userId: number = 1, generateSummary: boolean = fa
       );
       profile.summary = summary.trim();
     } catch (e: any) {
-      console.error("Profile summary generation failed:", e.message);
+      log.error({ msg: "profile_summary_failed", error: e.message });
     }
   }
 
@@ -2027,7 +2084,7 @@ async function backfillEmbeddings(batchSize: number = 50): Promise<number> {
       updateMemoryEmbedding.run(embeddingToBuffer(emb), mem.id); try { updateMemoryVec.run(embeddingToVectorJSON(emb), mem.id); } catch {}
       count++;
     } catch (e: any) {
-      console.error(`Failed to embed memory #${mem.id}: ${e.message}`);
+      log.error({ msg: "embed_failed", id: mem.id, error: e.message });
     }
   }
 
@@ -2048,20 +2105,28 @@ async function backfillEmbeddings(batchSize: number = 50): Promise<number> {
 // HELPERS
 // ============================================================================
 
-function json(data: unknown, status = 200) {
+function securityHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  return {
+    "Access-Control-Allow-Origin": CORS_ORIGIN,
+    "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Space, X-Engram-Space, X-Request-Id",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "X-XSS-Protection": "0",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    ...extra,
+  };
+}
+
+function json(data: unknown, status = 200, extra: Record<string, string> = {}) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    },
+    headers: securityHeaders({ "Content-Type": "application/json", ...extra }),
   });
 }
 
-function errorResponse(message: string, status = 400) {
-  return json({ error: message }, status);
+function errorResponse(message: string, status = 400, requestId?: string) {
+  return json({ error: message, ...(requestId ? { request_id: requestId } : {}) }, status);
 }
 
 function sanitizeFTS(query: string): string {
@@ -2133,11 +2198,13 @@ function authenticate(req: Request): AuthContext | null {
   };
 }
 
-function getAuthOrDefault(req: Request): AuthContext {
+function getAuthOrDefault(req: Request): AuthContext | null {
   const auth = authenticate(req);
   if (auth) return auth;
-  // Default to owner user (backwards compat for unauthenticated access)
-  return { user_id: 1, space_id: null, key_id: null, scopes: ["read", "write", "admin"], is_admin: true };
+  if (OPEN_ACCESS) {
+    return { user_id: 1, space_id: null, key_id: null, scopes: ["read", "write", "admin"], is_admin: true };
+  }
+  return null;
 }
 
 function hasScope(auth: AuthContext, scope: string): boolean {
@@ -2158,7 +2225,18 @@ function generateApiKey(): { key: string; prefix: string; hash: string } {
 // ============================================================================
 
 const GUI_PASSWORD = process.env.ENGRAM_GUI_PASSWORD || process.env.MEGAMIND_GUI_PASSWORD /* legacy fallback */ || "changeme";
-const GUI_HMAC_SECRET = process.env.ENGRAM_HMAC_SECRET || crypto.randomUUID() + crypto.randomUUID();
+const GUI_HMAC_SECRET = await (async () => {
+  if (process.env.ENGRAM_HMAC_SECRET) return process.env.ENGRAM_HMAC_SECRET;
+  const secretFile = resolve(DATA_DIR, ".hmac_secret");
+  try {
+    return await Bun.file(secretFile).text();
+  } catch {
+    const secret = crypto.randomUUID() + crypto.randomUUID();
+    await Bun.write(secretFile, secret);
+    log.info({ msg: "generated_hmac_secret", path: secretFile });
+    return secret;
+  }
+})();
 const GUI_COOKIE_MAX_AGE = 7 * 24 * 60 * 60;
 
 function guiSignCookie(ts: number): string {
@@ -2190,8 +2268,22 @@ function guiAuthed(req: Request): boolean {
 // WEB GUI HTML
 // ============================================================================
 
-const GUI_HTML = await Bun.file(import.meta.dir + "/engram-gui.html").text();
-const LOGIN_HTML = await Bun.file(import.meta.dir + "/engram-login.html").text();
+let GUI_HTML = await Bun.file(import.meta.dir + "/engram-gui.html").text();
+let LOGIN_HTML = await Bun.file(import.meta.dir + "/engram-login.html").text();
+const GUI_HOT_RELOAD = process.env.ENGRAM_HOT_RELOAD === "1";
+async function getGuiHtml(): Promise<string> {
+  if (GUI_HOT_RELOAD) return await Bun.file(import.meta.dir + "/engram-gui.html").text();
+  return GUI_HTML;
+}
+async function getLoginHtml(): Promise<string> {
+  if (GUI_HOT_RELOAD) return await Bun.file(import.meta.dir + "/engram-login.html").text();
+  return LOGIN_HTML;
+}
+process.on("SIGHUP", async () => {
+  GUI_HTML = await Bun.file(import.meta.dir + "/engram-gui.html").text();
+  LOGIN_HTML = await Bun.file(import.meta.dir + "/engram-login.html").text();
+  log.info({ msg: "gui_reloaded", trigger: "SIGHUP" });
+});
 
 // ============================================================================
 // DIGEST HELPERS
@@ -2290,13 +2382,13 @@ async function sendDigestWebhook(digest: any, payload: any): Promise<void> {
       db.prepare("UPDATE digests SET next_send_at = ? WHERE id = ?").run(
         calculateNextSend(digest.schedule), digest.id
       );
-      console.error(`Digest #${digest.id} webhook returned ${resp.status}`);
+      log.error({ msg: "digest_webhook_error", digest_id: digest.id, status: resp.status });
     }
   } catch (e: any) {
     db.prepare("UPDATE digests SET next_send_at = ? WHERE id = ?").run(
       calculateNextSend(digest.schedule), digest.id
     );
-    console.error(`Digest #${digest.id} webhook failed: ${e.message}`);
+    log.error({ msg: "digest_webhook_failed", digest_id: digest.id, error: e.message });
   }
 }
 
@@ -2322,7 +2414,7 @@ async function processScheduledDigests(): Promise<number> {
       await sendDigestWebhook(digest, payload);
       sent++;
     } catch (e: any) {
-      console.error(`Digest #${digest.id} processing failed: ${e.message}`);
+      log.error({ msg: "digest_processing_failed", digest_id: digest.id, error: e.message });
     }
   }
   return sent;
@@ -2343,23 +2435,48 @@ const server = Bun.serve({
 
     // CORS preflight
     if (method === "OPTIONS") {
-      return new Response(null, {
-        status: 204,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
-        },
-      });
+      return new Response(null, { status: 204, headers: securityHeaders() });
+    }
+
+    // ========================================================================
+    // REQUEST MIDDLEWARE — ID, IP check, body limit
+    // ========================================================================
+    const requestId = req.headers.get("X-Request-Id") || crypto.randomUUID().slice(0, 8);
+    const clientIp = server.requestIP(req)?.address || req.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() || "unknown";
+    const requestStart = performance.now();
+
+    // IP allowlist check
+    if (ALLOWED_IPS.length > 0 && !ALLOWED_IPS.includes(clientIp) && clientIp !== "127.0.0.1" && clientIp !== "::1") {
+      log.warn({ msg: "blocked_ip", ip: clientIp, path: url.pathname, rid: requestId });
+      return new Response("Forbidden", { status: 403 });
+    }
+
+    // Body size limit
+    if (method === "POST" || method === "PATCH" || method === "PUT" || method === "DELETE") {
+      const cl = req.headers.get("Content-Length");
+      if (cl && Number(cl) > MAX_BODY_SIZE) {
+        log.warn({ msg: "body_too_large", size: Number(cl), limit: MAX_BODY_SIZE, ip: clientIp, rid: requestId });
+        return json({ error: "Request body too large", limit: MAX_BODY_SIZE }, 413);
+      }
     }
 
     // ========================================================================
     // WEB GUI AUTH
     // ========================================================================
     if (url.pathname === "/gui/auth" && method === "POST") {
+      // Rate limit GUI auth attempts
+      const now = Date.now();
+      const ga = guiAuthAttempts.get(clientIp);
+      if (ga && now < ga.locked_until) {
+        log.warn({ msg: "gui_auth_locked", ip: clientIp, rid: requestId });
+        return json({ error: "Too many attempts. Try again later." }, 429);
+      }
+      if (ga && now - ga.first > GUI_AUTH_WINDOW_MS) guiAuthAttempts.delete(clientIp);
       try {
         const body = await req.json() as { password?: string };
-        if (body.password === GUI_PASSWORD) {
+        const pwMatch = body.password && body.password.length === GUI_PASSWORD.length &&
+          crypto.timingSafeEqual(Buffer.from(body.password), Buffer.from(GUI_PASSWORD));
+        if (pwMatch) {
           const cookie = guiSignCookie(Math.floor(Date.now() / 1000));
           return new Response(JSON.stringify({ ok: true }), {
             headers: {
@@ -2368,13 +2485,19 @@ const server = Bun.serve({
             }
           });
         }
+        const att = guiAuthAttempts.get(clientIp) || { count: 0, first: Date.now(), locked_until: 0 };
+        att.count++;
+        if (att.count >= GUI_AUTH_MAX_ATTEMPTS) att.locked_until = Date.now() + GUI_AUTH_LOCKOUT_MS;
+        guiAuthAttempts.set(clientIp, att);
+        audit(null, "gui_auth_fail", null, null, null, clientIp, requestId);
+        log.warn({ msg: "gui_auth_fail", ip: clientIp, attempts: att.count, rid: requestId });
         return json({ error: "Invalid password" }, 401);
       } catch { return json({ error: "Bad request" }, 400); }
     }
 
     if (url.pathname === "/gui/logout" && method === "GET") {
-      return new Response(LOGIN_HTML, {
-        headers: { "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "engram_auth=; Path=/; HttpOnly; Max-Age=0" }
+      return new Response(await getLoginHtml(), {
+        headers: securityHeaders({ "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "engram_auth=; Path=/; HttpOnly; Max-Age=0" })
       });
     }
 
@@ -2383,15 +2506,21 @@ const server = Bun.serve({
     // ========================================================================
     if ((url.pathname === "/" || url.pathname === "/gui") && method === "GET") {
       if (guiAuthed(req)) {
-        return new Response(GUI_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+        return new Response(await getGuiHtml(), { headers: securityHeaders({ "Content-Type": "text/html; charset=utf-8" }) });
       }
-      return new Response(LOGIN_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+      return new Response(await getLoginHtml(), { headers: securityHeaders({ "Content-Type": "text/html; charset=utf-8" }) });
     }
 
     // ========================================================================
-    // AUTH CONTEXT — extract user from API key or default to owner
+    // AUTH CONTEXT — extract user from API key or require auth
     // ========================================================================
-    const auth = getAuthOrDefault(req);
+    const maybeAuth = getAuthOrDefault(req);
+    if (!maybeAuth && url.pathname !== "/health") {
+      const elapsed = (performance.now() - requestStart).toFixed(1);
+      log.info({ msg: "req", method, path: url.pathname, status: 401, ms: elapsed, ip: clientIp, rid: requestId });
+      return json({ error: "Authentication required. Provide Bearer eg_* token." }, 401, { "X-Request-Id": requestId });
+    }
+    const auth: AuthContext = maybeAuth || { user_id: 1, space_id: null, key_id: null, scopes: ["read"], is_admin: false };
 
     // ========================================================================
     // USER MANAGEMENT (admin only)
@@ -2598,7 +2727,7 @@ const server = Bun.serve({
 
         // Queue embedding backfill for imported memories
         if (imported > 0) {
-          backfillEmbeddings(imported).catch(e => console.error("Import backfill error:", e));
+          backfillEmbeddings(imported).catch(e => log.error({ msg: "import_backfill_error", error: String(e) }));
         }
 
         return json({ imported, failed, total: items.length });
@@ -2611,6 +2740,7 @@ const server = Bun.serve({
     // HEALTH
     // ========================================================================
     if (url.pathname === "/health" && method === "GET") {
+      log.debug({ msg: "req", method: "GET", path: "/health", status: 200, ip: clientIp, rid: requestId });
       const memCount = db.prepare("SELECT COUNT(*) as count FROM memories").get() as { count: number };
       const convCount = db.prepare("SELECT COUNT(*) as count FROM conversations").get() as { count: number };
       const msgCount = db.prepare("SELECT COUNT(*) as count FROM messages").get() as { count: number };
@@ -2755,12 +2885,12 @@ If no meaningful facts, return {"facts": []}`;
             if (jsonMatch) {
               extracted = JSON.parse(jsonMatch[0]);
             } else {
-              console.error("Conversation extraction: unparseable LLM response:", cleaned.substring(0, 500));
+              log.error({ msg: "conversation_extraction_parse_error", response: cleaned.substring(0, 500) });
               return errorResponse("LLM returned unparseable response", 500);
             }
           }
         } catch (parseErr: any) {
-          console.error("Conversation extraction parse error:", parseErr.message);
+          log.error({ msg: "conversation_extraction_error", error: parseErr.message });
           return errorResponse("LLM returned unparseable response", 500);
         }
 
@@ -3809,6 +3939,9 @@ Return JSON:
         if (!content || typeof content !== "string" || content.trim().length === 0) {
           return errorResponse("content is required and must be a non-empty string");
         }
+        if (content.length > MAX_CONTENT_SIZE) {
+          return errorResponse(`Content too large (${content.length} bytes). Max: ${MAX_CONTENT_SIZE}`, 413);
+        }
 
         const imp = Math.max(1, Math.min(10, Number(importance) || DEFAULT_IMPORTANCE));
 
@@ -3843,7 +3976,7 @@ Return JSON:
           embArray = await embed(content.trim());
           embBuffer = embeddingToBuffer(embArray);
         } catch (e: any) {
-          console.error("Embedding failed, storing without:", e.message);
+          log.warn({ msg: "embedding_failed_storing_without", error: e.message });
         }
 
         const result = insertMemory.get(
@@ -3909,6 +4042,8 @@ Return JSON:
           status: memStatus,
         });
 
+        audit(auth.user_id, "memory.store", "memory", result.id, (category || "general"), clientIp, requestId);
+
         // === ASYNC POST-STORE PIPELINE (non-blocking) ===
         // CRITICAL: Use setTimeout(0) to defer heavy work to NEXT event loop tick.
         // Without this, synchronous libsql calls (writeVec, autoLink) block the 
@@ -3923,12 +4058,12 @@ Return JSON:
               // 1. Write vector column (slow — libsql FLOAT32 index update)
               const _t1 = Date.now();
               writeVec(capturedMemId, capturedEmbArray);
-              console.log(`[store #${capturedMemId}] writeVec: ${Date.now() - _t1}ms`);
+              log.debug({ msg: "store_writeVec", id: capturedMemId, ms: Date.now() - _t1 });
 
               // 2. Auto-link to similar memories (slow — vector_top_k + cosine)
               const _t2 = Date.now();
               const linked = await autoLink(capturedMemId, capturedEmbArray);
-              console.log(`[store #${capturedMemId}] autoLink: ${Date.now() - _t2}ms, linked=${linked}`);
+              log.debug({ msg: "store_autoLink", id: capturedMemId, ms: Date.now() - _t2, linked });
 
               // 3. Fact extraction via LLM (slowest — external API call)
               if (LLM_API_KEY) {
@@ -3951,14 +4086,14 @@ Return JSON:
                   const extraction = await extractFacts(capturedContent, capturedCategory, top3);
                   if (extraction) {
                     processExtractionResult(capturedMemId, extraction, capturedEmbArray);
-                    console.log(`Fact extraction complete for memory #${capturedMemId}: ${extraction.relation_to_existing.type}`);
+                    log.debug({ msg: "fact_extraction_done", id: capturedMemId, relation: extraction.relation_to_existing.type });
                   }
                 } catch (e: any) {
-                  console.error(`Fact extraction failed for #${capturedMemId}:`, e.message);
+                  log.error({ msg: "fact_extraction_failed", id: capturedMemId, error: e.message });
                 }
               }
             } catch (e: any) {
-              console.error(`Async post-store pipeline failed for #${capturedMemId}:`, e.message);
+              log.error({ msg: "store_pipeline_failed", id: capturedMemId, error: e.message });
             }
           }, 0);
         }
@@ -4073,6 +4208,7 @@ Return JSON:
       if (body.reason) {
         db.prepare("UPDATE memories SET forget_reason = ? WHERE id = ?").run(body.reason, id);
       }
+      audit(auth.user_id, "memory.forget", "memory", id, body.reason || "manual", clientIp, requestId);
       return json({ forgotten: true, id });
     }
 
@@ -4086,6 +4222,7 @@ Return JSON:
       const mem = getMemoryWithoutEmbedding.get(id) as any;
       if (!mem) return errorResponse("Not found", 404);
       markArchived.run(id);
+      audit(auth.user_id, "memory.archive", "memory", id, null, clientIp, requestId);
       return json({ archived: true, id });
     }
 
@@ -4095,6 +4232,7 @@ Return JSON:
       const mem = getMemoryWithoutEmbedding.get(id) as any;
       if (!mem) return errorResponse("Not found", 404);
       markUnarchived.run(id);
+      audit(auth.user_id, "memory.unarchive", "memory", id, null, clientIp, requestId);
       return json({ unarchived: true, id });
     }
 
@@ -4126,7 +4264,7 @@ Return JSON:
           embArray = await embed(newContent.trim());
           embBuffer = embeddingToBuffer(embArray);
         } catch (e: any) {
-          console.error("Embedding failed for update:", e.message);
+          log.warn({ msg: "embedding_failed_update", error: e.message });
         }
 
         // Determine version chain
@@ -4166,7 +4304,7 @@ Return JSON:
           linked = await autoLink(result.id, embArray);
         }
 
-        console.log(`Memory #${id} updated -> #${result.id} (v${newVersion}, root=#${rootId})`);
+        log.info({ msg: "memory_version_created", old_id: id, new_id: result.id, version: newVersion, root: rootId });
 
         return json({
           updated: true,
@@ -4485,6 +4623,7 @@ Return JSON:
       const id = Number(url.pathname.split("/")[2]);
       if (isNaN(id)) return errorResponse("Invalid id");
       deleteMemory.run(id);
+      audit(auth.user_id, "memory.delete", "memory", id, null, clientIp, requestId);
       return json({ deleted: true, id });
     }
 
@@ -4806,6 +4945,7 @@ Return JSON:
       if (!guiAuthed(req)) return errorResponse("GUI auth required", 401);
       const id = Number(url.pathname.split("/")[3]);
       deleteMemory.run(id);
+      audit(null, "gui.delete", "memory", id, null, clientIp, requestId);
       return json({ deleted: true, id });
     }
 
@@ -5403,7 +5543,7 @@ If no meaningful inferences, return {"derived": []}`;
             if (jsonMatch) {
               parsed = JSON.parse(jsonMatch[0]);
             } else {
-              console.error("Derive: unparseable LLM response:", cleaned.substring(0, 500));
+              log.error({ msg: "derive_parse_error", response: cleaned.substring(0, 500) });
               return json({ derived: 0, facts: [], error: "LLM returned unparseable response" });
             }
           }
@@ -6119,6 +6259,7 @@ If no meaningful inferences, return {"derived": []}`;
       if (!mem) return errorResponse("Not found", 404);
       if (mem.status !== "pending") return errorResponse(`Memory is already ${mem.status}`, 400);
       approveMemory.run(id, auth.user_id);
+      audit(auth.user_id, "inbox.approve", "memory", id, null, clientIp, requestId);
       emitWebhookEvent("memory.approved", { id }, auth.user_id);
       return json({ approved: true, id });
     }
@@ -6132,6 +6273,7 @@ If no meaningful inferences, return {"derived": []}`;
       if (mem.status !== "pending") return errorResponse(`Memory is already ${mem.status}`, 400);
       const body = await req.json().catch(() => ({})) as any;
       rejectMemory.run(id, auth.user_id);
+      audit(auth.user_id, "inbox.reject", "memory", id, reason || null, clientIp, requestId);
       if (body.reason) {
         db.prepare("UPDATE memories SET forget_reason = ? WHERE id = ?").run(body.reason, id);
       }
@@ -6200,9 +6342,101 @@ If no meaningful inferences, return {"derived": []}`;
       }
     }
 
-        return errorResponse("Not found", 404);
+    // ========================================================================
+    // AUDIT LOG ENDPOINT
+    // ========================================================================
+    if (url.pathname === "/audit" && method === "GET") {
+      if (!auth.is_admin) return errorResponse("Admin required", 403, requestId);
+      const limit = Math.min(Number(url.searchParams.get("limit")) || 50, 500);
+      const offset = Number(url.searchParams.get("offset")) || 0;
+      const action = url.searchParams.get("action");
+      let sql = "SELECT * FROM audit_log WHERE 1=1";
+      const params: any[] = [];
+      if (action) { sql += " AND action = ?"; params.push(action); }
+      sql += " ORDER BY id DESC LIMIT ? OFFSET ?";
+      params.push(limit, offset);
+      const entries = db.prepare(sql).all(...params);
+      const total = (db.prepare("SELECT COUNT(*) as count FROM audit_log").get() as any).count;
+      return json({ entries, total, limit, offset }, 200, { "X-Request-Id": requestId });
+    }
+
+    // ========================================================================
+    // WAL CHECKPOINT ENDPOINT
+    // ========================================================================
+    if (url.pathname === "/checkpoint" && method === "POST") {
+      if (!auth.is_admin) return errorResponse("Admin required", 403, requestId);
+      const result = db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as any;
+      audit(auth.user_id, "checkpoint", null, null, JSON.stringify(result), clientIp, requestId);
+      log.info({ msg: "wal_checkpoint_manual", result, rid: requestId });
+      return json({ checkpointed: true, ...result }, 200, { "X-Request-Id": requestId });
+    }
+
+    // ========================================================================
+    // BACKUP ENDPOINT — download SQLite DB
+    // ========================================================================
+    if (url.pathname === "/backup" && method === "GET") {
+      if (!auth.is_admin) return errorResponse("Admin required", 403, requestId);
+      try {
+        db.prepare("PRAGMA wal_checkpoint(PASSIVE)").get();
+        const backupPath = resolve(DATA_DIR, `backup-${Date.now()}.db`);
+        await Bun.write(backupPath, Bun.file(DB_PATH));
+        const file = Bun.file(backupPath);
+        audit(auth.user_id, "backup", null, null, `${file.size} bytes`, clientIp, requestId);
+        log.info({ msg: "backup_created", size: file.size, rid: requestId });
+        const resp = new Response(file, {
+          headers: securityHeaders({
+            "Content-Type": "application/x-sqlite3",
+            "Content-Disposition": `attachment; filename="engram-${new Date().toISOString().slice(0,10)}.db"`,
+          }),
+        });
+        setTimeout(async () => { try { await Bun.$`rm -f ${backupPath}`; } catch {} }, 30_000);
+        return resp;
+      } catch (e: any) {
+        return errorResponse(`Backup failed: ${e.message}`, 500, requestId);
+      }
+    }
+
+    // ========================================================================
+    // CATCH-ALL 404 with request log
+    // ========================================================================
+    {
+      const elapsed = (performance.now() - requestStart).toFixed(1);
+      log.info({ msg: "req", method, path: url.pathname, status: 404, ms: elapsed, ip: clientIp, user: auth.user_id, rid: requestId });
+    }
+        return errorResponse("Not found", 404, requestId);
   },
 });
+
+// ============================================================================
+// WAL CHECKPOINT (every 5 minutes)
+// ============================================================================
+function walCheckpoint() {
+  try {
+    const result = db.prepare("PRAGMA wal_checkpoint(PASSIVE)").get() as any;
+    if (result && result.checkpointed > 0) log.debug({ msg: "wal_checkpoint", ...result });
+  } catch (e: any) {
+    log.error({ msg: "wal_checkpoint_failed", error: e.message });
+  }
+}
+setInterval(walCheckpoint, 5 * 60 * 1000);
+
+// ============================================================================
+// GRACEFUL SHUTDOWN
+// ============================================================================
+async function gracefulShutdown(signal: string) {
+  log.info({ msg: "shutdown_start", signal });
+  try {
+    db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+    log.info({ msg: "wal_final_checkpoint" });
+  } catch (e: any) {
+    log.error({ msg: "wal_checkpoint_failed", error: e.message });
+  }
+  try { db.close(); } catch {}
+  log.info({ msg: "shutdown_complete", signal });
+  process.exit(0);
+}
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
 // ============================================================================
 // STARTUP
@@ -6210,22 +6444,22 @@ If no meaningful inferences, return {"derived": []}`;
 
 const noEmb = (countNoEmbedding.get() as { count: number }).count;
 if (noEmb > 0) {
-  console.log(`Found ${noEmb} memories without embeddings, backfilling...`);
+  log.info({ msg: "backfill_start", count: noEmb });
   backfillEmbeddings(200).then((n) => {
-    console.log(`Backfilled ${n} memories. Remaining: ${noEmb - n}`);
-  }).catch(e => console.error("Backfill error:", e));
+    log.info({ msg: "backfill_done", backfilled: n, remaining: noEmb - n });
+  }).catch(e => log.error({ msg: "backfill_error", error: String(e) }));
 }
 
 // Auto-forget sweep timer
 setInterval(() => {
   const swept = sweepExpiredMemories();
-  if (swept > 0) console.log(`Auto-forget sweep: ${swept} memories forgotten`);
+  if (swept > 0) log.info({ msg: "auto_forget_sweep", swept });
 }, FORGET_SWEEP_INTERVAL);
 
 // Decay score refresh (every 15 minutes)
 setInterval(() => {
   const updated = updateDecayScores();
-  if (updated > 0) console.log(`Decay refresh: ${updated} scores updated`);
+  if (updated > 0) log.info({ msg: "decay_refresh", updated });
 }, 15 * 60 * 1000);
 
 // Auto-consolidation sweep (if LLM configured)
@@ -6233,9 +6467,9 @@ if (LLM_API_KEY) {
   setInterval(async () => {
     try {
       const consolidated = await runConsolidationSweep();
-      if (consolidated > 0) console.log(`Auto-consolidation: ${consolidated} memories consolidated`);
+      if (consolidated > 0) log.info({ msg: "auto_consolidation", consolidated });
     } catch (e: any) {
-      console.error("Auto-consolidation error:", e.message);
+      log.error({ msg: "auto_consolidation_error", error: e.message });
     }
   }, CONSOLIDATION_INTERVAL);
 }
@@ -6264,7 +6498,7 @@ updateDecayScores(); // Initial decay score calculation
       }
     });
     batch();
-    console.log(`Vector migration: ${migrated}/${unmigrated.length} embeddings → FLOAT32`);
+    log.info({ msg: "vector_migration", migrated, total: unmigrated.length });
   }
 }
 
@@ -6272,16 +6506,11 @@ updateDecayScores(); // Initial decay score calculation
 setInterval(async () => {
   try {
     const sent = await processScheduledDigests();
-    if (sent > 0) console.log(`Digest scheduler: sent ${sent} digest(s)`);
+    if (sent > 0) log.info({ msg: "digest_sent", count: sent });
   } catch (e: any) {
-    console.error("Digest scheduler error:", e.message);
+    log.error({ msg: "digest_scheduler_error", error: e.message });
   }
 }, 5 * 60 * 1000);
 
-console.log(`Engram v5.1 listening on ${HOST}:${PORT}`);
-console.log(`Database: ${DB_PATH}`);
-console.log(`Embedding model: ${EMBEDDING_MODEL} (${EMBEDDING_DIM}d)`);
-console.log(`LLM: ${LLM_API_KEY ? `${LLM_MODEL} via ${LLM_URL}` : "not configured"}`);
-console.log(`Auto-link: threshold=${AUTO_LINK_THRESHOLD}, max=${AUTO_LINK_MAX}`);
-console.log(`FSRS-6: w20=${FSRS6_WEIGHTS[20]}, retention=${FSRS_DEFAULT_RETENTION}, consolidation=${LLM_API_KEY ? `threshold=${CONSOLIDATION_THRESHOLD}` : "disabled (no LLM)"}`);
-console.log(`Auto-forget sweep: every ${FORGET_SWEEP_INTERVAL / 1000}s`);
+log.info({ msg: "server_started", version: "5.2", host: HOST, port: PORT, open_access: OPEN_ACCESS, cors: CORS_ORIGIN, log_level: process.env.ENGRAM_LOG_LEVEL || "info", allowed_ips: ALLOWED_IPS.length || "any" });
+log.info({ msg: "config", db: DB_PATH, embedding: `${EMBEDDING_MODEL} (${EMBEDDING_DIM}d)`, llm: LLM_API_KEY ? `${LLM_MODEL} via ${LLM_URL}` : "not configured", auto_link: { threshold: AUTO_LINK_THRESHOLD, max: AUTO_LINK_MAX }, fsrs6: { w20: FSRS6_WEIGHTS[20], retention: FSRS_DEFAULT_RETENTION }, consolidation: LLM_API_KEY ? CONSOLIDATION_THRESHOLD : "disabled", sweep_interval_s: FORGET_SWEEP_INTERVAL / 1000 });
