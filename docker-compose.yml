@@ -4,13 +4,21 @@ services:
     container_name: engram
     restart: unless-stopped
     ports:
-      - "4200:4200"
+      # Bind to 127.0.0.1 by default. Use 0.0.0.0:4200:4200 only behind a reverse proxy or firewall.
+      - "127.0.0.1:4200:4200"
     volumes:
       - engram-data:/app/data
     environment:
       - ENGRAM_PORT=4200
       - ENGRAM_GUI_PASSWORD=${ENGRAM_GUI_PASSWORD:-changeme}
-      # Optional: LLM for fact extraction
+      # SECURITY: Open access grants full admin to unauthenticated requests.
+      # Only enable behind a trusted network (VPN, firewall, etc.)
+      # - ENGRAM_OPEN_ACCESS=1
+      # Optional: restrict by IP (comma-separated)
+      # - ENGRAM_ALLOWED_IPS=127.0.0.1,192.168.1.0/24
+      # Optional: restrict CORS origin (default: *)
+      # - ENGRAM_CORS_ORIGIN=https://your-app.example.com
+      # Optional: LLM for fact extraction, auto-tagging, consolidation
       # - LLM_URL=http://host.docker.internal:4100/v1/chat/completions
       # - LLM_API_KEY=your-key
       # - LLM_MODEL=claude-sonnet-4-20250514
