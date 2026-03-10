@@ -1,6 +1,6 @@
 [Unit]
-Description=MegaMind persistent memory server
-After=network.target
+Description=Engram v5.1 persistent memory server
+After=network.target copilot-proxy.service
 
 [Service]
 Type=simple

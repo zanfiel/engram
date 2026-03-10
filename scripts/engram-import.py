@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bulk import all OpenCode sessions into MegaMind conversations."""
+"""Bulk import all OpenCode sessions into Engram conversations."""
 
 import json
 import subprocess
@@ -13,7 +13,7 @@ AGENT_NAME = "opencode-rocky"
 
 
 def api_post(endpoint, data):
-    """POST JSON to MegaMind."""
+    """POST JSON to Engram."""
     body = json.dumps(data).encode()
     req = urllib.request.Request(
         f"{MEGAMIND_URL}{endpoint}",
@@ -34,7 +34,7 @@ def api_post(endpoint, data):
 
 
 def api_get(endpoint):
-    """GET from MegaMind."""
+    """GET from Engram."""
     req = urllib.request.Request(f"{MEGAMIND_URL}{endpoint}")
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -86,7 +86,7 @@ def export_session(session_id):
 
 
 def extract_messages(export_data):
-    """Convert OpenCode export messages to MegaMind format (role + content)."""
+    """Convert OpenCode export messages to Engram format (role + content)."""
     messages = []
     for msg in export_data.get("messages", []):
         role = msg["info"]["role"]
@@ -123,7 +123,7 @@ def extract_messages(export_data):
 
         if texts:
             content = "\n".join(texts)
-            # Truncate very long messages (MegaMind has limits)
+            # Truncate very long messages (Engram has limits)
             if len(content) > 50000:
                 content = content[:50000] + "\n... [truncated]"
             messages.append({"role": role, "content": content})
@@ -131,7 +131,7 @@ def extract_messages(export_data):
 
 
 def get_existing_sessions():
-    """Get set of session_ids already in MegaMind."""
+    """Get set of session_ids already in Engram."""
     result = api_get("/conversations?limit=500")
     if not result:
         return set()
@@ -146,12 +146,12 @@ def get_existing_sessions():
 
 
 def main():
-    # Check MegaMind health
+    # Check Engram health
     health = api_get("/health")
     if not health:
-        print("ERROR: MegaMind not responding at", MEGAMIND_URL)
+        print("ERROR: Engram not responding at", MEGAMIND_URL)
         sys.exit(1)
-    print(f"MegaMind OK: {health['memories']} memories, {health['conversations']} conversations, {health['messages']} messages")
+    print(f"Engram OK: {health['memories']} memories, {health['conversations']} conversations, {health['messages']} messages")
 
     # Get existing to avoid duplicates
     existing = get_existing_sessions()
@@ -215,7 +215,7 @@ def main():
     # Final stats
     health = api_get("/health")
     if health:
-        print(f"MegaMind now: {health['conversations']} conversations, {health['messages']} messages")
+        print(f"Engram now: {health['conversations']} conversations, {health['messages']} messages")
 
 
 if __name__ == "__main__":

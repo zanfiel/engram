@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Import OpenCode sessions from remote servers into MegaMind."""
+"""Import OpenCode sessions from remote servers into Engram."""
 
 import json
 import subprocess
@@ -110,7 +110,7 @@ def import_from_server(server):
 
     # Get existing to skip duplicates
     existing = get_existing_sessions(agent)
-    print(f"Already in MegaMind: {len(existing)} sessions")
+    print(f"Already in Engram: {len(existing)} sessions")
 
     # List sessions on remote
     list_cmd = f'{ssh_cmd} "{oc_bin} session list --format json -n 200 > /tmp/oc_sessions.json 2>/dev/null; cat /tmp/oc_sessions.json"'
@@ -180,9 +180,9 @@ def import_from_server(server):
 def main():
     health = api_get("/health")
     if not health:
-        print("ERROR: MegaMind not responding")
+        print("ERROR: Engram not responding")
         sys.exit(1)
-    print(f"MegaMind: {health['conversations']} conversations, {health['messages']} messages")
+    print(f"Engram: {health['conversations']} conversations, {health['messages']} messages")
 
     total = 0
     for server in REMOTE_SERVERS:
@@ -191,7 +191,7 @@ def main():
     print(f"\nTotal imported: {total}")
     health = api_get("/health")
     if health:
-        print(f"MegaMind now: {health['conversations']} conversations, {health['messages']} messages")
+        print(f"Engram now: {health['conversations']} conversations, {health['messages']} messages")
 
 
 if __name__ == "__main__":
