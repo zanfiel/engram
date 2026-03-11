@@ -189,17 +189,17 @@ nav .links a:hover{color:var(--text);text-decoration:none}
       <div class="feature" style="border-color:rgba(52,211,153,0.12)">
         <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">🧮</div>
         <h3>Structured Fact Extraction</h3>
-        <p>Quantities, amounts, dates, and relationships are extracted from every memory at write time using fast regex — no LLM call, zero latency. "I bought 3 books for $45" → <code>{qty: 3, unit: "dollars", amount: 45}</code>.</p>
+        <p>Quantities, amounts, dates, and relationships are extracted from every memory at write time using fast regex — no LLM call, zero latency. "I bought 3 books and spent $45 on them" → <code>{verb: "bought", object: "books", qty: 3}</code> + <code>{verb: "spent", qty: 45, unit: "dollars"}</code>.</p>
       </div>
       <div class="feature" style="border-color:rgba(129,140,248,0.12)">
         <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">❤️</div>
         <h3>User Preference Tracking</h3>
-        <p>Automatically detects likes, dislikes, favorites, and preferences from natural language. "I love spicy food" → <code>{domain: "food", preference: "likes spicy food"}</code>. Strength updates with reinforcement.</p>
+        <p>Automatically detects likes, dislikes, favorites, and preferences from natural language. "I love cooking Italian food" → <code>{domain: "food", preference: "likes cooking Italian food"}</code>. Strength updates with reinforcement.</p>
       </div>
       <div class="feature" style="border-color:rgba(248,113,113,0.12)">
         <div class="feature-icon" style="background:rgba(248,113,113,0.1);color:var(--red)">📌</div>
         <h3>Current State Tracking</h3>
-        <p>Key-value state changes are detected and stored separately. "I moved to Portland" → <code>{key: "location", value: "Portland"}</code>. State is always current — later updates replace earlier ones.</p>
+        <p>Key-value state changes are detected and stored separately. "I moved to Portland" → <code>{key: "current_location", value: "Portland"}</code>. State is always current — later updates replace earlier ones.</p>
       </div>
       <div class="feature" style="border-color:rgba(34,211,238,0.12)">
         <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">🎯</div>

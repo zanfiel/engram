@@ -3214,7 +3214,7 @@ async function fetchHandler(req: Request): Promise<Response> {
       const isAuthed = !!maybeAuth;
       const memCount = db.prepare("SELECT COUNT(*) as count FROM memories").get() as { count: number };
       if (!isAuthed) {
-        return json({ status: "ok", version: 5.4, memories: memCount.count });
+        return json({ status: "ok", version: 5.5, memories: memCount.count });
       }
       // Full health for authenticated users
       const convCount = db.prepare("SELECT COUNT(*) as count FROM conversations").get() as { count: number };
@@ -3236,7 +3236,7 @@ async function fetchHandler(req: Request): Promise<Response> {
       const dbSize = statSync(DB_PATH).size;
       return json({
         status: "ok",
-        version: 5.4,
+        version: 5.5,
         memories: memCount.count,
         embedded: embCount.count,
         unembedded: noEmbCount2,
@@ -7358,5 +7358,5 @@ setInterval(async () => {
   }
 }, 5 * 60 * 1000);
 
-log.info({ msg: "server_started", version: "5.4", host: HOST, port: PORT, open_access: OPEN_ACCESS, cors: CORS_ORIGIN, log_level: process.env.ENGRAM_LOG_LEVEL || "info", allowed_ips: ALLOWED_IPS.length || "any" });
+log.info({ msg: "server_started", version: "5.5", host: HOST, port: PORT, open_access: OPEN_ACCESS, cors: CORS_ORIGIN, log_level: process.env.ENGRAM_LOG_LEVEL || "info", allowed_ips: ALLOWED_IPS.length || "any" });
 log.info({ msg: "config", db: DB_PATH, embedding: `${EMBEDDING_MODEL} (${EMBEDDING_DIM}d)`, llm: LLM_API_KEY ? `${LLM_MODEL} via ${LLM_URL}` : "not configured", auto_link: { threshold: AUTO_LINK_THRESHOLD, max: AUTO_LINK_MAX }, fsrs6: { w20: FSRS6_WEIGHTS[20], retention: FSRS_DEFAULT_RETENTION }, consolidation: LLM_API_KEY ? CONSOLIDATION_THRESHOLD : "disabled", sweep_interval_s: FORGET_SWEEP_INTERVAL / 1000 });

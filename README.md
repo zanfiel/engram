@@ -78,9 +78,9 @@ curl -X POST http://localhost:4200/recall \
 
 Every memory stored is now **instantly analyzed** at write time using fast regex extraction — no LLM required, zero latency.
 
-- **Structured facts** — Quantities, amounts, dates, and relationships extracted from natural language. "I bought 3 books for $45 yesterday" → `{subject: "user", verb: "bought", object: "books", quantity: 3, unit: "dollars", date_ref: "yesterday"}`.
-- **User preferences** — Likes, dislikes, and favorites auto-detected. "I love vinyl records" → `{domain: "music", preference: "likes vinyl records"}`. Strength reinforced over time.
-- **Current state** — Key-value state changes tracked. "I moved to Portland" → `{key: "location", value: "Portland"}`. Latest value always wins.
+- **Structured facts** — Quantities, amounts, dates, and relationships extracted from natural language. "I bought 3 books and spent $45 on them" → `{subject: "user", verb: "bought", object: "books", quantity: 3}` + `{verb: "spent", quantity: 45, unit: "dollars"}`.
+- **User preferences** — Likes, dislikes, and favorites auto-detected. "I love cooking Italian food" → `{domain: "food", preference: "likes cooking Italian food"}`. Domain auto-inferred from keywords. Strength reinforced with repeated mentions.
+- **Current state** — Key-value state changes tracked. "I moved to Portland" → `{key: "current_location", value: "Portland"}`. Latest value always wins.
 - **5-layer /context** — The context builder now assembles: Current State → User Preferences → Extracted Facts → Relevant Memories → Recent Activity. LLMs see pre-structured data before raw text.
 - **New endpoints** — `GET /facts`, `GET /state`, `GET /preferences` to query the intelligence layer directly.
 
@@ -89,32 +89,44 @@ Every memory stored is now **instantly analyzed** at write time using fast regex
 curl -X POST http://localhost:4200/store \
   -H "Authorization: Bearer eg_your_key" \
   -H "Content-Type: application/json" \
-  -d '{"content": "I bought 3 albums for $45. I love vinyl records.", "category": "state"}'
+  -d '{"content": "I bought 3 albums and spent $45 on them. I love listening to music.", "category": "state"}'
 
 # Query extracted facts
 curl http://localhost:4200/facts -H "Authorization: Bearer eg_your_key"
-# → [{subject: "user", verb: "bought", object: "albums", quantity: 3, unit: "dollars"}]
+# → [{subject: "user", verb: "bought", object: "albums", quantity: 3},
+#    {subject: "user", verb: "spent", object: "them", quantity: 45, unit: "dollars"}]
 
 # Query preferences
 curl http://localhost:4200/preferences -H "Authorization: Bearer eg_your_key"
-# → [{domain: "music", preference: "likes vinyl records", strength: 1}]
+# → [{domain: "music", preference: "likes listening to music", strength: 1}]
 
 # Context now includes all intelligence layers
 curl -X POST http://localhost:4200/context \
   -H "Authorization: Bearer eg_your_key" \
   -H "Content-Type: application/json" \
   -d '{"query": "How many albums?", "max_tokens": 4000}'
-# → ## Current State
-#   - recent_purchase: 3 vinyl albums for $45
-#   ## User Preferences
-#   - [music] likes vinyl records
+# → ## User Preferences
+#   - [music] likes listening to music
 #   ## Extracted Facts
 #   - user bought albums (qty: 3)
+#   - user spent on them (qty: 45 dollars)
 #   ## Relevant Memories
-#   - [state] I bought 3 albums for $45...
+#   - [state] I bought 3 albums and spent $45 on them...
 ```
 
 The fast extraction runs **synchronously** on `/store` with pure regex — no API calls, no queue, no latency. Optional LLM enrichment still runs async when configured.
+
+---
+
+## What's New in v5.4
+
+### Node.js Native
+
+- **Migrated from Bun to Node.js 22** — uses `--experimental-strip-types` for native TypeScript execution. No transpiler, no bundler, no Bun-specific APIs.
+- **RBAC & Roles** — API keys carry `admin`, `writer`, or `reader` roles for fine-grained access control.
+- **Security hardening** — HSTS, Content-Security-Policy, SSRF protection on webhooks, per-IP rate limiting.
+- **Review queue** — memories can land in an inbox for human approval before going live.
+- **Backup & checkpoint** — API-triggered WAL checkpoints and full database downloads.
 
 ---
 
@@ -146,7 +158,7 @@ curl http://localhost:4200/audit?limit=5 \
 All output is JSON with configurable levels:
 
 ```json
-{"level":"info","ts":"2026-03-10T09:32:06Z","msg":"server_started","version":"5.3","port":4200}
+{"level":"info","ts":"2026-03-10T09:32:06Z","msg":"server_started","version":"5.5","port":4200}
 ```
 
 Levels: `debug`, `info`, `warn`, `error`, `none`. Set via `ENGRAM_LOG_LEVEL`.
@@ -178,15 +190,6 @@ docker compose up -d
 
 Engram is now running at `http://localhost:4200`.
 
-### From source (Bun)
-
-```bash
-git clone https://github.com/zanfiel/engram.git
-cd engram
-bun install
-ENGRAM_GUI_PASSWORD=your-password bun run server.ts
-```
-
 ### From source (Node.js 22+)
 
 ```bash
@@ -194,6 +197,15 @@ git clone https://github.com/zanfiel/engram.git
 cd engram
 npm install
 ENGRAM_GUI_PASSWORD=your-password node --experimental-strip-types server.ts
+```
+
+### From source (Bun)
+
+```bash
+git clone https://github.com/zanfiel/engram.git
+cd engram
+bun install
+ENGRAM_GUI_PASSWORD=your-password bun run server.ts
 ```
 
 ### Create an API key
@@ -212,10 +224,10 @@ Save the returned `eg_...` key — it's shown only once.
 
 ### TypeScript / JavaScript
 
-The SDK lives in `sdk/` within the repo. Zero dependencies — uses native `fetch`.
+The SDK lives in `sdk-ts/` within the repo. Zero dependencies — uses native `fetch`.
 
 ```bash
-cd sdk && npm install && npm run build
+cd sdk-ts && npm install && npm run build
 ```
 
 ```ts
@@ -328,7 +340,7 @@ Add to `claude_desktop_config.json`:
   "mcpServers": {
     "engram": {
       "command": "node",
-      "args": ["path/to/engram/mcp-server.mjs"],
+      "args": ["--experimental-strip-types", "path/to/engram/mcp-server.ts"],
       "env": {
         "ENGRAM_URL": "http://localhost:4200",
         "ENGRAM_API_KEY": "eg_your_key"
@@ -363,14 +375,14 @@ Add to `claude_desktop_config.json`:
 
 ## CLI
 
-Full-featured command-line interface in `sdk/cli.mjs`.
+Full-featured command-line interface in `cli.ts`.
 
 ```bash
 # Symlink for global access
-ln -s $(pwd)/sdk/cli.mjs ~/.local/bin/engram
+ln -s $(pwd)/cli.ts ~/.local/bin/engram
 
 # Or run directly
-node sdk/cli.mjs <command>
+node --experimental-strip-types cli.ts <command>
 ```
 
 ### Commands
@@ -583,7 +595,7 @@ Use `X-Space: space-name` (or `X-Engram-Space`) header to scope operations to a 
 └─────────────────────────────────────────────┘
 ```
 
-- **Runtime:** Bun (primary) or Node.js 22+ (with `--experimental-strip-types`)
+- **Runtime:** Node.js 22+ (primary, with `--experimental-strip-types`) or Bun
 - **Database:** libsql (SQLite fork with vector column support)
 - **Embeddings:** Xenova/all-MiniLM-L6-v2 (384-dim, runs locally via ONNX)
 - **Search:** In-memory cosine similarity + FTS5 full-text hybrid
