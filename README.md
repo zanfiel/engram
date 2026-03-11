@@ -598,48 +598,6 @@ server {
 
 ---
 
-## Comparison
-
-| Feature | Engram | Mem0 | Supermemory |
-|---------|--------|------|-------------|
-| **Spaced repetition (FSRS-6)** | ✅ | ❌ | ❌ |
-| **Dual-strength memory model** | ✅ | ❌ | ❌ |
-| Semantic search (hybrid) | ✅ | ✅ | ✅ |
-| Local embeddings (no API) | ✅ | ❌ | ❌ |
-| Full-text search (FTS5) | ✅ | ❌ | ❌ |
-| Graph visualization | ✅ | ❌ | ✅ |
-| Memory versioning | ✅ | ❌ | ❌ |
-| Auto-deduplication | ✅ | ❌ | ❌ |
-| Auto-forget / TTL | ✅ | ❌ | ❌ |
-| Contradiction detection | ✅ | ❌ | ❌ |
-| Time-travel queries | ✅ | ❌ | ❌ |
-| Smart context builder (RAG) | ✅ | ❌ | ❌ |
-| Reflections | ✅ | ❌ | ❌ |
-| Derived memories | ✅ | ❌ | ❌ |
-| Auto-consolidation | ✅ | ❌ | ❌ |
-| LLM reranker | ✅ | ❌ | ❌ |
-| Fact extraction + auto-tagging | ✅ | ✅ | ❌ |
-| Conversation extraction | ✅ | ✅ | ❌ |
-| MCP server (JSON-RPC stdio) | ✅ | ❌ | ❌ |
-| CLI | ✅ | ❌ | ❌ |
-| Multi-tenant + API keys | ✅ | ✅ | ❌ |
-| Spaces / collections | ✅ | ❌ | ✅ |
-| Entities & projects | ✅ | ❌ | ❌ |
-| Episodic memory | ✅ | ❌ | ❌ |
-| Conversation log + search | ✅ | ❌ | ❌ |
-| Webhooks & digests | ✅ | ❌ | ❌ |
-| Cross-instance sync | ✅ | ❌ | ❌ |
-| URL ingest | ✅ | ❌ | ❌ |
-| Import from Mem0 / Supermemory | ✅ | — | — |
-| Review queue / inbox | ✅ | ❌ | ❌ |
-| Audit trail | ✅ | ❌ | ❌ |
-| Structured JSON logging | ✅ | ❌ | ❌ |
-| API backup & WAL checkpoint | ✅ | ❌ | ❌ |
-| Self-hosted | ✅ | ✅ | ✅ |
-| Single-file DB (zero deps) | ✅ | ❌ | ❌ |
-
----
-
 ## Test Suite
 
 ```bash
