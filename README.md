@@ -43,6 +43,10 @@ curl -X POST http://localhost:4200/recall \
 - 🧹 **Auto-deduplication** — detects and merges near-duplicate memories
 - ⏰ **Implicit spaced repetition** — every access is an FSRS review, building stability over time
 - 🔍 **Fact extraction & auto-tagging** — LLM extracts facts, classifies, tags (optional, requires LLM)
+- 🧮 **Structured fact extraction** — instant regex extraction of quantities, amounts, dates on every store (no LLM required)
+- ❤️ **User preference tracking** — auto-detects likes/dislikes/favorites from natural language
+- 📌 **Current state tracking** — key-value state changes extracted and kept current automatically
+- 🎯 **5-layer smart context** — State → Preferences → Facts → Semantic Matches → Recent Activity
 - 💬 **Conversation extraction** — feed chat logs, get structured memories
 - ⚡ **Contradiction detection** — find and resolve conflicting memories
 - ⏪ **Time-travel queries** — query what you knew at any point in time
@@ -65,6 +69,52 @@ curl -X POST http://localhost:4200/recall \
 - 📊 **Structured JSON logging** — configurable log levels, request IDs, zero raw console output
 - 💾 **Backup & checkpoint** — download SQLite DB via API, manual WAL checkpoint, graceful shutdown
 - 🐳 **One-command deploy** — `docker compose up`
+
+---
+
+## What's New in v5.5
+
+### Intelligence Layer
+
+Every memory stored is now **instantly analyzed** at write time using fast regex extraction — no LLM required, zero latency.
+
+- **Structured facts** — Quantities, amounts, dates, and relationships extracted from natural language. "I bought 3 books for $45 yesterday" → `{subject: "user", verb: "bought", object: "books", quantity: 3, unit: "dollars", date_ref: "yesterday"}`.
+- **User preferences** — Likes, dislikes, and favorites auto-detected. "I love vinyl records" → `{domain: "music", preference: "likes vinyl records"}`. Strength reinforced over time.
+- **Current state** — Key-value state changes tracked. "I moved to Portland" → `{key: "location", value: "Portland"}`. Latest value always wins.
+- **5-layer /context** — The context builder now assembles: Current State → User Preferences → Extracted Facts → Relevant Memories → Recent Activity. LLMs see pre-structured data before raw text.
+- **New endpoints** — `GET /facts`, `GET /state`, `GET /preferences` to query the intelligence layer directly.
+
+```bash
+# Store a memory — facts, preferences, and state extracted instantly
+curl -X POST http://localhost:4200/store \
+  -H "Authorization: Bearer eg_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "I bought 3 albums for $45. I love vinyl records.", "category": "state"}'
+
+# Query extracted facts
+curl http://localhost:4200/facts -H "Authorization: Bearer eg_your_key"
+# → [{subject: "user", verb: "bought", object: "albums", quantity: 3, unit: "dollars"}]
+
+# Query preferences
+curl http://localhost:4200/preferences -H "Authorization: Bearer eg_your_key"
+# → [{domain: "music", preference: "likes vinyl records", strength: 1}]
+
+# Context now includes all intelligence layers
+curl -X POST http://localhost:4200/context \
+  -H "Authorization: Bearer eg_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "How many albums?", "max_tokens": 4000}'
+# → ## Current State
+#   - recent_purchase: 3 vinyl albums for $45
+#   ## User Preferences
+#   - [music] likes vinyl records
+#   ## Extracted Facts
+#   - user bought albums (qty: 3)
+#   ## Relevant Memories
+#   - [state] I bought 3 albums for $45...
+```
+
+The fast extraction runs **synchronously** on `/store` with pure regex — no API calls, no queue, no latency. Optional LLM enrichment still runs async when configured.
 
 ---
 
@@ -393,6 +443,9 @@ Use `X-Space: space-name` (or `X-Engram-Space`) header to scope operations to a 
 
 | Method | Path | Description |
 |--------|------|-------------|
+| `GET` | `/facts` | Query extracted structured facts |
+| `GET` | `/state` | Query current state key-value pairs |
+| `GET` | `/preferences` | Query detected user preferences |
 | `POST` | `/add` | Extract memories from conversations |
 | `POST` | `/ingest` | Extract facts from URLs or text |
 | `POST` | `/derive` | Generate inferred memories |
@@ -495,7 +548,7 @@ Use `X-Space: space-name` (or `X-Engram-Space`) header to scope operations to a 
 
 4. **Fact extraction** — If an LLM is configured, Engram analyzes new memories, extracts static facts, auto-tags with keywords, classifies importance, and detects relationships to existing memories.
 
-5. **Recall** — Four retrieval strategies combined: static facts (always), semantic matches (cosine similarity), high-importance (weighted by FSRS retrievability), recent (temporal). Every recalled memory gets an implicit FSRS review, building stability.
+5. **Recall** — Five retrieval layers combined: current state (always), user preferences (always), extracted facts (structured), semantic matches (cosine similarity weighted by FSRS retrievability), recent (temporal). Every recalled memory gets an implicit FSRS review, building stability.
 
 6. **Spaced repetition** — Each access is an FSRS-6 review graded as "Good". Archived/forgotten memories receive an "Again" grade. Stability grows with successful recalls — frequently accessed memories can have stability measured in months or years.
 

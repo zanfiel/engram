@@ -154,7 +154,7 @@ nav .links a:hover{color:var(--text);text-decoration:none}
 
 <!-- Hero -->
 <section class="hero">
-  <div class="hero-badge"><span class="dot"></span> v5.4 · Open Source</div>
+  <div class="hero-badge"><span class="dot"></span> v5.5 · Open Source</div>
   <h1>Memory for<br><span>AI agents</span></h1>
   <p>Give your agents persistent, searchable, self-organizing memory. Store what they learn. Recall it when it matters. No external APIs required.</p>
   <div class="hero-actions">
@@ -178,10 +178,52 @@ nav .links a:hover{color:var(--text);text-decoration:none}
 
 <!-- Features -->
 
-<!-- What's New in v5.4 -->
+<!-- What's New in v5.5 -->
 <section style="background:var(--bg2);padding:4rem 2rem">
   <div class="container">
-    <div class="section-label" style="color:var(--green)">New in v5.4</div>
+    <div class="section-label" style="color:var(--green)">New in v5.5</div>
+    <h2 class="section-title">Intelligence layer. Zero-latency extraction.</h2>
+    <p class="section-desc">Every memory is now instantly analyzed on write — no LLM needed. Structured facts, preferences, and state are extracted via fast regex and surfaced in context.</p>
+
+    <div class="features" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
+      <div class="feature" style="border-color:rgba(52,211,153,0.12)">
+        <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">🧮</div>
+        <h3>Structured Fact Extraction</h3>
+        <p>Quantities, amounts, dates, and relationships are extracted from every memory at write time using fast regex — no LLM call, zero latency. "I bought 3 books for $45" → <code>{qty: 3, unit: "dollars", amount: 45}</code>.</p>
+      </div>
+      <div class="feature" style="border-color:rgba(129,140,248,0.12)">
+        <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">❤️</div>
+        <h3>User Preference Tracking</h3>
+        <p>Automatically detects likes, dislikes, favorites, and preferences from natural language. "I love spicy food" → <code>{domain: "food", preference: "likes spicy food"}</code>. Strength updates with reinforcement.</p>
+      </div>
+      <div class="feature" style="border-color:rgba(248,113,113,0.12)">
+        <div class="feature-icon" style="background:rgba(248,113,113,0.1);color:var(--red)">📌</div>
+        <h3>Current State Tracking</h3>
+        <p>Key-value state changes are detected and stored separately. "I moved to Portland" → <code>{key: "location", value: "Portland"}</code>. State is always current — later updates replace earlier ones.</p>
+      </div>
+      <div class="feature" style="border-color:rgba(34,211,238,0.12)">
+        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">🎯</div>
+        <h3>5-Layer Context Assembly</h3>
+        <p>The <code>/context</code> endpoint now returns five ranked layers: Current State → User Preferences → Extracted Facts → Relevant Memories → Recent Activity. LLMs see pre-structured data before raw text.</p>
+      </div>
+      <div class="feature" style="border-color:rgba(251,191,36,0.12)">
+        <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:#fbbf24">⚡</div>
+        <h3>Zero-LLM Fast Path</h3>
+        <p>All extraction runs synchronously on <code>/store</code> with pure regex — no API calls, no queuing, no latency. Optional LLM enrichment still runs async for deeper analysis when configured.</p>
+      </div>
+      <div class="feature" style="border-color:rgba(167,139,250,0.12)">
+        <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:#a78bfa">📊</div>
+        <h3>New API Endpoints</h3>
+        <p><code>GET /facts</code>, <code>GET /state</code>, <code>GET /preferences</code> — query the intelligence layer directly. Filter by user, domain, subject. Build dashboards on extracted structure.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- What's New in v5.4 -->
+<section style="padding:4rem 2rem">
+  <div class="container">
+    <div class="section-label" style="color:var(--dim)">Also in v5.4</div>
     <h2 class="section-title">Node.js native. Hardened. Production-ready.</h2>
     <p class="section-desc">Migrated from Bun to Node.js 22, with RBAC, CSP, and zero external runtime dependencies.</p>
 
@@ -265,8 +307,8 @@ nav .links a:hover{color:var(--text);text-decoration:none}
 <section id="features">
   <div class="container">
     <div class="section-label">Features</div>
-    <h2 class="section-title">35+ features. One libsql file.</h2>
-    <p class="section-desc">Zero external dependencies. FSRS-6 spaced repetition, native vector search, dual-strength memory. Ships in a single TypeScript file.</p>
+    <h2 class="section-title">40+ features. One libsql file.</h2>
+    <p class="section-desc">Zero external dependencies. FSRS-6 spaced repetition, native vector search, dual-strength memory, intelligence layer. Ships in a single TypeScript file.</p>
 
     <div style="margin-bottom:1rem;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--cyan)">Core Memory</div>
     <div class="features" style="margin-bottom:3rem">
@@ -439,24 +481,29 @@ nav .links a:hover{color:var(--text);text-decoration:none}
 <section>
   <div class="container">
     <div class="section-label">How It Works</div>
-    <h2 class="section-title">Four-layer contextual recall</h2>
-    <p class="section-desc">Recall doesn't just search — it assembles the optimal context window from multiple strategies.</p>
+    <h2 class="section-title">Five-layer contextual recall</h2>
+    <p class="section-desc">Recall doesn't just search — it assembles the optimal context window from five ranked strategies.</p>
 
-    <div class="features" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
+    <div class="features" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
       <div class="feature" style="text-align:center">
-        <div style="font-size:2rem;margin-bottom:12px">🏗️</div>
-        <h3>Static Facts</h3>
-        <p>Always included. Things that are persistently true about the user. Extracted automatically from conversations.</p>
+        <div style="font-size:2rem;margin-bottom:12px">📌</div>
+        <h3>Current State</h3>
+        <p>Always first. Location, job, active projects — the latest value wins. Extracted automatically on every store.</p>
+      </div>
+      <div class="feature" style="text-align:center">
+        <div style="font-size:2rem;margin-bottom:12px">❤️</div>
+        <h3>Preferences</h3>
+        <p>Likes, dislikes, favorites. Detected from natural language, reinforced over time. The agent knows what you care about.</p>
+      </div>
+      <div class="feature" style="text-align:center">
+        <div style="font-size:2rem;margin-bottom:12px">🧮</div>
+        <h3>Extracted Facts</h3>
+        <p>Structured quantities, amounts, dates. "How many X?" questions answered from pre-extracted data, not raw text search.</p>
       </div>
       <div class="feature" style="text-align:center">
         <div style="font-size:2rem;margin-bottom:12px">🎯</div>
         <h3>Semantic Match</h3>
         <p>Embedding similarity to the current query. The most relevant memories float to the top.</p>
-      </div>
-      <div class="feature" style="text-align:center">
-        <div style="font-size:2rem;margin-bottom:12px">⭐</div>
-        <h3>High Importance</h3>
-        <p>Critical memories (importance ≥ 7) surface regardless of query similarity. The agent never forgets what matters.</p>
       </div>
       <div class="feature" style="text-align:center">
         <div style="font-size:2rem;margin-bottom:12px">🕐</div>
