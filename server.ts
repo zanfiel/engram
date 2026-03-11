@@ -131,7 +131,7 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
 // At 800 memories * 1.5KB/embedding = ~1.2MB. Trivial vs the 5s DB cold-read.
 // ============================================================================
 interface CachedMem {
-  id: number; content: string; category: string; importance: number;
+  id: number; user_id: number; content: string; category: string; importance: number;
   embedding: Float32Array; is_static: boolean; source_count: number;
   is_latest?: boolean; is_forgotten?: boolean;
 }
@@ -148,7 +148,7 @@ function refreshEmbeddingCache(): void {
   for (const row of allRows) {
     if (!row.embedding) continue;
     const mem: CachedMem = {
-      id: row.id, content: row.content, category: row.category,
+      id: row.id, user_id: row.user_id, content: row.content, category: row.category,
       importance: row.importance, embedding: bufferToEmbedding(row.embedding),
       is_static: !!row.is_static, source_count: row.source_count || 1,
       is_latest: !!row.is_latest, is_forgotten: !!row.is_forgotten,
@@ -948,7 +948,7 @@ function writeVec(memoryId: number, embArray: Float32Array | null): void {
 }
 
 const getAllEmbeddings = db.prepare(
-  `SELECT id, content, category, importance, embedding, is_latest, is_forgotten, is_static, source_count
+  `SELECT id, user_id, content, category, importance, embedding, is_latest, is_forgotten, is_static, source_count
    FROM memories WHERE embedding IS NOT NULL AND is_forgotten = 0`
 );
 
@@ -964,7 +964,7 @@ const searchMemoriesFTS = db.prepare(
      rank as fts_rank
    FROM memories_fts f
    JOIN memories m ON f.rowid = m.id
-   WHERE memories_fts MATCH ? AND m.is_forgotten = 0
+   WHERE memories_fts MATCH ? AND m.is_forgotten = 0 AND m.user_id = ?
    ORDER BY rank
    LIMIT ?`
 );
@@ -987,7 +987,7 @@ const deleteMemory = db.prepare(`DELETE FROM memories WHERE id = ?`);
 const getMemory = db.prepare(`SELECT * FROM memories WHERE id = ?`);
 
 const getMemoryWithoutEmbedding = db.prepare(
-  `SELECT id, content, category, source, session_id, importance, created_at, updated_at,
+  `SELECT id, user_id, content, category, source, session_id, importance, created_at, updated_at,
      version, is_latest, parent_memory_id, root_memory_id, source_count,
      is_static, is_forgotten, forget_after, forget_reason, is_inference, is_archived, status
    FROM memories WHERE id = ?`
@@ -2165,7 +2165,8 @@ async function hybridSearch(
   limit: number = 10,
   includeLinks: boolean = false,
   expandRelationships: boolean = false,
-  latestOnly: boolean = true
+  latestOnly: boolean = true,
+  userId: number = 1
 ): Promise<SearchResult[]> {
   const results = new Map<number, SearchResult>();
 
@@ -2174,6 +2175,7 @@ async function hybridSearch(
     const queryEmb = await embed(query);
     const cached = getCachedEmbeddings(latestOnly);
     for (const mem of cached) {
+      if (mem.user_id !== userId) continue; // S7 FIX: user isolation
       const sim = cosineSimilarity(queryEmb, mem.embedding);
       if (sim > 0.25) {
         results.set(mem.id, {
@@ -2192,7 +2194,7 @@ async function hybridSearch(
   const sanitized = sanitizeFTS(query);
   if (sanitized) {
     try {
-      const ftsResults = searchMemoriesFTS.all(sanitized, limit * 3) as Array<{
+      const ftsResults = searchMemoriesFTS.all(sanitized, userId, limit * 3) as Array<{
         id: number; content: string; category: string; source: string;
         session_id: string; importance: number; created_at: string; fts_rank: number;
         version: number; is_latest: boolean; parent_memory_id: number; root_memory_id: number;
@@ -2491,6 +2493,12 @@ function errorResponse(message: string, status = 400, requestId?: string) {
   return json({ error: message, ...(requestId ? { request_id: requestId } : {}) }, status);
 }
 
+// S7 FIX: Safe error response — logs real error, returns generic message to client
+function safeError(label: string, e: any, status = 500, requestId?: string): Response {
+  log.error({ msg: `${label}_failed`, error: e?.message, stack: e?.stack?.split("\n")[1]?.trim() });
+  return errorResponse(`${label} failed`, status, requestId);
+}
+
 function sanitizeFTS(query: string): string {
   return query
     .replace(/[^\w\s-]/g, "")
@@ -2590,7 +2598,8 @@ function getAuthOrDefault(req: Request): AuthContext | AuthError | null {
     return { user_id: 1, space_id: null, key_id: null, scopes: ["read", "write"], is_admin: false };
   }
   if (OPEN_ACCESS) {
-    return { user_id: 1, space_id: null, key_id: null, scopes: ["read", "write", "admin"], is_admin: true };
+    // S7 FIX: OPEN_ACCESS grants read+write but NOT admin — prevents anonymous user management/backup/reset
+    return { user_id: 1, space_id: null, key_id: null, scopes: ["read", "write"], is_admin: false };
   }
   return null;
 }
@@ -2618,6 +2627,7 @@ const GUI_PASSWORD = (() => {
     log.warn({ msg: "deprecated_env", var: "MEGAMIND_GUI_PASSWORD", use: "ENGRAM_GUI_PASSWORD" });
     return process.env.MEGAMIND_GUI_PASSWORD;
   }
+  log.warn({ msg: "WARNING_default_gui_password", detail: "ENGRAM_GUI_PASSWORD not set — using 'changeme'. Set a strong password for production!" });
   return "changeme";
 })();
 const GUI_HMAC_SECRET = await (async () => {
@@ -2899,12 +2909,19 @@ async function fetchHandler(req: Request): Promise<Response> {
       }
     }
 
-    // Body size limit
+    // Body size limit + Content-Type validation
     if (method === "POST" || method === "PATCH" || method === "PUT" || method === "DELETE") {
       const cl = req.headers.get("Content-Length");
       if (cl && Number(cl) > MAX_BODY_SIZE) {
         log.warn({ msg: "body_too_large", size: Number(cl), limit: MAX_BODY_SIZE, ip: clientIp, rid: requestId });
         return json({ error: "Request body too large", limit: MAX_BODY_SIZE }, 413);
+      }
+      // S7 FIX: Reject non-JSON content types on mutation endpoints (CSRF protection)
+      if (method !== "DELETE" && cl && Number(cl) > 0) {
+        const ct = req.headers.get("Content-Type") || "";
+        if (!ct.includes("application/json")) {
+          return json({ error: "Content-Type must be application/json" }, 415);
+        }
       }
     }
 
@@ -2929,7 +2946,7 @@ async function fetchHandler(req: Request): Promise<Response> {
           return new Response(JSON.stringify({ ok: true }), {
             headers: {
               "Content-Type": "application/json",
-              "Set-Cookie": `engram_auth=${cookie}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${GUI_COOKIE_MAX_AGE}`
+              "Set-Cookie": `engram_auth=${cookie}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${GUI_COOKIE_MAX_AGE}`
             }
           });
         }
@@ -2995,7 +3012,7 @@ async function fetchHandler(req: Request): Promise<Response> {
         return json({ id: result.id, username: body.username.trim(), created_at: result.created_at });
       } catch (e: any) {
         if (e.message?.includes("UNIQUE")) return errorResponse("Username already exists", 409);
-        return errorResponse(`Failed: ${e.message}`, 500);
+        return safeError("Operation", e);
       }
     }
 
@@ -3030,7 +3047,7 @@ async function fetchHandler(req: Request): Promise<Response> {
         ).run(targetUserId, prefix, hash, name, scopes, rateLimit);
         return json({ key, name, scopes, rate_limit: rateLimit, user_id: targetUserId, message: "Save this key — it cannot be retrieved again." });
       } catch (e: any) {
-        return errorResponse(`Failed: ${e.message}`, 500);
+        return safeError("Operation", e);
       }
     }
 
@@ -3066,7 +3083,7 @@ async function fetchHandler(req: Request): Promise<Response> {
         return json({ id: result.id, name: body.name.trim(), created_at: result.created_at });
       } catch (e: any) {
         if (e.message?.includes("UNIQUE")) return errorResponse("Space name already exists", 409);
-        return errorResponse(`Failed: ${e.message}`, 500);
+        return safeError("Operation", e);
       }
     }
 
@@ -3128,7 +3145,7 @@ async function fetchHandler(req: Request): Promise<Response> {
           headers: {
             "Content-Type": "application/x-ndjson",
             "Content-Disposition": "attachment; filename=engram-export.jsonl",
-            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Origin": CORS_ORIGIN,
           },
         });
       }
@@ -3137,7 +3154,7 @@ async function fetchHandler(req: Request): Promise<Response> {
         headers: {
           "Content-Type": "application/json",
           "Content-Disposition": "attachment; filename=engram-export.json",
-          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Origin": CORS_ORIGIN,
         },
       });
     }
@@ -3152,6 +3169,8 @@ async function fetchHandler(req: Request): Promise<Response> {
         const body = await req.json() as any;
         const items = body.memories || body.items || body;
         if (!Array.isArray(items)) return errorResponse("Expected memories array");
+        // S7 FIX: Cap import batch size to prevent resource exhaustion
+        if (items.length > 1000) return errorResponse("Import batch too large (max 1000 items per request)", 400);
 
         let imported = 0, failed = 0;
         const importTransaction = db.transaction(() => {
@@ -3188,7 +3207,7 @@ async function fetchHandler(req: Request): Promise<Response> {
 
         return json({ imported, failed, total: items.length });
       } catch (e: any) {
-        return errorResponse(`Import failed: ${e.message}`, 500);
+        return safeError("Import", e);
       }
     }
 
@@ -3466,7 +3485,7 @@ If no meaningful facts, return {"facts": []}`;
           messages_processed: messages.length,
         });
       } catch (e: any) {
-        return errorResponse(`Conversation extraction failed: ${e.message}`, 500);
+        return safeError("Conversation extraction", e);
       }
     }
 
@@ -3494,6 +3513,19 @@ If no meaningful facts, return {"facts": []}`;
           if (typeof ingestUrl !== "string" || !ingestUrl.match(/^https?:\/\//)) {
             return errorResponse("url must be a valid http/https URL");
           }
+          // S7 FIX: SSRF protection — block private/internal IPs (same as webhook validation)
+          try {
+            const ingestParsed = new URL(ingestUrl);
+            const hn = ingestParsed.hostname.toLowerCase();
+            if (hn === "localhost" || hn === "127.0.0.1" || hn === "::1" || hn === "0.0.0.0" ||
+                hn.startsWith("10.") || hn.startsWith("192.168.") || hn.startsWith("172.16.") ||
+                hn.startsWith("172.17.") || hn.startsWith("172.18.") || hn.startsWith("172.19.") ||
+                hn.startsWith("172.2") || hn.startsWith("172.30.") || hn.startsWith("172.31.") ||
+                hn.endsWith(".local") || hn.endsWith(".internal") || hn.startsWith("100.64.") ||
+                hn.startsWith("169.254.") || hn.startsWith("fc") || hn.startsWith("fd") || hn === "[::1]") {
+              return errorResponse("Ingest URL cannot point to private/internal addresses", 400);
+            }
+          } catch { return errorResponse("Invalid ingest URL", 400); }
           try {
             const resp = await fetch(ingestUrl, {
               headers: { "User-Agent": "Engram/4.4 (memory ingest)" },
@@ -3703,7 +3735,7 @@ Return JSON:
           truncated,
         });
       } catch (e: any) {
-        return errorResponse(`Ingest failed: ${e.message}`, 500);
+        return safeError("Ingest", e);
       }
     }
 
@@ -3850,7 +3882,7 @@ Only include pairs that are actual contradictions.`;
           verified: useLLM,
         });
       } catch (e: any) {
-        return errorResponse(`Contradiction scan failed: ${e.message}`, 500);
+        return safeError("Contradiction scan", e);
       }
     }
 
@@ -3927,7 +3959,7 @@ Only include pairs that are actual contradictions.`;
 
         return errorResponse("Invalid resolution. Use: keep_a, keep_b, keep_both, merge");
       } catch (e: any) {
-        return errorResponse(`Resolution failed: ${e.message}`, 500);
+        return safeError("Resolution", e);
       }
     }
 
@@ -4052,7 +4084,7 @@ Only include pairs that are actual contradictions.`;
           total_returned: timeMemories.length,
         });
       } catch (e: any) {
-        return errorResponse(`Time-travel failed: ${e.message}`, 500);
+        return safeError("Time-travel", e);
       }
     }
 
@@ -4104,7 +4136,7 @@ Only include pairs that are actual contradictions.`;
         // Phase 2: Semantic search (core relevance)
         const semanticBudget = contextStrategy === "precision" ? 0.5 : contextStrategy === "breadth" ? 0.3 : 0.4;
         const semanticLimit = contextStrategy === "precision" ? 30 : contextStrategy === "breadth" ? 50 : 40;
-        const semanticResults = await hybridSearch(query, semanticLimit, false, true, RERANKER_ENABLED && !!LLM_API_KEY);
+        const semanticResults = await hybridSearch(query, semanticLimit, false, true, RERANKER_ENABLED && !!LLM_API_KEY, auth.user_id);
 
         const seenIds = new Set(blocks.map(b => b.id));
         for (const r of semanticResults) {
@@ -4239,7 +4271,7 @@ Only include pairs that are actual contradictions.`;
           },
         });
       } catch (e: any) {
-        return errorResponse(`Context build failed: ${e.message}`, 500);
+        return safeError("Context build", e);
       }
     }
 
@@ -4390,7 +4422,7 @@ Return JSON:
           cached: false,
         });
       } catch (e: any) {
-        return errorResponse(`Reflection failed: ${e.message}`, 500);
+        return safeError("Reflection", e);
       }
     }
 
@@ -4455,7 +4487,7 @@ Return JSON:
           created_at: result.created_at,
         });
       } catch (e: any) {
-        return errorResponse(`Digest creation failed: ${e.message}`, 500);
+        return safeError("Digest creation", e);
       }
     }
 
@@ -4491,7 +4523,7 @@ Return JSON:
 
         return json({ sent: true, digest_id: digestId, payload });
       } catch (e: any) {
-        return errorResponse(`Digest send failed: ${e.message}`, 500);
+        return safeError("Digest send", e);
       }
     }
 
@@ -4679,7 +4711,7 @@ Return JSON:
 
         return response;
       } catch (e: any) {
-        return errorResponse(`Failed to store: ${e.message}`, 500);
+        return safeError("store", e);
       }
     }
 
@@ -4708,7 +4740,7 @@ Return JSON:
           if (correctedMemory.user_id !== auth.user_id) return errorResponse("Not your memory", 403);
         } else if (originalClaim) {
           // Search by the original (wrong) claim to find what to correct
-          const candidates = await hybridSearch(originalClaim, 5, false, true, false);
+          const candidates = await hybridSearch(originalClaim, 5, false, true, false, auth.user_id);
           if (candidates.length > 0) {
             // Take the best match that's not forgotten
             for (const c of candidates) {
@@ -4841,7 +4873,7 @@ Return JSON:
           created_at: result.created_at,
         });
       } catch (e: any) {
-        return errorResponse(`Failed to correct: ${e.message}`, 500);
+        return safeError("correct", e);
       }
     }
 
@@ -4861,7 +4893,8 @@ Return JSON:
           Math.min(limit || 10, 50),
           include_links || false,
           expand_relationships ?? true,
-          latest_only ?? true
+          latest_only ?? true,
+          auth.user_id
         );
 
         const _searchT2 = performance.now();
@@ -4914,7 +4947,7 @@ Return JSON:
           ...(episodeContext.length > 0 ? { episodes: episodeContext } : {}),
         });
       } catch (e: any) {
-        return errorResponse(`Search failed: ${e.message}`, 500);
+        return safeError("Search", e);
       }
     }
 
@@ -4949,6 +4982,10 @@ Return JSON:
     if (url.pathname.match(/^\/memory\/\d+\/forget$/) && method === "POST") {
       const id = Number(url.pathname.split("/")[2]);
       if (isNaN(id)) return errorResponse("Invalid id");
+      // S7 FIX: Ownership check — only memory owner or admin can forget
+      const mem = getMemoryWithoutEmbedding.get(id) as any;
+      if (!mem) return errorResponse("Not found", 404);
+      if (mem.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Forbidden", 403);
       const body = await req.json().catch(() => ({})) as any;
       markForgotten.run(id);
       if (body.reason) {
@@ -4968,6 +5005,7 @@ Return JSON:
       if (isNaN(id)) return errorResponse("Invalid id");
       const mem = getMemoryWithoutEmbedding.get(id) as any;
       if (!mem) return errorResponse("Not found", 404);
+      if (mem.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Forbidden", 403);
       markArchived.run(id);
       audit(auth.user_id, "memory.archive", "memory", id, null, clientIp, requestId);
       invalidateEmbeddingCache();
@@ -4979,6 +5017,7 @@ Return JSON:
       if (isNaN(id)) return errorResponse("Invalid id");
       const mem = getMemoryWithoutEmbedding.get(id) as any;
       if (!mem) return errorResponse("Not found", 404);
+      if (mem.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Forbidden", 403);
       markUnarchived.run(id);
       audit(auth.user_id, "memory.unarchive", "memory", id, null, clientIp, requestId);
       invalidateEmbeddingCache();
@@ -5065,7 +5104,7 @@ Return JSON:
           embedded: !!embBuffer,
         });
       } catch (e: any) {
-        return errorResponse(`Update failed: ${e.message}`, 500);
+        return safeError("Update", e);
       }
     }
 
@@ -5123,7 +5162,7 @@ Return JSON:
 
         return json({ threshold, clusters, total_clusters: clusters.length });
       } catch (e: any) {
-        return errorResponse(`Duplicate scan failed: ${e.message}`, 500);
+        return safeError("Duplicate scan", e);
       }
     }
 
@@ -5191,7 +5230,7 @@ Return JSON:
           merges: merged,
         });
       } catch (e: any) {
-        return errorResponse(`Dedup failed: ${e.message}`, 500);
+        return safeError("Dedup", e);
       }
     }
 
@@ -5216,7 +5255,7 @@ Return JSON:
 
         // 2. Semantic search against context (if provided)
         if (context.trim()) {
-          const semanticResults = await hybridSearch(context, limit, false, true, true);
+          const semanticResults = await hybridSearch(context, limit, false, true, true, auth.user_id);
           for (const sr of semanticResults) {
             if (!results.has(sr.id)) {
               // Use decay_score instead of raw search score
@@ -5318,7 +5357,7 @@ Return JSON:
           count: sorted.length,
         });
       } catch (e: any) {
-        return errorResponse(`Smart recall failed: ${e.message}`, 500);
+        return safeError("Smart recall", e);
       }
     }
 
@@ -5327,6 +5366,8 @@ Return JSON:
       if (isNaN(id)) return errorResponse("Invalid id");
       const memory = getMemoryWithoutEmbedding.get(id) as any;
       if (!memory) return errorResponse("Not found", 404);
+      // S7 FIX: User isolation — only owner or admin can read
+      if (memory.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Not found", 404);
 
       // Track access
       trackAccessWithFSRS(id);
@@ -5365,6 +5406,10 @@ Return JSON:
     if (url.pathname.startsWith("/memory/") && method === "DELETE") {
       const id = Number(url.pathname.split("/")[2]);
       if (isNaN(id)) return errorResponse("Invalid id");
+      // S7 FIX: Ownership check — only memory owner or admin can delete
+      const mem = getMemoryWithoutEmbedding.get(id) as any;
+      if (!mem) return errorResponse("Not found", 404);
+      if (mem.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Forbidden", 403);
       deleteMemory.run(id);
       audit(auth.user_id, "memory.delete", "memory", id, null, clientIp, requestId);
       invalidateEmbeddingCache();
@@ -5383,7 +5428,7 @@ Return JSON:
         const remaining = (countNoEmbedding.get() as { count: number }).count;
         return json({ backfilled: count, remaining });
       } catch (e: any) {
-        return errorResponse(`Backfill failed: ${e.message}`, 500);
+        return safeError("Backfill", e);
       }
     }
 
@@ -5408,7 +5453,7 @@ Return JSON:
         const profile = await generateProfile(auth.user_id, summary);
         return json(profile);
       } catch (e: any) {
-        return errorResponse(`Profile generation failed: ${e.message}`, 500);
+        return safeError("Profile generation", e);
       }
     }
 
@@ -5461,7 +5506,7 @@ Return JSON:
         db.prepare("UPDATE conversations SET user_id = ? WHERE id = ?").run(auth.user_id, result.id);
         return json({ id: result.id, started_at: result.started_at });
       } catch (e: any) {
-        return errorResponse(`Failed to create conversation: ${e.message}`, 500);
+        return safeError("create conversation", e);
       }
     }
 
@@ -5495,7 +5540,7 @@ Return JSON:
         );
         return json({ updated: true, id });
       } catch (e: any) {
-        return errorResponse(`Failed to update: ${e.message}`, 500);
+        return safeError("update", e);
       }
     }
 
@@ -5527,7 +5572,7 @@ Return JSON:
         touchConversation.run(convId);
         return json({ added: results.length, messages: results });
       } catch (e: any) {
-        return errorResponse(`Failed to add messages: ${e.message}`, 500);
+        return safeError("add messages", e);
       }
     }
 
@@ -5554,7 +5599,7 @@ Return JSON:
         );
         return json({ id: conv.id, started_at: conv.started_at, messages: msgs.length });
       } catch (e: any) {
-        return errorResponse(`Bulk store failed: ${e.message}`, 500);
+        return safeError("Bulk store", e);
       }
     }
 
@@ -5596,7 +5641,7 @@ Return JSON:
         }
         return json({ id: conv.id, created, added });
       } catch (e: any) {
-        return errorResponse(`Upsert failed: ${e.message}`, 500);
+        return safeError("Upsert", e);
       }
     }
 
@@ -5614,7 +5659,7 @@ Return JSON:
         const results = searchMessages.all(sanitized, Math.min(limit || 30, 200));
         return json({ results });
       } catch (e: any) {
-        return errorResponse(`Search failed: ${e.message}`, 500);
+        return safeError("Search", e);
       }
     }
 
@@ -5654,7 +5699,7 @@ Return JSON:
           await autoLink(result.id, embArray);
           return json({ created: true, id: result.id });
         } catch (e: any) {
-          return errorResponse(`Failed: ${e.message}`, 500);
+          return safeError("Operation", e);
         }
       } catch (e: any) { return errorResponse(`Bad request: ${e.message}`, 400); }
     }
@@ -5684,7 +5729,7 @@ Return JSON:
         // B5 FIX: Invalidate cache so search reflects edits
         invalidateEmbeddingCache();
         return json({ updated: true, id });
-      } catch (e: any) { return errorResponse(`Failed: ${e.message}`, 500); }
+      } catch (e: any) { return safeError("Operation", e); }
     }
 
     if (url.pathname.match(/^\/gui\/memories\/\d+$/) && method === "DELETE") {
@@ -5704,7 +5749,7 @@ Return JSON:
         let count = 0;
         for (const id of ids) { markArchived.run(id); count++; }
         return json({ archived: count });
-      } catch (e: any) { return errorResponse(`Failed: ${e.message}`, 500); }
+      } catch (e: any) { return safeError("Operation", e); }
     }
 
     // ========================================================================
@@ -5737,7 +5782,7 @@ Return JSON:
         }
         return json({ results, tag });
       } catch (e: any) {
-        return errorResponse(`Tag search failed: ${e.message}`, 500);
+        return safeError("Tag search", e);
       }
     }
 
@@ -5745,6 +5790,9 @@ Return JSON:
       if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const id = Number(url.pathname.split("/")[2]);
+        const mem = getMemoryWithoutEmbedding.get(id) as any;
+        if (!mem) return errorResponse("Not found", 404);
+        if (mem.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Forbidden", 403);
         const body = await req.json() as any;
         let tags: string[] = [];
         if (Array.isArray(body.tags)) {
@@ -5754,7 +5802,7 @@ Return JSON:
           .run(JSON.stringify(tags), id);
         return json({ updated: true, id, tags });
       } catch (e: any) {
-        return errorResponse(`Failed to update tags: ${e.message}`, 500);
+        return safeError("update tags", e);
       }
     }
 
@@ -5771,7 +5819,7 @@ Return JSON:
         ) as { id: number; started_at: string };
         return json({ created: true, id: ep.id, started_at: ep.started_at });
       } catch (e: any) {
-        return errorResponse(`Failed to create episode: ${e.message}`, 500);
+        return safeError("create episode", e);
       }
     }
 
@@ -5800,7 +5848,7 @@ Return JSON:
         updateEpisode.run(body.title || null, body.summary || null, body.ended_at || null, id);
         return json({ updated: true, id });
       } catch (e: any) {
-        return errorResponse(`Failed to update episode: ${e.message}`, 500);
+        return safeError("update episode", e);
       }
     }
 
@@ -5819,7 +5867,7 @@ Return JSON:
         updateEpisode.run(null, null, null, episodeId);
         return json({ assigned, episode_id: episodeId });
       } catch (e: any) {
-        return errorResponse(`Failed to assign memories: ${e.message}`, 500);
+        return safeError("assign memories", e);
       }
     }
 
@@ -5842,7 +5890,7 @@ Return JSON:
           return json({ consolidated: total > 0, archived: total });
         }
       } catch (e: any) {
-        return errorResponse(`Consolidation failed: ${e.message}`, 500);
+        return safeError("Consolidation", e);
       }
     }
 
@@ -5953,7 +6001,7 @@ Return JSON:
 
         // Semantic search
         if (context.trim()) {
-          const semantic = await hybridSearch(context, 50, false, true, true);
+          const semantic = await hybridSearch(context, 50, false, true, true, auth.user_id);
           for (const sr of semantic) {
             if (!candidates.find(c => c.id === sr.id)) {
               candidates.push({
@@ -6015,7 +6063,7 @@ Return JSON:
           utilization: Math.round((tokensUsed / tokenBudget) * 100) + "%",
         });
       } catch (e: any) {
-        return errorResponse(`Pack failed: ${e.message}`, 500);
+        return safeError("Pack", e);
       }
     }
 
@@ -6040,7 +6088,7 @@ Return JSON:
         const staticFacts = getStaticMemories.all(auth.user_id) as Array<any>;
         for (const sf of staticFacts) candidates.push({ ...sf, score: 100 });
         if (context.trim()) {
-          const semantic = await hybridSearch(context, 30, false, true, true);
+          const semantic = await hybridSearch(context, 30, false, true, true, auth.user_id);
           for (const sr of semantic) {
             if (!candidates.find((c: any) => c.id === sr.id)) candidates.push({ ...sr, score: sr.score * 50 });
           }
@@ -6098,7 +6146,7 @@ ${memoryBlock}
           tokens_estimated: tokensUsed,
         });
       } catch (e: any) {
-        return errorResponse(`Prompt generation failed: ${e.message}`, 500);
+        return safeError("Prompt generation", e);
       }
     }
 
@@ -6132,7 +6180,7 @@ ${memoryBlock}
         const result = insertWebhook.get(body.url, JSON.stringify(events), secret, auth.user_id) as { id: number; created_at: string };
         return json({ created: true, id: result.id, url: body.url, events });
       } catch (e: any) {
-        return errorResponse(`Failed to create webhook: ${e.message}`, 500);
+        return safeError("create webhook", e);
       }
     }
 
@@ -6230,7 +6278,7 @@ ${memoryBlock}
 
         return json({ synced: true, created, updated, skipped });
       } catch (e: any) {
-        return errorResponse(`Sync receive failed: ${e.message}`, 500);
+        return safeError("Sync receive", e);
       }
     }
 
@@ -6250,7 +6298,7 @@ ${memoryBlock}
         // Gather candidate memories to derive from
         let candidates: any[];
         if (context.trim()) {
-          candidates = await hybridSearch(context, limit, false, true, true);
+          candidates = await hybridSearch(context, limit, false, true, true, auth.user_id);
         } else {
           candidates = db.prepare(
             `SELECT id, content, category, importance, tags, created_at
@@ -6356,7 +6404,7 @@ If no meaningful inferences, return {"derived": []}`;
 
         return json({ derived: stored.length, facts: stored });
       } catch (e: any) {
-        return errorResponse(`Derive failed: ${e.message}`, 500);
+        return safeError("Derive", e);
       }
     }
 
@@ -6404,7 +6452,7 @@ If no meaningful inferences, return {"derived": []}`;
 
         return json({ imported, source: "mem0" });
       } catch (e: any) {
-        return errorResponse(`Mem0 import failed: ${e.message}`, 500);
+        return safeError("Mem0 import", e);
       }
     }
 
@@ -6477,7 +6525,7 @@ If no meaningful inferences, return {"derived": []}`;
 
         return json({ imported, skipped, source: "supermemory" });
       } catch (e: any) {
-        return errorResponse(`Supermemory import failed: ${e.message}`, 500);
+        return safeError("Supermemory import", e);
       }
     }
 
@@ -6526,7 +6574,7 @@ If no meaningful inferences, return {"derived": []}`;
           }
           memoryIds = [...visited];
         } else if (context) {
-          const results = await hybridSearch(context, maxNodes, false, true, true);
+          const results = await hybridSearch(context, maxNodes, false, true, true, auth.user_id);
           memoryIds = results.map((r: any) => r.id);
         } else {
           const rows = db.prepare(
@@ -6647,7 +6695,7 @@ If no meaningful inferences, return {"derived": []}`;
         log.info({ msg: "graph_served", nodes: nodes.size, edges: edges.length, cached: false, rid: requestId });
         return json(result);
       } catch (e: any) {
-        return errorResponse(`Graph failed: ${e.message}`, 500);
+        return safeError("Graph", e);
       }
     }
 
@@ -6677,7 +6725,7 @@ If no meaningful inferences, return {"derived": []}`;
         ) as { id: number; created_at: string };
         return json({ created: true, id: result.id, name: body.name.trim(), type, created_at: result.created_at });
       } catch (e: any) {
-        return errorResponse(`Failed to create entity: ${e.message}`, 500);
+        return safeError("create entity", e);
       }
     }
 
@@ -6729,7 +6777,7 @@ If no meaningful inferences, return {"derived": []}`;
         );
         return json({ updated: true, id });
       } catch (e: any) {
-        return errorResponse(`Update failed: ${e.message}`, 500);
+        return safeError("Update", e);
       }
     }
 
@@ -6771,7 +6819,7 @@ If no meaningful inferences, return {"derived": []}`;
         insertEntityRelationship.run(entityId, body.target_id, body.relationship);
         return json({ linked: true, source: entityId, target: body.target_id, relationship: body.relationship });
       } catch (e: any) {
-        return errorResponse(`Relationship failed: ${e.message}`, 500);
+        return safeError("Relationship", e);
       }
     }
 
@@ -6784,7 +6832,7 @@ If no meaningful inferences, return {"derived": []}`;
         deleteEntityRelationship.run(entityId, body.target_id, body.relationship);
         return json({ unlinked: true, source: entityId, target: body.target_id, relationship: body.relationship });
       } catch (e: any) {
-        return errorResponse(`Unlink failed: ${e.message}`, 500);
+        return safeError("Unlink", e);
       }
     }
 
@@ -6806,7 +6854,7 @@ If no meaningful inferences, return {"derived": []}`;
         ) as { id: number; created_at: string };
         return json({ created: true, id: result.id, name: body.name.trim(), status, created_at: result.created_at });
       } catch (e: any) {
-        return errorResponse(`Failed to create project: ${e.message}`, 500);
+        return safeError("create project", e);
       }
     }
 
@@ -6850,7 +6898,7 @@ If no meaningful inferences, return {"derived": []}`;
         );
         return json({ updated: true, id });
       } catch (e: any) {
-        return errorResponse(`Update failed: ${e.message}`, 500);
+        return safeError("Update", e);
       }
     }
 
@@ -6899,12 +6947,12 @@ If no meaningful inferences, return {"derived": []}`;
         if (projectMemIds.length === 0) return json({ results: [], count: 0, project_id: projectId });
 
         // Run normal search then filter to project scope
-        const allResults = await hybridSearch(query, limit * 3, false, true, true);
+        const allResults = await hybridSearch(query, limit * 3, false, true, true, auth.user_id);
         const scoped = allResults.filter(r => projectMemIds.includes(r.id)).slice(0, limit);
         for (const r of scoped) trackAccessWithFSRS(r.id);
         return json({ results: scoped, count: scoped.length, project_id: projectId });
       } catch (e: any) {
-        return errorResponse(`Project search failed: ${e.message}`, 500);
+        return safeError("Project search", e);
       }
     }
 
@@ -6923,12 +6971,12 @@ If no meaningful inferences, return {"derived": []}`;
 
         if (entityMemIds.length === 0) return json({ results: [], count: 0, entity_id: entityId });
 
-        const allResults = await hybridSearch(query, limit * 3, false, true, true);
+        const allResults = await hybridSearch(query, limit * 3, false, true, true, auth.user_id);
         const scoped = allResults.filter(r => entityMemIds.includes(r.id)).slice(0, limit);
         for (const r of scoped) trackAccessWithFSRS(r.id);
         return json({ results: scoped, count: scoped.length, entity_id: entityId });
       } catch (e: any) {
-        return errorResponse(`Entity search failed: ${e.message}`, 500);
+        return safeError("Entity search", e);
       }
     }
 
@@ -6955,7 +7003,7 @@ If no meaningful inferences, return {"derived": []}`;
         const facts = db.prepare(query).all(...params);
         return json({ facts, count: (facts as any[]).length });
       } catch (e: any) {
-        return errorResponse(`Facts query failed: ${e.message}`, 500);
+        return safeError("Facts query", e);
       }
     }
 
@@ -6977,7 +7025,7 @@ If no meaningful inferences, return {"derived": []}`;
         }
         return json({ state: rows, count: (rows as any[]).length });
       } catch (e: any) {
-        return errorResponse(`State query failed: ${e.message}`, 500);
+        return safeError("State query", e);
       }
     }
 
@@ -6999,7 +7047,7 @@ If no meaningful inferences, return {"derived": []}`;
         }
         return json({ preferences: rows, count: (rows as any[]).length });
       } catch (e: any) {
-        return errorResponse(`Preferences query failed: ${e.message}`, 500);
+        return safeError("Preferences query", e);
       }
     }
 
@@ -7142,7 +7190,7 @@ If no meaningful inferences, return {"derived": []}`;
         emitWebhookEvent("memory.approved", { id, edited: true }, auth.user_id);
         return json({ approved: true, edited: true, id });
       } catch (e: any) {
-        return errorResponse(`Edit failed: ${e.message}`, 500);
+        return safeError("Edit", e);
       }
     }
 
@@ -7165,7 +7213,7 @@ If no meaningful inferences, return {"derived": []}`;
         emitWebhookEvent(`memory.bulk_${action}`, { ids, count }, auth.user_id);
         return json({ action, count, ids });
       } catch (e: any) {
-        return errorResponse(`Bulk action failed: ${e.message}`, 500);
+        return safeError("Bulk action", e);
       }
     }
 
@@ -7220,7 +7268,7 @@ If no meaningful inferences, return {"derived": []}`;
         setTimeout(() => { try { unlinkSync(backupPath); } catch {} }, 30_000);
         return resp;
       } catch (e: any) {
-        return errorResponse(`Backup failed: ${e.message}`, 500, requestId);
+        return safeError("Backup", e, 500, requestId);
       }
     }
 
