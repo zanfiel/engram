@@ -2221,6 +2221,10 @@ function getAuthOrDefault(req: Request): AuthContext | AuthError | null {
   const auth = authenticate(req);
   if (isAuthError(auth)) return auth; // propagate rate limit, bad space, etc. — never fall through to OPEN_ACCESS
   if (auth) return auth;
+  // GUI cookie auth — allow authenticated GUI users to hit API endpoints (read/write, not admin)
+  if (guiAuthed(req)) {
+    return { user_id: 1, space_id: null, key_id: null, scopes: ["read", "write"], is_admin: false };
+  }
   if (OPEN_ACCESS) {
     return { user_id: 1, space_id: null, key_id: null, scopes: ["read", "write", "admin"], is_admin: true };
   }
