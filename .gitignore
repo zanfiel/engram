@@ -1,4 +1,13 @@
 data/
-*.bak
 node_modules/
+*.db
+*.db-wal
+*.db-shm
 .env
+.hmac_secret
+dist/
+*.bak
+*.backup
+server.ts.pre-audit-backup
+server.ts.bun-backup
+sync.log

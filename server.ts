@@ -1,8 +1,14 @@
 import Database from "libsql";
-import { resolve } from "path";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
+import { readFileSync, writeFileSync, statSync, mkdirSync, copyFileSync, existsSync, unlinkSync } from "fs";
+import { readFile } from "fs/promises";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "crypto";
+import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
 
-const DATA_DIR = resolve(import.meta.dir, "data");
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DATA_DIR = resolve(__dirname, "data");
 const DB_PATH = resolve(DATA_DIR, "memory.db");
 const PORT = Number(process.env.ENGRAM_PORT || process.env.ZANMEMORY_PORT /* deprecated */ || 4200);
 const HOST = process.env.ENGRAM_HOST || process.env.ZANMEMORY_HOST /* deprecated */ || "0.0.0.0";
@@ -65,8 +71,33 @@ function logPayload(args: any[]): Record<string, any> {
 // GUI auth rate limiting state
 const guiAuthAttempts = new Map<string, { count: number; first: number; locked_until: number }>();
 
+// S5 FIX: Per-IP rate limiting for OPEN_ACCESS mode
+const OPEN_ACCESS_RATE_LIMIT = Number(process.env.ENGRAM_OPEN_RATE_LIMIT || 120); // per minute per IP
+const ipRateLimits = new Map<string, { count: number; reset: number }>();
+function checkIpRateLimit(ip: string): { allowed: boolean; retryAfter?: number } {
+  if (!OPEN_ACCESS) return { allowed: true };
+  const now = Date.now();
+  let rl = ipRateLimits.get(ip);
+  if (!rl || now > rl.reset) {
+    rl = { count: 0, reset: now + RATE_WINDOW_MS };
+    ipRateLimits.set(ip, rl);
+  }
+  rl.count++;
+  if (rl.count > OPEN_ACCESS_RATE_LIMIT) {
+    return { allowed: false, retryAfter: Math.ceil((rl.reset - now) / 1000) };
+  }
+  return { allowed: true };
+}
+// Cleanup stale IP entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, rl] of ipRateLimits) {
+    if (now > rl.reset) ipRateLimits.delete(ip);
+  }
+}, 5 * 60 * 1000);
+
 // Ensure data directory exists
-await Bun.$`mkdir -p ${DATA_DIR}`;
+mkdirSync(DATA_DIR, { recursive: true });
 
 // ============================================================================
 // EMBEDDING MODEL
@@ -545,6 +576,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
     email TEXT,
+    role TEXT NOT NULL DEFAULT 'admin',
     is_admin BOOLEAN NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -586,6 +618,9 @@ for (const [tbl, col, def] of [
 migrate("CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id)");
 migrate("CREATE INDEX IF NOT EXISTS idx_memories_space ON memories(space_id)");
 migrate("CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id)");
+
+// RBAC: add role column (admin/writer/reader)
+migrate("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'");
 
 // Ensure default user exists (backwards compat — all existing data is user_id=1)
 const defaultUser = db.prepare("SELECT id FROM users WHERE id = 1").get();
@@ -1116,13 +1151,24 @@ const touchConversation = db.prepare(
   `UPDATE conversations SET updated_at = datetime('now') WHERE id = ?`
 );
 
+// Transaction-safe inserts (no RETURNING — avoids libsql "statements in progress" bug)
+const insertConversationTx = db.prepare(
+  `INSERT INTO conversations (agent, session_id, title, metadata) VALUES (?, ?, ?, ?)`
+);
+const insertMessageTx = db.prepare(
+  `INSERT INTO messages (conversation_id, role, content, metadata) VALUES (?, ?, ?, ?)`
+);
+const getLastRowId = db.prepare(`SELECT last_insert_rowid() as id`);
+
 const bulkInsertConvo = db.transaction(
   (agent: string, sessionId: string | null, title: string | null, metadata: string | null,
    msgs: Array<{ role: string; content: string; metadata?: string | null }>) => {
-    const conv = insertConversation.get(agent, sessionId, title, metadata) as { id: number; started_at: string };
+    insertConversationTx.run(agent, sessionId, title, metadata);
+    const { id } = getLastRowId.get() as { id: number };
     for (const msg of msgs) {
-      insertMessage.run(conv.id, msg.role, msg.content, msg.metadata || null);
+      insertMessageTx.run(id, msg.role, msg.content, msg.metadata || null);
     }
+    const conv = getConversation.get(id) as { id: number; started_at: string };
     return conv;
   }
 );
@@ -1378,8 +1424,8 @@ const FSRS_MIN_DIFFICULTY = 1.0;
 const FSRS_MAX_DIFFICULTY = 10.0;
 const FSRS_MAX_STORAGE = 10.0;
 
-enum FSRSRating { Again = 1, Hard = 2, Good = 3, Easy = 4 }
-enum FSRSState { New = 0, Learning = 1, Review = 2, Relearning = 3 }
+const FSRSRating = { Again: 1, Hard: 2, Good: 3, Easy: 4 } as const;
+const FSRSState = { New: 0, Learning: 1, Review: 2, Relearning: 3 } as const;
 
 /** Forgetting factor: 0.9^(-1/w20) - 1 */
 function fsrsForgettingFactor(w20: number = FSRS6_WEIGHTS[20]): number {
@@ -1720,7 +1766,7 @@ async function emitWebhookEvent(
       const body = JSON.stringify({ event, timestamp: new Date().toISOString(), data: payload });
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (hook.secret) {
-        const hmac = new Bun.CryptoHasher("sha256", hook.secret).update(body).digest("hex");
+        const hmac = createHmac("sha256", hook.secret).update(body).digest("hex");
         headers["X-Engram-Signature"] = `sha256=${hmac}`;
       }
 
@@ -2103,12 +2149,14 @@ async function backfillEmbeddings(batchSize: number = 50): Promise<number> {
 function securityHeaders(extra: Record<string, string> = {}): Record<string, string> {
   return {
     "Access-Control-Allow-Origin": CORS_ORIGIN,
-    "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, PATCH, PUT, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Space, X-Engram-Space, X-Request-Id",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "X-XSS-Protection": "0",
     "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Strict-Transport-Security": "max-age=63072000; includeSubDomains; preload",
+    "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://unpkg.com; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'",
     ...extra,
   };
 }
@@ -2159,10 +2207,10 @@ function authenticate(req: Request): AuthContext | AuthError | null {
 
   const key = authHeader.slice(7); // strip "Bearer "
   const prefix = key.slice(0, 11); // "eg_" + 8 chars
-  const hash = new Bun.CryptoHasher("sha256").update(key).digest("hex");
+  const hash = createHash("sha256").update(key).digest("hex");
 
   const row = db.prepare(
-    `SELECT ak.id, ak.user_id, ak.scopes, ak.rate_limit, u.is_admin
+    `SELECT ak.id, ak.user_id, ak.scopes, ak.rate_limit, u.is_admin, u.role
      FROM api_keys ak JOIN users u ON ak.user_id = u.id
      WHERE ak.key_prefix = ? AND ak.key_hash = ? AND ak.is_active = 1`
   ).get(prefix, hash) as any;
@@ -2191,12 +2239,26 @@ function authenticate(req: Request): AuthContext | AuthError | null {
     space_id = space.id;
   }
 
+  // RBAC: derive scopes from role (role overrides key scopes for safety)
+  const role = row.role || "writer";
+  let effectiveScopes: string[];
+  if (role === "admin") {
+    effectiveScopes = (row.scopes || "read,write,admin").split(",");
+  } else if (role === "reader") {
+    // Reader can ONLY read, regardless of what the key says
+    effectiveScopes = ["read"];
+  } else {
+    // Writer: can read + write, but not admin
+    const keyScopes = (row.scopes || "read,write").split(",");
+    effectiveScopes = keyScopes.filter((s: string) => s !== "admin");
+  }
+
   return {
     user_id: row.user_id,
     space_id,
     key_id: row.id,
-    scopes: (row.scopes || "read,write").split(","),
-    is_admin: !!row.is_admin,
+    scopes: effectiveScopes,
+    is_admin: !!row.is_admin && role === "admin",
   };
 }
 
@@ -2204,6 +2266,10 @@ function getAuthOrDefault(req: Request): AuthContext | AuthError | null {
   const auth = authenticate(req);
   if (isAuthError(auth)) return auth; // propagate rate limit, bad space, etc. — never fall through to OPEN_ACCESS
   if (auth) return auth;
+  // GUI cookie auth — allow authenticated GUI users to hit API endpoints (read/write, not admin)
+  if (guiAuthed(req)) {
+    return { user_id: 1, space_id: null, key_id: null, scopes: ["read", "write"], is_admin: false };
+  }
   if (OPEN_ACCESS) {
     return { user_id: 1, space_id: null, key_id: null, scopes: ["read", "write", "admin"], is_admin: true };
   }
@@ -2219,7 +2285,7 @@ function generateApiKey(): { key: string; prefix: string; hash: string } {
   const raw = Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
   const key = `eg_${raw}`;
   const prefix = key.slice(0, 11);
-  const hash = new Bun.CryptoHasher("sha256").update(key).digest("hex");
+  const hash = createHash("sha256").update(key).digest("hex");
   return { key, prefix, hash };
 }
 
@@ -2239,10 +2305,10 @@ const GUI_HMAC_SECRET = await (async () => {
   if (process.env.ENGRAM_HMAC_SECRET) return process.env.ENGRAM_HMAC_SECRET;
   const secretFile = resolve(DATA_DIR, ".hmac_secret");
   try {
-    return await Bun.file(secretFile).text();
+    return readFileSync(secretFile, "utf-8");
   } catch {
-    const secret = crypto.randomUUID() + crypto.randomUUID();
-    await Bun.write(secretFile, secret);
+    const secret = randomUUID() + randomUUID();
+    writeFileSync(secretFile, secret);
     log.info({ msg: "generated_hmac_secret", path: secretFile });
     return secret;
   }
@@ -2250,7 +2316,7 @@ const GUI_HMAC_SECRET = await (async () => {
 const GUI_COOKIE_MAX_AGE = 7 * 24 * 60 * 60;
 
 function guiSignCookie(ts: number): string {
-  const h = new Bun.CryptoHasher("sha256");
+  const h = createHash("sha256");
   h.update(GUI_HMAC_SECRET + ":" + String(ts));
   return ts + "." + h.digest("hex");
 }
@@ -2261,9 +2327,12 @@ function guiVerifyCookie(cookie: string): boolean {
   const ts = cookie.substring(0, dot), sig = cookie.substring(dot + 1);
   const t = parseInt(ts);
   if (isNaN(t) || Date.now() / 1000 - t > GUI_COOKIE_MAX_AGE) return false;
-  const h = new Bun.CryptoHasher("sha256");
+  const h = createHash("sha256");
   h.update(GUI_HMAC_SECRET + ":" + ts);
-  return h.digest("hex") === sig;
+  const expected = h.digest("hex");
+  // S1 FIX: Use timing-safe comparison to prevent timing attacks on cookie signatures
+  if (expected.length !== sig.length) return false;
+  return timingSafeEqual(Buffer.from(expected), Buffer.from(sig));
 }
 
 function guiAuthed(req: Request): boolean {
@@ -2278,20 +2347,20 @@ function guiAuthed(req: Request): boolean {
 // WEB GUI HTML
 // ============================================================================
 
-let GUI_HTML = await Bun.file(import.meta.dir + "/engram-gui.html").text();
-let LOGIN_HTML = await Bun.file(import.meta.dir + "/engram-login.html").text();
+let GUI_HTML = readFileSync(resolve(__dirname, "engram-gui.html"), "utf-8");
+let LOGIN_HTML = readFileSync(resolve(__dirname, "engram-login.html"), "utf-8");
 const GUI_HOT_RELOAD = process.env.ENGRAM_HOT_RELOAD === "1";
 async function getGuiHtml(): Promise<string> {
-  if (GUI_HOT_RELOAD) return await Bun.file(import.meta.dir + "/engram-gui.html").text();
+  if (GUI_HOT_RELOAD) return readFileSync(resolve(__dirname, "engram-gui.html"), "utf-8");
   return GUI_HTML;
 }
 async function getLoginHtml(): Promise<string> {
-  if (GUI_HOT_RELOAD) return await Bun.file(import.meta.dir + "/engram-login.html").text();
+  if (GUI_HOT_RELOAD) return readFileSync(resolve(__dirname, "engram-login.html"), "utf-8");
   return LOGIN_HTML;
 }
 process.on("SIGHUP", async () => {
-  GUI_HTML = await Bun.file(import.meta.dir + "/engram-gui.html").text();
-  LOGIN_HTML = await Bun.file(import.meta.dir + "/engram-login.html").text();
+  GUI_HTML = readFileSync(resolve(__dirname, "engram-gui.html"), "utf-8");
+  LOGIN_HTML = readFileSync(resolve(__dirname, "engram-login.html"), "utf-8");
   log.info({ msg: "gui_reloaded", trigger: "SIGHUP" });
 });
 
@@ -2444,10 +2513,43 @@ await initEmbedder();
   log.info({ msg: "warmup_complete", cache_size: embeddingCacheLatest.length, ms: Date.now() - _warmStart });
 }
 
-const server = Bun.serve({
-  port: PORT,
-  hostname: HOST,
-  async fetch(req) {
+// Node HTTP → Web Request/Response adapter
+let _currentClientIp = "unknown";
+
+async function nodeToWebRequest(nodeReq: IncomingMessage): Promise<Request> {
+  const proto = nodeReq.headers["x-forwarded-proto"] || "http";
+  const host = nodeReq.headers.host || `${HOST}:${PORT}`;
+  const url = new URL(nodeReq.url || "/", `${proto}://${host}`);
+  const method = nodeReq.method || "GET";
+  const headers = new Headers();
+  for (const [key, val] of Object.entries(nodeReq.headers)) {
+    if (val) headers.set(key, Array.isArray(val) ? val.join(", ") : val);
+  }
+  let body: BodyInit | undefined;
+  if (method !== "GET" && method !== "HEAD") {
+    body = await new Promise<Buffer>((resolve) => {
+      const chunks: Buffer[] = [];
+      nodeReq.on("data", (c: Buffer) => chunks.push(c));
+      nodeReq.on("end", () => resolve(Buffer.concat(chunks)));
+    });
+  }
+  return new Request(url.toString(), { method, headers, body, duplex: "half" } as any);
+}
+
+async function writeWebResponse(nodeRes: ServerResponse, webRes: Response) {
+  nodeRes.writeHead(webRes.status, Object.fromEntries(webRes.headers.entries()));
+  const body = webRes.body;
+  if (!body) { nodeRes.end(); return; }
+  const reader = body.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    nodeRes.write(value);
+  }
+  nodeRes.end();
+}
+
+async function fetchHandler(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const method = req.method;
 
@@ -2459,14 +2561,23 @@ const server = Bun.serve({
     // ========================================================================
     // REQUEST MIDDLEWARE — ID, IP check, body limit
     // ========================================================================
-    const requestId = req.headers.get("X-Request-Id") || crypto.randomUUID().slice(0, 8);
-    const clientIp = server.requestIP(req)?.address || req.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() || "unknown";
+    const requestId = req.headers.get("X-Request-Id") || randomUUID().slice(0, 8);
+    const clientIp = _currentClientIp || req.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() || "unknown";
     const requestStart = performance.now();
 
     // IP allowlist check
     if (ALLOWED_IPS.length > 0 && !ALLOWED_IPS.includes(clientIp) && clientIp !== "127.0.0.1" && clientIp !== "::1") {
       log.warn({ msg: "blocked_ip", ip: clientIp, path: url.pathname, rid: requestId });
       return new Response("Forbidden", { status: 403 });
+    }
+
+    // S5 FIX: Per-IP rate limiting in OPEN_ACCESS mode
+    if (OPEN_ACCESS) {
+      const rl = checkIpRateLimit(clientIp);
+      if (!rl.allowed) {
+        log.warn({ msg: "ip_rate_limited", ip: clientIp, path: url.pathname, rid: requestId });
+        return json({ error: "Rate limit exceeded" }, 429, { "Retry-After": String(rl.retryAfter || 60) });
+      }
     }
 
     // Body size limit
@@ -2493,7 +2604,7 @@ const server = Bun.serve({
       try {
         const body = await req.json() as { password?: string };
         const pwMatch = body.password && body.password.length === GUI_PASSWORD.length &&
-          crypto.timingSafeEqual(Buffer.from(body.password), Buffer.from(GUI_PASSWORD));
+          timingSafeEqual(Buffer.from(body.password), Buffer.from(GUI_PASSWORD));
         if (pwMatch) {
           const cookie = guiSignCookie(Math.floor(Date.now() / 1000));
           return new Response(JSON.stringify({ ok: true }), {
@@ -2510,7 +2621,7 @@ const server = Bun.serve({
         audit(null, "gui_auth_fail", null, null, null, clientIp, requestId);
         log.warn({ msg: "gui_auth_fail", ip: clientIp, attempts: att.count, rid: requestId });
         return json({ error: "Invalid password" }, 401);
-      } catch { return json({ error: "Bad request" }, 400); }
+      } catch (e: any) { log.error({ msg: "gui_auth_error", error: e.message, stack: e.stack?.split("\n")[1]?.trim() }); return json({ error: "Bad request" }, 400); }
     }
 
     if (url.pathname === "/gui/logout" && method === "GET") {
@@ -2523,7 +2634,7 @@ const server = Bun.serve({
     // WEB GUI
     // ========================================================================
     if ((url.pathname === "/" || url.pathname === "/gui") && method === "GET") {
-      if (guiAuthed(req)) {
+      if (OPEN_ACCESS || guiAuthed(req)) {
         return new Response(await getGuiHtml(), { headers: securityHeaders({ "Content-Type": "text/html; charset=utf-8" }) });
       }
       return new Response(await getLoginHtml(), { headers: securityHeaders({ "Content-Type": "text/html; charset=utf-8" }) });
@@ -2554,9 +2665,12 @@ const server = Bun.serve({
       try {
         const body = await req.json() as any;
         if (!body.username) return errorResponse("username is required");
+        const validRoles = ["admin", "writer", "reader"];
+        const role = validRoles.includes(body.role) ? body.role : "writer";
+        const isAdmin = role === "admin" ? 1 : 0;
         const result = db.prepare(
-          "INSERT INTO users (username, email) VALUES (?, ?) RETURNING id, created_at"
-        ).get(body.username.trim(), body.email || null) as any;
+          "INSERT INTO users (username, email, role, is_admin) VALUES (?, ?, ?, ?) RETURNING id, created_at"
+        ).get(body.username.trim(), body.email || null, role, isAdmin) as any;
         // Create default space for new user
         db.prepare("INSERT INTO spaces (user_id, name, description) VALUES (?, 'default', 'Default memory space')").run(result.id);
         return json({ id: result.id, username: body.username.trim(), created_at: result.created_at });
@@ -2764,12 +2878,18 @@ const server = Bun.serve({
     // ========================================================================
     if (url.pathname === "/health" && method === "GET") {
       log.debug({ msg: "req", method: "GET", path: "/health", status: 200, ip: clientIp, rid: requestId });
+      // S7 FIX: Unauthenticated users get minimal health; authenticated get full details
+      const isAuthed = !!maybeAuth;
       const memCount = db.prepare("SELECT COUNT(*) as count FROM memories").get() as { count: number };
+      if (!isAuthed) {
+        return json({ status: "ok", version: 5.4, memories: memCount.count });
+      }
+      // Full health for authenticated users
       const convCount = db.prepare("SELECT COUNT(*) as count FROM conversations").get() as { count: number };
       const msgCount = db.prepare("SELECT COUNT(*) as count FROM messages").get() as { count: number };
       const linkCount = db.prepare("SELECT COUNT(*) as count FROM memory_links").get() as { count: number };
       const embCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE embedding IS NOT NULL").get() as { count: number };
-      const noEmbCount = (countNoEmbedding.get() as { count: number }).count;
+      const noEmbCount2 = (countNoEmbedding.get() as { count: number }).count;
       const forgottenCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_forgotten = 1").get() as { count: number };
       const staticCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_static = 1 AND is_forgotten = 0").get() as { count: number };
       const versionedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE version > 1").get() as { count: number };
@@ -2781,13 +2901,13 @@ const server = Bun.serve({
       const taggedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE tags IS NOT NULL AND is_forgotten = 0").get() as { count: number };
       const entityCount = db.prepare("SELECT COUNT(*) as count FROM entities").get() as { count: number };
       const projectCount = db.prepare("SELECT COUNT(*) as count FROM projects").get() as { count: number };
-      const dbSize = Bun.file(DB_PATH).size;
+      const dbSize = statSync(DB_PATH).size;
       return json({
         status: "ok",
-        version: 5.0,
+        version: 5.4,
         memories: memCount.count,
         embedded: embCount.count,
-        unembedded: noEmbCount,
+        unembedded: noEmbCount2,
         links: linkCount.count,
         forgotten: forgottenCount.count,
         archived: archivedCount.count,
@@ -2938,7 +3058,7 @@ If no meaningful facts, return {"facts": []}`;
             fact.forget_after || null, null, 0
           ) as { id: number; created_at: string };
 
-          const syncId = crypto.randomUUID();
+          const syncId = randomUUID();
           const tagsJson = fact.tags?.length ? JSON.stringify(fact.tags) : null;
           db.prepare(
             "UPDATE memories SET user_id = ?, space_id = ?, tags = ?, episode_id = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
@@ -2955,8 +3075,19 @@ If no meaningful facts, return {"facts": []}`;
           if (LLM_API_KEY) {
             (async () => {
               try {
-                const extraction = await extractFacts(result.id, fact.content.trim(), embArray!);
-                if (extraction) processExtractionResult(result.id, extraction, embArray!);
+                // S4 FIX: extractFacts takes (content, category, similarMemories), not (id, content, embedding)
+                const allMems = getCachedEmbeddings(true);
+                const sims: Array<{ id: number; content: string; category: string; score: number }> = [];
+                if (embArray) {
+                  for (const mem of allMems) {
+                    if (mem.id === result.id) continue;
+                    const sim = cosineSimilarity(embArray, mem.embedding);
+                    if (sim > 0.4) sims.push({ id: mem.id, content: mem.content, category: mem.category, score: sim });
+                  }
+                  sims.sort((a, b) => b.score - a.score);
+                }
+                const extraction = await extractFacts(fact.content.trim(), fact.category || category, sims.slice(0, 3));
+                if (extraction) processExtractionResult(result.id, extraction, embArray);
               } catch {}
             })();
           }
@@ -3164,7 +3295,7 @@ Return JSON:
               null, null, 0
             ) as { id: number; created_at: string };
 
-            const syncId = crypto.randomUUID();
+            const syncId = randomUUID();
             const tags = fact.tags?.length ? JSON.stringify(fact.tags) : null;
             db.prepare(
               "UPDATE memories SET user_id = ?, space_id = ?, tags = ?, episode_id = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
@@ -3178,8 +3309,19 @@ Return JSON:
             if (LLM_API_KEY) {
               (async () => {
                 try {
-                  const extraction = await extractFacts(result.id, fact.content.trim(), embArray!);
-                  if (extraction) processExtractionResult(result.id, extraction, embArray!);
+                  // S4 FIX: extractFacts takes (content, category, similarMemories)
+                  const allMems = getCachedEmbeddings(true);
+                  const sims: Array<{ id: number; content: string; category: string; score: number }> = [];
+                  if (embArray) {
+                    for (const mem of allMems) {
+                      if (mem.id === result.id) continue;
+                      const sim = cosineSimilarity(embArray, mem.embedding);
+                      if (sim > 0.4) sims.push({ id: mem.id, content: mem.content, category: mem.category, score: sim });
+                    }
+                    sims.sort((a, b) => b.score - a.score);
+                  }
+                  const extraction = await extractFacts(fact.content.trim(), fact.category || "general", sims.slice(0, 3));
+                  if (extraction) processExtractionResult(result.id, extraction, embArray);
                 } catch {}
               })();
             }
@@ -4000,6 +4142,12 @@ Return JSON:
           log.warn({ msg: "embedding_failed_storing_without", error: e.message });
         }
 
+        // B1+B2 FIX: Respect is_static, forget_after, is_inference from request body
+        const isStatic = body.is_static ? 1 : 0;
+        const forgetAfter = body.forget_after || null;
+        const forgetReason = body.forget_reason || null;
+        const isInference = body.is_inference ? 1 : 0;
+
         const result = insertMemory.get(
           content.trim(),
           (category || "general").trim(),
@@ -4007,11 +4155,11 @@ Return JSON:
           session_id || null,
           imp,
           embBuffer,
-          1, 1, null, null, 1, 0, 0, null, null, 0
+          1, 1, null, null, 1, isStatic, 0, forgetAfter, forgetReason, isInference
         ) as { id: number; created_at: string };
 
         // Set user_id, space_id, tags, episode_id, sync_id, confidence
-        const syncId = crypto.randomUUID();
+        const syncId = randomUUID();
         const memStatus = body.status === "pending" ? "pending" : "approved";
         db.prepare(
           "UPDATE memories SET user_id = ?, space_id = ?, tags = ?, episode_id = ?, sync_id = ?, confidence = 1.0, status = ? WHERE id = ?"
@@ -4034,7 +4182,7 @@ Return JSON:
 
         // Calculate initial decay score + FSRS state
         const initFSRS = fsrsProcessReview(null, FSRSRating.Good, 0);
-        const decayScore = calculateDecayScore(imp, result.created_at, 0, null, false, 1, initFSRS.stability);
+        const decayScore = calculateDecayScore(imp, result.created_at, 0, null, !!isStatic, 1, initFSRS.stability);
         db.prepare("UPDATE memories SET decay_score = ?, fsrs_stability = ?, fsrs_difficulty = ?, fsrs_storage_strength = ?, fsrs_retrieval_strength = ?, fsrs_learning_state = ?, fsrs_reps = ?, fsrs_lapses = ?, fsrs_last_review_at = ? WHERE id = ?").run(
           Math.round(decayScore * 1000) / 1000,
           initFSRS.stability, initFSRS.difficulty, initFSRS.storage_strength,
@@ -4207,6 +4355,19 @@ Return JSON:
     if (url.pathname === "/list" && method === "GET") {
       const limit = Math.min(Number(url.searchParams.get("limit") || 20), 100);
       const category = url.searchParams.get("category");
+      const source = url.searchParams.get("source");
+      // B3 FIX: Support source filter
+      if (source) {
+        const results = db.prepare(
+          `SELECT id, content, category, source, session_id, importance, created_at,
+             version, is_latest, parent_memory_id, root_memory_id, source_count,
+             is_static, is_forgotten, is_inference, forget_after, is_archived, status
+           FROM memories WHERE source = ? AND is_forgotten = 0 AND is_archived = 0 AND status != 'pending' AND user_id = ?
+           ${category ? "AND category = ?" : ""}
+           ORDER BY created_at DESC LIMIT ?`
+        ).all(...(category ? [source, auth.user_id, category, limit] : [source, auth.user_id, limit]));
+        return json({ results });
+      }
       const results = category ? listByCategory.all(category, auth.user_id, limit) : listRecent.all(auth.user_id, limit);
       return json({ results });
     }
@@ -4950,6 +5111,8 @@ Return JSON:
             updateMemoryEmbedding.run(embeddingToBuffer(emb), id); try { updateMemoryVec.run(embeddingToVectorJSON(emb), id); } catch {}
           } catch {}
         }
+        // B5 FIX: Invalidate cache so search reflects edits
+        invalidateEmbeddingCache();
         return json({ updated: true, id });
       } catch (e: any) { return errorResponse(`Failed: ${e.message}`, 500); }
     }
@@ -5378,6 +5541,22 @@ ${memoryBlock}
       try {
         const body = await req.json() as any;
         if (!body.url) return errorResponse("url is required");
+        // S6 FIX: Validate webhook URL — block private/internal IPs (SSRF protection)
+        try {
+          const webhookUrl = new URL(body.url);
+          if (!["http:", "https:"].includes(webhookUrl.protocol)) return errorResponse("Webhook URL must be http or https");
+          const hostname = webhookUrl.hostname.toLowerCase();
+          // Block private/internal IPs
+          if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" ||
+              hostname === "0.0.0.0" || hostname.startsWith("10.") || hostname.startsWith("192.168.") ||
+              hostname.startsWith("172.16.") || hostname.startsWith("172.17.") || hostname.startsWith("172.18.") ||
+              hostname.startsWith("172.19.") || hostname.startsWith("172.2") || hostname.startsWith("172.30.") ||
+              hostname.startsWith("172.31.") || hostname.endsWith(".local") || hostname.endsWith(".internal") ||
+              hostname.startsWith("100.64.") || hostname.startsWith("169.254.") || hostname.startsWith("fc") ||
+              hostname.startsWith("fd") || hostname === "[::1]") {
+            return errorResponse("Webhook URL cannot point to private/internal addresses", 400);
+          }
+        } catch { return errorResponse("Invalid webhook URL", 400); }
         const events = body.events || ["*"];
         const secret = body.secret || null;
         const result = insertWebhook.get(body.url, JSON.stringify(events), secret, auth.user_id) as { id: number; created_at: string };
@@ -5583,7 +5762,7 @@ If no meaningful inferences, return {"derived": []}`;
             d.importance || 5, embBuffer, 1, 1, null, null, 1, 0, 0, null, null, 0
           ) as { id: number; created_at: string };
 
-          const syncId = crypto.randomUUID();
+          const syncId = randomUUID();
           db.prepare(
             "UPDATE memories SET user_id = ?, sync_id = ?, confidence = ?, tags = ? WHERE id = ?"
           ).run(auth.user_id, syncId, d.confidence || 0.7, JSON.stringify(["derived", ...(d.tags || [])]), result.id);
@@ -5647,7 +5826,7 @@ If no meaningful inferences, return {"derived": []}`;
 
           db.prepare(
             "UPDATE memories SET user_id = ?, tags = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
-          ).run(auth.user_id, JSON.stringify(tags), crypto.randomUUID(), result.id);
+          ).run(auth.user_id, JSON.stringify(tags), randomUUID(), result.id);
 
           if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray); }
           imported++;
@@ -5720,7 +5899,7 @@ If no meaningful inferences, return {"derived": []}`;
 
           db.prepare(
             "UPDATE memories SET user_id = ?, tags = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
-          ).run(auth.user_id, JSON.stringify([...new Set(tags)]), crypto.randomUUID(), result.id);
+          ).run(auth.user_id, JSON.stringify([...new Set(tags)]), randomUUID(), result.id);
 
           if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray); }
           imported++;
@@ -5904,7 +6083,7 @@ If no meaningful inferences, return {"derived": []}`;
 
         // Graph visualization page
     if (url.pathname === "/graph/view" && method === "GET") {
-      const graphHtml = await Bun.file(resolve(import.meta.dir, "engram-graph.html")).text().catch(() => null);
+      const graphHtml = await readFile(resolve(__dirname, "engram-graph.html"), "utf-8").catch(() => null);
       if (!graphHtml) return errorResponse("Graph view not found. Place engram-graph.html alongside server.ts", 404);
       return new Response(graphHtml, { headers: { "Content-Type": "text/html" } });
     }
@@ -6216,7 +6395,7 @@ If no meaningful inferences, return {"derived": []}`;
          FROM conversations c GROUP BY agent ORDER BY total_messages DESC`
       ).all();
 
-      const dbSize = Bun.file(DB_PATH).size;
+      const dbSize = statSync(DB_PATH).size;
       return json({
         memories: {
           total: memCount.count,
@@ -6284,7 +6463,7 @@ If no meaningful inferences, return {"derived": []}`;
       if (mem.status !== "pending") return errorResponse(`Memory is already ${mem.status}`, 400);
       const body = await req.json().catch(() => ({})) as any;
       rejectMemory.run(id, auth.user_id);
-      audit(auth.user_id, "inbox.reject", "memory", id, reason || null, clientIp, requestId);
+      audit(auth.user_id, "inbox.reject", "memory", id, body.reason || null, clientIp, requestId);
       if (body.reason) {
         db.prepare("UPDATE memories SET forget_reason = ? WHERE id = ?").run(body.reason, id);
       }
@@ -6349,7 +6528,7 @@ If no meaningful inferences, return {"derived": []}`;
         emitWebhookEvent(`memory.bulk_${action}`, { ids, count }, auth.user_id);
         return json({ action, count, ids });
       } catch (e: any) {
-        return errorResponse(`Bulk ${(await req.json().catch(() => ({}))).action || "action"} failed: ${e.message}`, 500);
+        return errorResponse(`Bulk action failed: ${e.message}`, 500);
       }
     }
 
@@ -6390,17 +6569,18 @@ If no meaningful inferences, return {"derived": []}`;
       try {
         db.prepare("PRAGMA wal_checkpoint(PASSIVE)").get();
         const backupPath = resolve(DATA_DIR, `backup-${Date.now()}.db`);
-        await Bun.write(backupPath, Bun.file(DB_PATH));
-        const file = Bun.file(backupPath);
-        audit(auth.user_id, "backup", null, null, `${file.size} bytes`, clientIp, requestId);
-        log.info({ msg: "backup_created", size: file.size, rid: requestId });
-        const resp = new Response(file, {
+        copyFileSync(DB_PATH, backupPath);
+        const fileStat = statSync(backupPath);
+        const fileBuffer = readFileSync(backupPath);
+        audit(auth.user_id, "backup", null, null, `${fileStat.size} bytes`, clientIp, requestId);
+        log.info({ msg: "backup_created", size: fileStat.size, rid: requestId });
+        const resp = new Response(fileBuffer, {
           headers: securityHeaders({
             "Content-Type": "application/x-sqlite3",
             "Content-Disposition": `attachment; filename="engram-${new Date().toISOString().slice(0,10)}.db"`,
           }),
         });
-        setTimeout(async () => { try { await Bun.$`rm -f ${backupPath}`; } catch {} }, 30_000);
+        setTimeout(() => { try { unlinkSync(backupPath); } catch {} }, 30_000);
         return resp;
       } catch (e: any) {
         return errorResponse(`Backup failed: ${e.message}`, 500, requestId);
@@ -6415,7 +6595,25 @@ If no meaningful inferences, return {"derived": []}`;
       log.info({ msg: "req", method, path: url.pathname, status: 404, ms: elapsed, ip: clientIp, user: auth.user_id, rid: requestId });
     }
         return errorResponse("Not found", 404, requestId);
-  },
+}
+
+const server = createServer(async (nodeReq, nodeRes) => {
+  try {
+    _currentClientIp = nodeReq.socket.remoteAddress?.replace(/^::ffff:/, "") || "unknown";
+    const webReq = await nodeToWebRequest(nodeReq);
+    const webRes = await fetchHandler(webReq);
+    await writeWebResponse(nodeRes, webRes);
+  } catch (err: any) {
+    log.error({ msg: "unhandled_request_error", error: err.message });
+    if (!nodeRes.headersSent) {
+      nodeRes.writeHead(500, { "Content-Type": "application/json" });
+    }
+    nodeRes.end(JSON.stringify({ error: "Internal server error" }));
+  }
+});
+
+server.listen(PORT, HOST, () => {
+  log.info({ msg: "node_http_server_listening", host: HOST, port: PORT });
 });
 
 // ============================================================================
@@ -6523,5 +6721,5 @@ setInterval(async () => {
   }
 }, 5 * 60 * 1000);
 
-log.info({ msg: "server_started", version: "5.3", host: HOST, port: PORT, open_access: OPEN_ACCESS, cors: CORS_ORIGIN, log_level: process.env.ENGRAM_LOG_LEVEL || "info", allowed_ips: ALLOWED_IPS.length || "any" });
+log.info({ msg: "server_started", version: "5.4", host: HOST, port: PORT, open_access: OPEN_ACCESS, cors: CORS_ORIGIN, log_level: process.env.ENGRAM_LOG_LEVEL || "info", allowed_ips: ALLOWED_IPS.length || "any" });
 log.info({ msg: "config", db: DB_PATH, embedding: `${EMBEDDING_MODEL} (${EMBEDDING_DIM}d)`, llm: LLM_API_KEY ? `${LLM_MODEL} via ${LLM_URL}` : "not configured", auto_link: { threshold: AUTO_LINK_THRESHOLD, max: AUTO_LINK_MAX }, fsrs6: { w20: FSRS6_WEIGHTS[20], retention: FSRS_DEFAULT_RETENTION }, consolidation: LLM_API_KEY ? CONSOLIDATION_THRESHOLD : "disabled", sweep_interval_s: FORGET_SWEEP_INTERVAL / 1000 });
