@@ -643,10 +643,9 @@ server {
 ## Test Suite
 
 ```bash
-# Start the server, then:
-cd engram
-node --test tests/api.test.mjs
-# 38 tests, 12 suites, 0 failures
+# Start the server with ENGRAM_OPEN_ACCESS=1, then:
+ENGRAM_TEST_URL=http://localhost:4200 node --experimental-strip-types --test tests/api.test.ts
+# 76 tests, 32 suites, 0 failures
 ```
 
 ---

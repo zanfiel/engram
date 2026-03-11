@@ -256,6 +256,172 @@ class Engram:
         """Backfill missing embeddings."""
         return self._request("POST", "/backfill")
 
+    # ── Conversations ───────────────────────────────────────────────────
+
+    def create_conversation(self, agent: str, session_id: Optional[str] = None, model: Optional[str] = None, title: Optional[str] = None) -> dict:
+        """Create a conversation."""
+        return self._request("POST", "/conversations", json={"agent": agent, "session_id": session_id, "model": model, "title": title})
+
+    def list_conversations(self, limit: int = 20, offset: int = 0, agent: Optional[str] = None) -> dict:
+        """List conversations."""
+        params = f"?limit={limit}&offset={offset}"
+        if agent: params += f"&agent={agent}"
+        return self._request("GET", f"/conversations{params}")
+
+    def conversations_bulk(self, agent: str, messages: list[dict], session_id: Optional[str] = None, model: Optional[str] = None) -> dict:
+        """Bulk insert a conversation with messages."""
+        return self._request("POST", "/conversations/bulk", json={"agent": agent, "messages": messages, "session_id": session_id, "model": model})
+
+    def search_messages(self, query: str, limit: int = 20) -> dict:
+        """Search conversation messages."""
+        return self._request("POST", "/messages/search", json={"query": query, "limit": limit})
+
+    # ── Episodes ────────────────────────────────────────────────────────
+
+    def create_episode(self, name: str, memory_ids: list[int]) -> dict:
+        """Create an episode from memory IDs."""
+        return self._request("POST", "/episodes", json={"name": name, "memory_ids": memory_ids})
+
+    def list_episodes(self, limit: int = 20) -> dict:
+        """List episodes."""
+        return self._request("GET", f"/episodes?limit={limit}")
+
+    # ── Tags ────────────────────────────────────────────────────────────
+
+    def set_tags(self, id: int, tags: list[str]) -> dict:
+        """Set tags on a memory."""
+        return self._request("PUT", f"/memory/{id}/tags", json={"tags": tags})
+
+    def list_tags(self) -> dict:
+        """List all tags."""
+        return self._request("GET", "/tags")
+
+    def search_by_tag(self, tag: str) -> dict:
+        """Search memories by tag."""
+        return self._request("POST", "/tags/search", json={"tag": tag})
+
+    # ── FSRS & Decay ───────────────────────────────────────────────────
+
+    def decay_scores(self, limit: int = 20) -> dict:
+        """Get decay scores."""
+        return self._request("GET", f"/decay/scores?limit={limit}")
+
+    def decay_refresh(self) -> dict:
+        """Refresh decay calculations."""
+        return self._request("POST", "/decay/refresh")
+
+    def fsrs_review(self, id: int, grade: int) -> dict:
+        """Record an FSRS review (grade 1-4)."""
+        return self._request("POST", "/fsrs/review", json={"id": id, "grade": grade})
+
+    def fsrs_state(self, id: int) -> dict:
+        """Get FSRS state for a memory."""
+        return self._request("GET", f"/fsrs/state?id={id}")
+
+    # ── Pack & Context ──────────────────────────────────────────────────
+
+    def pack(self, query: str, max_tokens: int = 4000) -> dict:
+        """Pack memories into a token-budgeted context string."""
+        return self._request("POST", "/pack", json={"query": query, "max_tokens": max_tokens})
+
+    def prompt(self, template: str, query: str) -> dict:
+        """Get a formatted prompt template."""
+        return self._request("GET", f"/prompt?template={template}&query={query}")
+
+    def context(self, query: str, max_tokens: int = 4000) -> dict:
+        """Get smart context with blocks and token budget."""
+        return self._request("POST", "/context", json={"query": query, "max_tokens": max_tokens})
+
+    # ── Time Travel & Contradictions ────────────────────────────────────
+
+    def time_travel(self, as_of: str) -> dict:
+        """View memory state at a point in time."""
+        return self._request("POST", "/timetravel", json={"as_of": as_of})
+
+    def contradictions(self, limit: int = 20) -> dict:
+        """List detected contradictions."""
+        return self._request("GET", f"/contradictions?limit={limit}")
+
+    # ── Webhooks ────────────────────────────────────────────────────────
+
+    def create_webhook(self, url: str, events: list[str]) -> dict:
+        """Register a webhook."""
+        return self._request("POST", "/webhooks", json={"url": url, "events": events})
+
+    def list_webhooks(self) -> dict:
+        """List webhooks."""
+        return self._request("GET", "/webhooks")
+
+    # ── Sync ────────────────────────────────────────────────────────────
+
+    def sync_changes(self, since: str) -> dict:
+        """Get changes since a timestamp for syncing."""
+        return self._request("GET", f"/sync/changes?since={since}")
+
+    # ── Inbox & Audit ───────────────────────────────────────────────────
+
+    def inbox(self, limit: int = 20) -> dict:
+        """Get pending inbox items."""
+        return self._request("GET", f"/inbox?limit={limit}")
+
+    def audit(self, limit: int = 50) -> dict:
+        """Get audit log."""
+        return self._request("GET", f"/audit?limit={limit}")
+
+    # ── Entities & Projects ─────────────────────────────────────────────
+
+    def create_entity(self, name: str, type: str, description: Optional[str] = None) -> dict:
+        """Create an entity."""
+        return self._request("POST", "/entities", json={"name": name, "type": type, "description": description})
+
+    def list_entities(self) -> dict:
+        """List entities."""
+        return self._request("GET", "/entities")
+
+    def create_project(self, name: str, description: Optional[str] = None) -> dict:
+        """Create a project."""
+        return self._request("POST", "/projects", json={"name": name, "description": description})
+
+    def list_projects(self) -> dict:
+        """List projects."""
+        return self._request("GET", "/projects")
+
+    # ── Digests ─────────────────────────────────────────────────────────
+
+    def create_digest(self, name: str, cron: str, webhook_url: str) -> dict:
+        """Create a scheduled digest."""
+        return self._request("POST", "/digests", json={"name": name, "cron": cron, "webhook_url": webhook_url})
+
+    def list_digests(self) -> dict:
+        """List digest schedules."""
+        return self._request("GET", "/digests")
+
+    # ── Users ───────────────────────────────────────────────────────────
+
+    def create_user(self, username: str) -> dict:
+        """Create a user."""
+        return self._request("POST", "/users", json={"username": username})
+
+    def list_users(self) -> dict:
+        """List users."""
+        return self._request("GET", "/users")
+
+    # ── Version History & Links ─────────────────────────────────────────
+
+    def versions(self, root_id: int) -> dict:
+        """Get version chain for a root memory."""
+        return self._request("GET", f"/versions/{root_id}")
+
+    def links(self, id: int) -> dict:
+        """Get links for a memory."""
+        return self._request("GET", f"/links/{id}")
+
+    # ── URL Ingest ──────────────────────────────────────────────────────
+
+    def ingest(self, url: str) -> dict:
+        """Ingest content from a URL."""
+        return self._request("POST", "/ingest", json={"url": url})
+
     # ── System ──────────────────────────────────────────────────────────
 
     def health(self) -> dict:

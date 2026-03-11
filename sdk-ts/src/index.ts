@@ -397,6 +397,249 @@ export class Engram {
   }
 
   // --------------------------------------------------------------------------
+  // Conversations
+  // --------------------------------------------------------------------------
+
+  /** Create a conversation */
+  async createConversation(options: { agent: string; session_id?: string; model?: string; title?: string; started_at?: string }): Promise<any> {
+    return this.request("POST", "/conversations", options);
+  }
+
+  /** List conversations */
+  async listConversations(options: { limit?: number; offset?: number; agent?: string } = {}): Promise<any> {
+    const params = new URLSearchParams();
+    if (options.limit) params.set("limit", String(options.limit));
+    if (options.offset) params.set("offset", String(options.offset));
+    if (options.agent) params.set("agent", options.agent);
+    return this.request("GET", `/conversations?${params}`);
+  }
+
+  /** Bulk insert a conversation with messages */
+  async conversationsBulk(options: { agent: string; session_id?: string; model?: string; messages: Array<{ role: string; content: string }> }): Promise<any> {
+    return this.request("POST", "/conversations/bulk", options);
+  }
+
+  /** Search conversation messages */
+  async searchMessages(query: string, options: { limit?: number; agent?: string } = {}): Promise<any> {
+    return this.request("POST", "/messages/search", { query, ...options });
+  }
+
+  // --------------------------------------------------------------------------
+  // Episodes
+  // --------------------------------------------------------------------------
+
+  /** Create an episode from memory IDs */
+  async createEpisode(name: string, memoryIds: number[]): Promise<any> {
+    return this.request("POST", "/episodes", { name, memory_ids: memoryIds });
+  }
+
+  /** List episodes */
+  async listEpisodes(limit = 20): Promise<any> {
+    return this.request("GET", `/episodes?limit=${limit}`);
+  }
+
+  // --------------------------------------------------------------------------
+  // Tags
+  // --------------------------------------------------------------------------
+
+  /** Set tags on a memory */
+  async setTags(id: number, tags: string[]): Promise<any> {
+    return this.request("PUT", `/memory/${id}/tags`, { tags });
+  }
+
+  /** List all tags */
+  async listTags(): Promise<any> {
+    return this.request("GET", "/tags");
+  }
+
+  /** Search memories by tag */
+  async searchByTag(tag: string): Promise<any> {
+    return this.request("POST", "/tags/search", { tag });
+  }
+
+  // --------------------------------------------------------------------------
+  // FSRS & Decay
+  // --------------------------------------------------------------------------
+
+  /** Get decay scores */
+  async decayScores(limit = 20): Promise<any> {
+    return this.request("GET", `/decay/scores?limit=${limit}`);
+  }
+
+  /** Refresh decay calculations */
+  async decayRefresh(): Promise<any> {
+    return this.request("POST", "/decay/refresh");
+  }
+
+  /** Record an FSRS review */
+  async fsrsReview(id: number, grade: 1 | 2 | 3 | 4): Promise<any> {
+    return this.request("POST", "/fsrs/review", { id, grade });
+  }
+
+  /** Get FSRS state for a memory */
+  async fsrsState(id: number): Promise<any> {
+    return this.request("GET", `/fsrs/state?id=${id}`);
+  }
+
+  // --------------------------------------------------------------------------
+  // Pack & Context
+  // --------------------------------------------------------------------------
+
+  /** Pack memories into a token-budgeted context string */
+  async pack(query: string, maxTokens = 4000): Promise<any> {
+    return this.request("POST", "/pack", { query, max_tokens: maxTokens });
+  }
+
+  /** Get a formatted prompt template */
+  async prompt(template: string, query: string): Promise<any> {
+    return this.request("GET", `/prompt?template=${encodeURIComponent(template)}&query=${encodeURIComponent(query)}`);
+  }
+
+  /** Get smart context with blocks and token budget */
+  async context(query: string, maxTokens = 4000): Promise<any> {
+    return this.request("POST", "/context", { query, max_tokens: maxTokens });
+  }
+
+  // --------------------------------------------------------------------------
+  // Time Travel & Contradictions
+  // --------------------------------------------------------------------------
+
+  /** View memory state at a point in time */
+  async timeTravel(asOf: string): Promise<any> {
+    return this.request("POST", "/timetravel", { as_of: asOf });
+  }
+
+  /** List detected contradictions */
+  async contradictions(limit = 20): Promise<any> {
+    return this.request("GET", `/contradictions?limit=${limit}`);
+  }
+
+  // --------------------------------------------------------------------------
+  // Webhooks
+  // --------------------------------------------------------------------------
+
+  /** Register a webhook */
+  async createWebhook(url: string, events: string[]): Promise<any> {
+    return this.request("POST", "/webhooks", { url, events });
+  }
+
+  /** List webhooks */
+  async listWebhooks(): Promise<any> {
+    return this.request("GET", "/webhooks");
+  }
+
+  // --------------------------------------------------------------------------
+  // Sync
+  // --------------------------------------------------------------------------
+
+  /** Get changes since a timestamp for syncing */
+  async syncChanges(since: string): Promise<any> {
+    return this.request("GET", `/sync/changes?since=${encodeURIComponent(since)}`);
+  }
+
+  // --------------------------------------------------------------------------
+  // Inbox & Audit
+  // --------------------------------------------------------------------------
+
+  /** Get pending inbox items */
+  async inbox(limit = 20): Promise<any> {
+    return this.request("GET", `/inbox?limit=${limit}`);
+  }
+
+  /** Get audit log */
+  async audit(limit = 50): Promise<any> {
+    return this.request("GET", `/audit?limit=${limit}`);
+  }
+
+  // --------------------------------------------------------------------------
+  // Entities & Projects
+  // --------------------------------------------------------------------------
+
+  /** Create an entity */
+  async createEntity(name: string, type: string, description?: string): Promise<any> {
+    return this.request("POST", "/entities", { name, type, description });
+  }
+
+  /** List entities */
+  async listEntities(): Promise<any> {
+    return this.request("GET", "/entities");
+  }
+
+  /** Create a project */
+  async createProject(name: string, description?: string): Promise<any> {
+    return this.request("POST", "/projects", { name, description });
+  }
+
+  /** List projects */
+  async listProjects(): Promise<any> {
+    return this.request("GET", "/projects");
+  }
+
+  // --------------------------------------------------------------------------
+  // Digests
+  // --------------------------------------------------------------------------
+
+  /** Create a scheduled digest */
+  async createDigest(options: { name: string; cron: string; webhook_url: string }): Promise<any> {
+    return this.request("POST", "/digests", options);
+  }
+
+  /** List digest schedules */
+  async listDigests(): Promise<any> {
+    return this.request("GET", "/digests");
+  }
+
+  // --------------------------------------------------------------------------
+  // Users
+  // --------------------------------------------------------------------------
+
+  /** Create a user */
+  async createUser(username: string): Promise<any> {
+    return this.request("POST", "/users", { username });
+  }
+
+  /** List users */
+  async listUsers(): Promise<any> {
+    return this.request("GET", "/users");
+  }
+
+  // --------------------------------------------------------------------------
+  // Version History & Links
+  // --------------------------------------------------------------------------
+
+  /** Get version chain for a root memory */
+  async versions(rootId: number): Promise<any> {
+    return this.request("GET", `/versions/${rootId}`);
+  }
+
+  /** Get links for a memory */
+  async links(id: number): Promise<any> {
+    return this.request("GET", `/links/${id}`);
+  }
+
+  // --------------------------------------------------------------------------
+  // URL Ingest
+  // --------------------------------------------------------------------------
+
+  /** Ingest content from a URL */
+  async ingest(url: string): Promise<any> {
+    return this.request("POST", "/ingest", { url });
+  }
+
+  // --------------------------------------------------------------------------
+  // Backup
+  // --------------------------------------------------------------------------
+
+  /** Download database backup as ArrayBuffer */
+  async backup(): Promise<ArrayBuffer> {
+    const resp = await fetch(`${this.config.url}/backup`, {
+      headers: this.config.apiKey ? { Authorization: `Bearer ${this.config.apiKey}` } : {},
+    });
+    if (!resp.ok) throw new EngramError(`Backup failed: ${resp.status}`, resp.status);
+    return resp.arrayBuffer();
+  }
+
+  // --------------------------------------------------------------------------
   // System
   // --------------------------------------------------------------------------
 

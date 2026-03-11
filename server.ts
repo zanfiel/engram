@@ -2577,7 +2577,7 @@ async function fetchHandler(req: Request): Promise<Response> {
     // WEB GUI
     // ========================================================================
     if ((url.pathname === "/" || url.pathname === "/gui") && method === "GET") {
-      if (guiAuthed(req)) {
+      if (OPEN_ACCESS || guiAuthed(req)) {
         return new Response(await getGuiHtml(), { headers: securityHeaders({ "Content-Type": "text/html; charset=utf-8" }) });
       }
       return new Response(await getLoginHtml(), { headers: securityHeaders({ "Content-Type": "text/html; charset=utf-8" }) });

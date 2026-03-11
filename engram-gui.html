@@ -6,6 +6,7 @@
 <title>Engram</title>
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/7.3.2/pixi.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pixi-filters@4.2.0/dist/pixi-filters.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -172,6 +173,118 @@
   }
   #list-toggle:hover { background: rgba(129,140,248,0.12); color: #818cf8; border-color: rgba(129,140,248,0.2); }
   #list-toggle.active { background: rgba(129,140,248,0.15); color: #818cf8; border-color: rgba(129,140,248,0.3); box-shadow: 0 0 16px rgba(129,140,248,0.1); }
+
+  /* Inbox Panel */
+  #inbox-panel {
+    position: fixed; top: 56px; left: -460px; width: 440px; height: calc(100vh - 56px); z-index: 15;
+    background: rgba(15,20,25,0.92);
+    backdrop-filter: blur(32px) saturate(1.6);
+    -webkit-backdrop-filter: blur(32px) saturate(1.6);
+    border-right: 1px solid rgba(255,255,255,0.05);
+    box-shadow: 12px 0 60px rgba(0,0,0,0.4);
+    transition: left 0.5s cubic-bezier(0.16,1,0.3,1);
+    overflow-y: auto; display: flex; flex-direction: column;
+  }
+  #inbox-panel.open { left: 0; }
+  #inbox-panel::-webkit-scrollbar { width: 4px; }
+  #inbox-panel::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 2px; }
+  .inbox-header {
+    padding: 16px 18px 12px; border-bottom: 1px solid rgba(255,255,255,0.04);
+    display: flex; flex-direction: column; gap: 10px; flex-shrink: 0;
+  }
+  .inbox-title {
+    display: flex; align-items: center; gap: 10px;
+  }
+  .inbox-title h2 {
+    font-size: 13px; font-weight: 600; color: #e2e4e9;
+    letter-spacing: 0.5px; text-transform: uppercase;
+  }
+  .inbox-count {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #f97316;
+    background: rgba(249,115,22,0.1); padding: 2px 8px; border-radius: 6px;
+    border: 1px solid rgba(249,115,22,0.15);
+  }
+  .inbox-actions {
+    display: flex; gap: 6px;
+  }
+  .inbox-action-btn {
+    padding: 5px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.06);
+    background: rgba(255,255,255,0.03); color: #94a3b8; font-size: 10px;
+    font-family: 'Inter', sans-serif; cursor: pointer; font-weight: 500;
+    transition: all 0.2s;
+  }
+  .inbox-action-btn:hover { background: rgba(255,255,255,0.06); color: #e2e4e9; }
+  .inbox-action-btn.approve-all { border-color: rgba(52,211,153,0.2); color: #34d399; }
+  .inbox-action-btn.approve-all:hover { background: rgba(52,211,153,0.1); }
+  .inbox-action-btn.reject-all { border-color: rgba(248,113,113,0.2); color: #f87171; }
+  .inbox-action-btn.reject-all:hover { background: rgba(248,113,113,0.1); }
+  .inbox-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .inbox-card {
+    padding: 14px 16px; margin-bottom: 6px; border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.04);
+    background: rgba(255,255,255,0.015);
+    transition: all 0.25s cubic-bezier(0.16,1,0.3,1);
+    position: relative;
+  }
+  .inbox-card:hover {
+    background: rgba(255,255,255,0.035);
+    border-color: rgba(255,255,255,0.08);
+  }
+  .inbox-card.selected {
+    border-color: rgba(129,140,248,0.3);
+    background: rgba(129,140,248,0.06);
+  }
+  .inbox-card-header {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+  }
+  .inbox-card-header input[type="checkbox"] {
+    accent-color: #818cf8; width: 14px; height: 14px; cursor: pointer;
+  }
+  .inbox-card-meta {
+    font-family: 'JetBrains Mono', monospace; font-size: 9px; color: #3a3a50; letter-spacing: 0.3px;
+  }
+  .inbox-card-cat {
+    display: inline-block; padding: 1px 6px; border-radius: 4px;
+    font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+    margin-left: 6px;
+  }
+  .inbox-card-content {
+    font-size: 12px; line-height: 1.6; color: #c8ccd4;
+    max-height: 120px; overflow: hidden; margin-bottom: 10px;
+    word-wrap: break-word;
+  }
+  .inbox-card-content.expanded { max-height: none; }
+  .inbox-card-actions {
+    display: flex; gap: 6px; align-items: center;
+  }
+  .inbox-btn {
+    padding: 4px 10px; border-radius: 6px; font-size: 10px; font-weight: 600;
+    cursor: pointer; transition: all 0.2s; font-family: 'Inter', sans-serif;
+    border: 1px solid transparent;
+  }
+  .inbox-btn.approve {
+    background: rgba(52,211,153,0.1); color: #34d399; border-color: rgba(52,211,153,0.2);
+  }
+  .inbox-btn.approve:hover { background: rgba(52,211,153,0.2); }
+  .inbox-btn.edit {
+    background: rgba(129,140,248,0.1); color: #818cf8; border-color: rgba(129,140,248,0.2);
+  }
+  .inbox-btn.edit:hover { background: rgba(129,140,248,0.2); }
+  .inbox-btn.reject {
+    background: rgba(248,113,113,0.08); color: #f87171; border-color: rgba(248,113,113,0.15);
+  }
+  .inbox-btn.reject:hover { background: rgba(248,113,113,0.15); }
+  .inbox-empty {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 300px; color: #3a3a50; text-align: center;
+  }
+  .inbox-empty svg { margin-bottom: 12px; opacity: 0.3; }
+  .inbox-empty p { font-size: 13px; }
+  .inbox-empty small { font-size: 11px; color: #2a2a3a; margin-top: 4px; }
+  #inbox-toggle.active {
+    background: rgba(249,115,22,0.15); color: #f97316; border-color: rgba(249,115,22,0.3);
+    box-shadow: 0 0 16px rgba(249,115,22,0.1);
+  }
 
   #list-panel {
     position: fixed; top: 0; left: -420px; width: 420px; height: 100vh; z-index: 15;
@@ -468,13 +581,29 @@
   <button id="list-toggle" onclick="toggleListPanel()" title="Memory List (L)">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
   </button>
-  <h1><span class="logo-glow">En<span>gram</span></span></h1>
+  <button id="inbox-toggle" onclick="toggleInboxPanel()" title="Review Queue (I)" style="
+    width: 34px; height: 34px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.06);
+    background: rgba(255,255,255,0.03); color: #94a3b8; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; position: relative;
+    transition: all 0.3s cubic-bezier(0.16,1,0.3,1);
+  ">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
+    <span id="inbox-badge" style="
+      display: none; position: absolute; top: -4px; right: -4px;
+      min-width: 16px; height: 16px; border-radius: 8px; padding: 0 4px;
+      background: linear-gradient(135deg, #f97316, #ef4444);
+      color: white; font-size: 9px; font-weight: 700; font-family: 'JetBrains Mono', monospace;
+      line-height: 16px; text-align: center;
+    "></span>
+  </button>
+  <h1><span class="logo-glow">Eng<span>ram</span></span></h1>
   <div id="search-box">
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
     <input id="search" type="text" placeholder="Search memories..." autocomplete="off">
   </div>
   <div class="stats">
     <span><span class="val" id="stat-nodes">0</span> memories</span>
+    <span><span class="val" id="stat-clusters">0</span> clusters</span>
     <span><span class="val" id="stat-links">0</span> links</span>
   </div>
   <button id="create-btn" onclick="openCreateDialog()" title="Create Memory (N)" style="
@@ -555,12 +684,30 @@
   </div>
 </div>
 
+<!-- Inbox / Review Queue Panel -->
+<div id="inbox-panel">
+  <div class="inbox-header">
+    <div class="inbox-title">
+      <h2>Review Queue</h2>
+      <span class="inbox-count" id="inbox-count">0 pending</span>
+      <button onclick="toggleInboxPanel()" style="background:none;border:none;color:#94a3b8;font-size:18px;cursor:pointer;margin-left:auto;padding:2px 6px;line-height:1;opacity:0.7" onmouseover="this.style.opacity='1';this.style.color='#f87171'" onmouseout="this.style.opacity='0.7';this.style.color='#94a3b8'">&times;</button>
+    </div>
+    <div class="inbox-actions">
+      <button class="inbox-action-btn" onclick="inboxSelectAll()">Select All</button>
+      <button class="inbox-action-btn approve-all" onclick="inboxBulkApprove()">&#10003; Approve Selected</button>
+      <button class="inbox-action-btn reject-all" onclick="inboxBulkReject()">&#10005; Reject Selected</button>
+    </div>
+  </div>
+  <div class="inbox-list" id="inbox-list"></div>
+</div>
+
 <!-- List Panel (Left) -->
 <div id="list-panel">
   <div class="lp-header">
     <div class="lp-title">
       <h2>All Memories</h2>
       <span class="lp-count" id="lp-count">0 items</span>
+      <button onclick="toggleListPanel()" style="background:none;border:none;color:#94a3b8;font-size:18px;cursor:pointer;margin-left:auto;padding:2px 6px;line-height:1;opacity:0.7" onmouseover="this.style.opacity='1';this.style.color='#f87171'" onmouseout="this.style.opacity='0.7';this.style.color='#94a3b8'">&times;</button>
     </div>
     <div class="lp-search">
       <svg class="lp-search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
@@ -616,29 +763,44 @@
 </div>
 
 <script>
-/* ===== Engram v8.0 — Orbital Galaxy ===== */
+/* ===== Engram v9.0 — Orbital Galaxy ===== */
+
+// DEBUG: Global error handler
+window.onerror = function(msg, url, line, col, error) {
+  var el = document.getElementById('loading');
+  if (el) el.innerHTML = '<div class="text" style="color:#f87171;max-width:600px;word-break:break-all;">' +
+    'JS ERROR at line ' + line + ':' + col + '<br>' + msg + '<br>' + (error && error.stack ? error.stack.substring(0,500) : '') + '</div>';
+  console.error('ENGRAM_DEBUG:', msg, 'at line', line, col, error);
+  return false;
+};
+window.addEventListener('unhandledrejection', function(e) {
+  var el = document.getElementById('loading');
+  if (el) el.innerHTML = '<div class="text" style="color:#f87171;max-width:600px;word-break:break-all;">' +
+    'Promise rejection: ' + (e.reason ? e.reason.message || e.reason : 'unknown') + '</div>';
+  console.error('ENGRAM_DEBUG promise:', e.reason);
+});
 
 // ===== Constants & Colors =====
 var BASE = location.origin;
 var COLORS = {
-  task:      { core: '#ff7b3a', glow: '#e56020', r: 255, g: 123, b: 58,  hex: 0xff7b3a },
-  discovery: { core: '#1aedb5', glow: '#0dd49a', r: 26,  g: 237, b: 181, hex: 0x1aedb5 },
-  decision:  { core: '#ffd23f', glow: '#e5b820', r: 255, g: 210, b: 63,  hex: 0xffd23f },
-  state:     { core: '#7dff3a', glow: '#5ce020', r: 125, g: 255, b: 58,  hex: 0x7dff3a },
-  issue:     { core: '#ff3a6e', glow: '#e5204a', r: 255, g: 58,  b: 110, hex: 0xff3a6e },
-  general:   { core: '#c4a882', glow: '#a88a68', r: 196, g: 168, b: 130, hex: 0xc4a882 }
+  task:      { core: '#7b8fff', glow: '#5a6fe0', r: 123, g: 143, b: 255, hex: 0x7b8fff },
+  discovery: { core: '#22f5a0', glow: '#18d488', r: 34,  g: 245, b: 160, hex: 0x22f5a0 },
+  decision:  { core: '#ffc830', glow: '#e0b020', r: 255, g: 200, b: 48,  hex: 0xffc830 },
+  state:     { core: '#b28dff', glow: '#9070e0', r: 178, g: 141, b: 255, hex: 0xb28dff },
+  issue:     { core: '#ff6b6b', glow: '#e05050', r: 255, g: 107, b: 107, hex: 0xff6b6b },
+  general:   { core: '#b0b8c8', glow: '#8a94a8', r: 176, g: 184, b: 200, hex: 0xb0b8c8 }
 };
 
-var NUCLEUS_R = 260, GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
-var CENTER_HUB_R = 22, NUCLEUS_ORB_R = 14;
-var BG_HEX = 0x070a0f;
+var NUCLEUS_R = 400, GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+var CENTER_HUB_R = 12, NUCLEUS_ORB_R = 8;
+var BG_HEX = 0x0d1832;
 var GRID_SPACING_BASE = 100;
 var MAX_BRANCH_PARTICLES = 200;
 
 // Animated sky
 var STAR_COUNT = 360;
 var DUST_COUNT = 80;
-var NEBULA_DRIFT_COUNT = 18;
+var NEBULA_DRIFT_COUNT = 0;
 var SHOOTING_STAR_POOL = 5;
 var SHOOT_MIN = 2.5, SHOOT_MAX = 7;
 
@@ -651,9 +813,9 @@ var NODE_SPARK_CHANCE = 0.003;
 var MAX_NODE_SPARKS = 60;
 
 // Orbital motion
-var NUCLEUS_ORBIT_SPEED = 0.025;
-var ROOT_ORBIT_SPEED = 0.05;
-var CHILD_ORBIT_SPEED = 0.07;
+var NUCLEUS_ORBIT_SPEED = 0.01;
+var ROOT_ORBIT_SPEED = 0.02;
+var CHILD_ORBIT_SPEED = 0.028;
 var HUB_WOBBLE = 3;
 
 // Energy pulses
@@ -673,6 +835,19 @@ var centerPos = { x: 0, y: 0 };
 var nuclei = {}, nodePositions = {};
 var branchSegs = [], trunkSegs = [];
 var hlSet = {}, hlIndexSet = {};
+
+// Cluster state
+var clusters = {};           // { clusterId: { id, cat, label, memIds:[], cx, cy, importance, expanded } }
+var clusterPositions = {};   // { clusterId: { x, y } }
+var clusterOrbitData = {};   // orbital motion params per cluster
+var clusterSprites = {};     // { clusterId: { glow, orb, corona, label, badge } }
+var clusterAnimPos = {};     // animated positions
+var clusterProcessOrder = [];
+var memToCluster = {};       // { memoryId: clusterId }
+var expandedClusters = {};   // { clusterId: true } — which clusters are expanded
+var CLUSTER_THRESHOLD = 5;   // min memories to form a cluster (smaller groups stay individual)
+var CLUSTER_SIM_THRESHOLD = 0.75; // link similarity threshold for community detection
+var sourceFilter = 'all';    // source filter state
 
 // Branch particles
 var branchParticles = [];
@@ -711,9 +886,16 @@ var lastMemoryCount = 0, lastMaxId = 0, refreshTimer = null;
 function clamp01(x) { return x < 0 ? 0 : x > 1 ? 1 : x; }
 function easeOutExpo(x) { return x === 1 ? 1 : 1 - Math.pow(2, -10 * x); }
 function easeOutCubic(x) { return 1 - Math.pow(1 - x, 3); }
-function nodeRadius(m) { return 3.5 + Math.sqrt(m.importance || 1) * 2.5 + (m.source_count > 1 ? Math.log2(m.source_count) * 1.3 : 0); }
+function nodeRadius(m) { return 1.8 + Math.sqrt(m.importance || 1) * 1.2 + (m.source_count > 1 ? Math.log2(m.source_count) * 0.6 : 0); }
 function nodeCol(m) { return COLORS[m.category] || COLORS.general; }
-function nodeVisible(m) { return currentFilter === 'all' || m.category === currentFilter; }
+function nodeVisible(m) {
+  if (currentFilter !== 'all' && m.category !== currentFilter) return false;
+  if (sourceFilter !== 'all' && (m.source || '') !== sourceFilter) return false;
+  // Hide memories in collapsed clusters
+  var mCluster = memToCluster[m.id];
+  if (mCluster && clusters[mCluster] && !clusters[mCluster].expanded) return false;
+  return true;
+}
 function bezierPt(x1, y1, cx, cy, x2, y2, t) {
   var u = 1 - t;
   return { x: u*u*x1 + 2*u*t*cx + t*t*x2, y: u*u*y1 + 2*u*t*cy + t*t*y2 };
@@ -727,10 +909,20 @@ function getSegPts(seg) {
     fp = centerAnimPos;
     tp = nucleiAnimPos[seg.cat] || centerAnimPos;
   } else {
-    fp = seg.fromId === null
-      ? (nucleiAnimPos[seg.cat] || centerAnimPos)
-      : (nodeAnimPos[seg.fromId] || centerAnimPos);
-    tp = nodeAnimPos[seg.toId] || centerAnimPos;
+    // Resolve fromId — could be null (nucleus), a cluster, or a memory node
+    if (seg.fromId === null) {
+      fp = nucleiAnimPos[seg.cat] || centerAnimPos;
+    } else if (seg.fromCluster || (typeof seg.fromId === 'string' && seg.fromId[0] === 'c')) {
+      fp = clusterAnimPos[seg.fromId] || centerAnimPos;
+    } else {
+      fp = nodeAnimPos[seg.fromId] || centerAnimPos;
+    }
+    // Resolve toId — could be a cluster or a memory node
+    if (seg.isCluster || (typeof seg.toId === 'string' && seg.toId[0] === 'c')) {
+      tp = clusterAnimPos[seg.toId] || centerAnimPos;
+    } else {
+      tp = nodeAnimPos[seg.toId] || centerAnimPos;
+    }
   }
   var mx = (fp.x + tp.x) * 0.5, my = (fp.y + tp.y) * 0.5;
   var dx = tp.x - fp.x, dy = tp.y - fp.y;
@@ -799,15 +991,28 @@ world.addChild(orbitLayer);
 world.addChild(sparkLayer);
 world.addChild(glowLayer);
 world.addChild(orbLayer);
+var innerLayer = new PIXI.Container();
+world.addChild(innerLayer);
 world.addChild(coronaLayer);
 world.addChild(overlayGfx);
 world.addChild(labelLayer);
+
+// Screen-space bloom — let bright orbs bleed naturally like real light
+try {
+  world.filters = [new PIXI.filters.AdvancedBloomFilter({
+    threshold: 0.2,
+    bloomScale: 0.7,
+    brightness: 1.1,
+    blur: 8,
+    quality: 4
+  })];
+} catch(e) { console.warn('Bloom filter not available:', e); }
 
 // Sprite maps
 var nodeSprites = {};
 var nucleiSprites = {};
 var coronaSprites = {};
-var hubGlow = null, hubOrb = null, hubCorona = null, hubLabel = null;
+var hubGlow = null, hubOrb = null, hubCorona = null, hubLabel = null, hubInnerGalaxy = null, hubInnerCore = null;
 var nucLabels = {};
 
 // ===== Textures =====
@@ -934,6 +1139,74 @@ var coronaTex = mkTex(64, function(g, sz) {
   g.beginPath(); g.arc(cx * 0.7, cy * 0.7, r * 0.5, 0, Math.PI * 2); g.fill();
 });
 
+// ===== Inner Life Textures =====
+// Mini spiral galaxy — lives inside each memory orb
+var innerGalaxyTex = mkTex(64, function(g, sz) {
+  var cx = sz / 2, cy = sz / 2, r = sz / 2;
+  g.clearRect(0, 0, sz, sz);
+
+  // Tight spiral — 3 arms, concentrated toward center, rapid edge fade
+  for (var arm = 0; arm < 3; arm++) {
+    var offset = arm * (Math.PI * 2 / 3);
+    for (var t = 0.2; t < 4.0; t += 0.08) {
+      var spiralR = 1.5 + t * (r * 0.09);
+      var a = t * 2.2 + offset;
+      var x = cx + Math.cos(a) * spiralR;
+      var y = cy + Math.sin(a) * spiralR;
+      // Distance from center as 0-1
+      var dNorm = spiralR / (r * 0.45);
+      // Sharp radial fade — disappear well before edge
+      var radFade = Math.max(0, 1 - dNorm * dNorm);
+      var dotR = (0.3 + (1 - t / 4.0) * 0.9) * radFade;
+      var br = ((1 - t / 4.0) * 0.6 + 0.05) * radFade;
+      if (br < 0.01) continue;
+      // Soft halo
+      g.fillStyle = 'rgba(255,255,255,' + (br * 0.2) + ')';
+      g.beginPath(); g.arc(x, y, dotR * 2, 0, Math.PI * 2); g.fill();
+      // Bright dot
+      g.fillStyle = 'rgba(255,255,255,' + br + ')';
+      g.beginPath(); g.arc(x, y, dotR, 0, Math.PI * 2); g.fill();
+    }
+    // Scatter stars near arms — also radially faded
+    var seed = arm * 137 + 42;
+    for (var s = 0; s < 8; s++) {
+      seed = (seed * 16807) % 2147483647;
+      var st = 0.4 + (seed % 1000) / 1000 * 2.8;
+      seed = (seed * 16807) % 2147483647;
+      var sOff = ((seed % 1000) / 1000 - 0.5) * r * 0.12;
+      var spiralR2 = 1.5 + st * (r * 0.09);
+      var dN2 = spiralR2 / (r * 0.45);
+      var rF2 = Math.max(0, 1 - dN2 * dN2);
+      if (rF2 < 0.05) continue;
+      var a2 = st * 2.2 + offset;
+      var sx = cx + Math.cos(a2) * spiralR2 + Math.cos(a2 + 1.5) * sOff;
+      var sy = cy + Math.sin(a2) * spiralR2 + Math.sin(a2 + 1.5) * sOff;
+      var sBr = (0.1 + (seed % 100) / 100 * 0.2) * rF2;
+      g.fillStyle = 'rgba(255,255,255,' + sBr + ')';
+      g.beginPath(); g.arc(sx, sy, 0.3 + (seed % 50) / 50 * 0.4, 0, Math.PI * 2); g.fill();
+    }
+  }
+  // Tiny bright nucleus
+  var cGrad = g.createRadialGradient(cx, cy, 0, cx, cy, r * 0.12);
+  cGrad.addColorStop(0, 'rgba(255,255,255,0.5)');
+  cGrad.addColorStop(0.5, 'rgba(255,255,255,0.15)');
+  cGrad.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = cGrad;
+  g.beginPath(); g.arc(cx, cy, r * 0.12, 0, Math.PI * 2); g.fill();
+});
+
+// Inner core — bright pulsing heart
+var innerCoreTex = mkTex(32, function(g, sz) {
+  var cx = sz / 2, cy = sz / 2;
+  var grad = g.createRadialGradient(cx, cy, 0, cx, cy, cx * 0.7);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.2, 'rgba(255,255,255,0.7)');
+  grad.addColorStop(0.5, 'rgba(255,255,255,0.2)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grad;
+  g.beginPath(); g.arc(cx, cy, cx * 0.7, 0, Math.PI * 2); g.fill();
+});
+
 // Nebula drift texture: soft irregular cloud blob
 var nebulaDriftTex = mkTex(256, function(g, sz) {
   var cx = sz / 2, cy = sz / 2;
@@ -1001,286 +1274,116 @@ function buildBackground() {
   var c = document.createElement('canvas');
   c.width = bw; c.height = bh;
   var g = c.getContext('2d');
-  g.fillStyle = '#050810';
+
+  // ===== Rich gradient base (deep blue → indigo → purple edge) =====
+  // Corner-to-corner linear for depth
+  var bgLin = g.createLinearGradient(0, 0, bw, bh);
+  bgLin.addColorStop(0, '#0a1628');
+  bgLin.addColorStop(0.3, '#0d1832');
+  bgLin.addColorStop(0.5, '#101535');
+  bgLin.addColorStop(0.7, '#150e30');
+  bgLin.addColorStop(1, '#1a0a2e');
+  g.fillStyle = bgLin;
   g.fillRect(0, 0, bw, bh);
 
-  var noise1 = _bgNoise(42);
-  var noise2 = _bgNoise(137);
-  var noise3 = _bgNoise(271);
-  var maxDim = Math.max(bw, bh);
+  // Radial center brightening
+  var bgRad = g.createRadialGradient(bw * 0.45, bh * 0.45, 0, bw * 0.5, bh * 0.5, bw * 0.55);
+  bgRad.addColorStop(0, 'rgba(18,28,55,0.6)');
+  bgRad.addColorStop(0.5, 'rgba(12,18,40,0.3)');
+  bgRad.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = bgRad;
+  g.fillRect(0, 0, bw, bh);
 
-  // ===== Pass 1: Noise-based volumetric nebula (ImageData for per-pixel control) =====
-  var imgData = g.getImageData(0, 0, bw, bh);
-  var px = imgData.data;
-
-  for (var y = 0; y < bh; y++) {
-    for (var x = 0; x < bw; x++) {
-      var idx = (y * bw + x) * 4;
-      var nx = x / maxDim, ny = y / maxDim;
-      var cx0 = bw * 0.5, cy0 = bh * 0.5;
-      var dx = x - cx0, dy = y - cy0;
-      var dist = Math.sqrt(dx * dx + dy * dy) / maxDim;
-      var ang = Math.atan2(dy, dx);
-
-      // Galactic core glow (warm center)
-      var coreGlow = Math.exp(-dist * dist * 18) * 0.35;
-      var coreR = coreGlow * 0.55;
-      var coreG = coreGlow * 0.32;
-      var coreB = coreGlow * 0.65;
-
-      // Spiral arm structure (2 main arms + 2 faint)
-      var spiralN1 = _bgFbm(noise1, nx * 3.5, ny * 3.5, 4);
-      var armAngle1 = ang + dist * 6.0 + spiralN1 * 1.2;
-      var arm1 = Math.pow(Math.max(0, Math.cos(armAngle1 * 1.0)), 6) * Math.exp(-dist * 2.5) * 0.3;
-
-      var spiralN2 = _bgFbm(noise2, nx * 4.0 + 5, ny * 4.0 + 5, 4);
-      var armAngle2 = ang + dist * 5.0 + Math.PI + spiralN2 * 1.0;
-      var arm2 = Math.pow(Math.max(0, Math.cos(armAngle2 * 1.0)), 6) * Math.exp(-dist * 2.8) * 0.22;
-
-      var arm3 = Math.pow(Math.max(0, Math.cos(armAngle1 * 1.0 + Math.PI * 0.5)), 8) * Math.exp(-dist * 3.5) * 0.1;
-      var arm4 = Math.pow(Math.max(0, Math.cos(armAngle2 * 1.0 + Math.PI * 0.5)), 8) * Math.exp(-dist * 3.5) * 0.08;
-
-      var arms = arm1 + arm2 + arm3 + arm4;
-
-      // Fractal noise nebula clouds (multiple scales)
-      var neb1 = _bgFbm(noise1, nx * 5, ny * 5, 5);
-      var neb2 = _bgFbm(noise2, nx * 7 + 10, ny * 7 + 10, 4);
-      var neb3 = _bgFbm(noise3, nx * 3, ny * 3, 3);
-
-      // Nebula color channels (purple/blue dominant with warm accents)
-      var nebR = neb1 * 0.08 + arms * 0.4;
-      var nebG = neb2 * 0.04 + arms * 0.15;
-      var nebB = neb3 * 0.12 + arms * 0.55;
-
-      // Warm emission regions (scattered pockets)
-      var emission1 = _bgFbm(noise3, nx * 8 + 20, ny * 8, 3);
-      var emissionMask = Math.pow(Math.max(0, emission1 - 0.52), 2) * 15;
-      nebR += emissionMask * 0.55;
-      nebG += emissionMask * 0.12;
-      nebB += emissionMask * 0.20;
-
-      // Cool blue emission regions
-      var emission2 = _bgFbm(noise1, nx * 9 + 50, ny * 9 + 30, 3);
-      var emMask2 = Math.pow(Math.max(0, emission2 - 0.55), 2) * 12;
-      nebR += emMask2 * 0.08;
-      nebG += emMask2 * 0.25;
-      nebB += emMask2 * 0.55;
-
-      // Hydrogen-alpha red wisps
-      var hAlpha = _bgFbm(noise2, nx * 12 + 40, ny * 12 + 15, 3);
-      var hMask = Math.pow(Math.max(0, hAlpha - 0.56), 2) * 10;
-      nebR += hMask * 0.45;
-      nebG += hMask * 0.06;
-      nebB += hMask * 0.10;
-
-      // Dark nebula / absorption (subtract light in patches)
-      var dark1 = _bgFbm(noise3, nx * 6 + 100, ny * 6 + 100, 4);
-      var darkMask = Math.pow(Math.max(0, dark1 - 0.48), 1.5) * 4;
-
-      // Dust lanes (multiple thin bands at various angles)
-      var lane1Y = dx * Math.sin(-0.25) + dy * Math.cos(-0.25);
-      var dustLane1 = Math.exp(-lane1Y * lane1Y / (bh * bh * 0.003)) * 0.35;
-      var lane2Y = dx * Math.sin(0.8) + dy * Math.cos(0.8);
-      var dustLane2 = Math.exp(-lane2Y * lane2Y / (bh * bh * 0.006)) * 0.15;
-      var lane3Y = dx * Math.sin(-1.2) + dy * Math.cos(-1.2);
-      var dustLane3 = Math.exp(-lane3Y * lane3Y / (bh * bh * 0.008)) * 0.10;
-      var dustTotal = dustLane1 + dustLane2 + dustLane3;
-
-      // Compose all channels
-      var r = (5 + (coreR + nebR) * 255 * (1 - darkMask * 0.7) * (1 - dustTotal * 0.6));
-      var gv = (8 + (coreG + nebG) * 255 * (1 - darkMask * 0.8) * (1 - dustTotal * 0.7));
-      var b = (16 + (coreB + nebB) * 255 * (1 - darkMask * 0.6) * (1 - dustTotal * 0.5));
-
-      // Distance falloff (brighter near center)
-      var distFade = 1 - Math.pow(dist * 1.1, 1.8) * 0.7;
-      if (distFade < 0.15) distFade = 0.15;
-      r *= distFade;
-      gv *= distFade;
-      b *= distFade;
-
-      px[idx] = Math.min(255, Math.max(0, r | 0));
-      px[idx + 1] = Math.min(255, Math.max(0, gv | 0));
-      px[idx + 2] = Math.min(255, Math.max(0, b | 0));
-    }
-  }
-  g.putImageData(imgData, 0, 0);
-
-  // ===== Pass 2: Overlay gradient nebula clouds for extra richness =====
+  // ===== Color regions (visible blue/purple/teal washes) =====
   g.globalCompositeOperation = 'lighter';
-  var clouds = [
-    // Galactic core secondary glow
-    [0.50,0.50,0.18,[[0,'rgba(120,70,160,0.12)'],[0.3,'rgba(70,35,100,0.05)'],[1,'rgba(5,8,16,0)']]],
-    [0.50,0.50,0.12,[[0,'rgba(160,90,60,0.06)'],[0.4,'rgba(90,45,30,0.02)'],[1,'rgba(5,8,16,0)']]],
-    // Spiral arm glow overlays
-    [0.20,0.30,0.42,[[0,'rgba(50,30,110,0.09)'],[0.35,'rgba(28,16,60,0.04)'],[1,'rgba(5,8,16,0)']]],
-    [0.75,0.25,0.38,[[0,'rgba(25,55,120,0.07)'],[0.4,'rgba(14,32,65,0.03)'],[1,'rgba(5,8,16,0)']]],
-    [0.30,0.75,0.35,[[0,'rgba(65,25,95,0.07)'],[0.4,'rgba(32,12,48,0.025)'],[1,'rgba(5,8,16,0)']]],
-    [0.80,0.70,0.32,[[0,'rgba(80,30,70,0.06)'],[0.4,'rgba(40,15,35,0.02)'],[1,'rgba(5,8,16,0)']]],
-    // Scattered color accents
-    [0.15,0.60,0.25,[[0,'rgba(20,65,105,0.06)'],[0.5,'rgba(10,35,60,0.02)'],[1,'rgba(5,8,16,0)']]],
-    [0.85,0.45,0.22,[[0,'rgba(95,25,50,0.05)'],[0.5,'rgba(50,12,28,0.015)'],[1,'rgba(5,8,16,0)']]],
-    [0.60,0.15,0.28,[[0,'rgba(30,50,100,0.05)'],[0.5,'rgba(15,28,55,0.015)'],[1,'rgba(5,8,16,0)']]],
-    [0.40,0.85,0.22,[[0,'rgba(90,35,60,0.04)'],[0.5,'rgba(45,18,32,0.012)'],[1,'rgba(5,8,16,0)']]]
+  var washes = [
+    [0.30, 0.35, 0.45, 'rgba(25,40,100,0.08)'],
+    [0.70, 0.60, 0.40, 'rgba(60,20,90,0.06)'],
+    [0.15, 0.70, 0.35, 'rgba(15,50,80,0.05)'],
+    [0.80, 0.20, 0.30, 'rgba(45,25,85,0.05)'],
+    [0.50, 0.50, 0.55, 'rgba(20,30,70,0.04)'],
+    [0.25, 0.15, 0.30, 'rgba(10,35,65,0.04)']
   ];
-  for (var i = 0; i < clouds.length; i++) {
-    var cl = clouds[i], ccx = cl[0]*bw, ccy = cl[1]*bh, r = cl[2]*maxDim;
-    var grad = g.createRadialGradient(ccx,ccy,0,ccx,ccy,r);
-    for (var j = 0; j < cl[3].length; j++) grad.addColorStop(cl[3][j][0], cl[3][j][1]);
-    g.fillStyle = grad; g.fillRect(0,0,bw,bh);
+  for (var i = 0; i < washes.length; i++) {
+    var w = washes[i];
+    var wg = g.createRadialGradient(w[0]*bw, w[1]*bh, 0, w[0]*bw, w[1]*bh, w[2]*Math.max(bw,bh));
+    wg.addColorStop(0, w[3]);
+    wg.addColorStop(0.7, w[3].replace(/[\d.]+\)$/, '0.01)'));
+    wg.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = wg;
+    g.fillRect(0, 0, bw, bh);
   }
 
-  // ===== Pass 3: Star-forming regions (bright blue-white knots near spiral arms) =====
-  var sfSeed = 97;
-  function sfr() { sfSeed = (sfSeed * 16807) % 2147483647; return (sfSeed - 1) / 2147483646; }
-  var sfRegions = 12;
-  for (var i = 0; i < sfRegions; i++) {
-    var sfx = sfr() * bw, sfy = sfr() * bh;
-    var sdx = sfx - bw * 0.5, sdy = sfy - bh * 0.5;
-    var sDist = Math.sqrt(sdx * sdx + sdy * sdy) / maxDim;
-    if (sDist > 0.45 || sDist < 0.03) continue;
-    var sAng = Math.atan2(sdy, sdx);
-    var armCheck = Math.cos(sAng + sDist * 6.0);
-    if (armCheck < 0.3) continue;
-    var sfRad = (8 + sfr() * 18);
-    var sfBr = 0.04 + sfr() * 0.08;
-    var sfGrad = g.createRadialGradient(sfx, sfy, 0, sfx, sfy, sfRad);
-    sfGrad.addColorStop(0, 'rgba(140,170,255,' + sfBr + ')');
-    sfGrad.addColorStop(0.3, 'rgba(80,110,200,' + (sfBr * 0.4) + ')');
-    sfGrad.addColorStop(1, 'rgba(30,40,100,0)');
-    g.fillStyle = sfGrad;
-    g.fillRect(sfx - sfRad, sfy - sfRad, sfRad * 2, sfRad * 2);
-  }
-
-  // ===== Pass 4: Dense star field (far background stars) =====
-  g.globalCompositeOperation = 'lighter';
+  // ===== Star field =====
   var seed = 42;
   function sr() { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; }
 
-  // Layer 1: Very faint dense field (~800 micro-stars)
-  var microCount = Math.round(800 * (bw * bh) / (1920 * 1080));
+  // Layer 1: Dense micro-stars
+  var microCount = Math.round(500 * (bw * bh) / (1920 * 1080));
   for (var i = 0; i < microCount; i++) {
     var sx = sr() * bw, sy = sr() * bh;
-    var br = 0.02 + sr() * 0.08;
-    var ss = 0.15 + sr() * 0.25;
+    var br = 0.03 + sr() * 0.10;
+    var ss = 0.15 + sr() * 0.3;
     g.fillStyle = 'rgba(200,210,240,' + br + ')';
     g.beginPath(); g.arc(sx, sy, ss, 0, Math.PI * 2); g.fill();
   }
 
-  // Layer 2: Star clusters (dense pockets)
-  var clusterCount = 6;
+  // Layer 2: Star clusters
+  var clusterCount = 5;
   for (var ci = 0; ci < clusterCount; ci++) {
     var clx = sr() * bw, cly = sr() * bh;
-    var clRad = 25 + sr() * 45;
-    var clStars = 30 + (sr() * 50) | 0;
+    var clRad = 20 + sr() * 40;
+    var clStars = 25 + (sr() * 40) | 0;
     for (var si = 0; si < clStars; si++) {
       var ca = sr() * Math.PI * 2;
       var cd = sr() * sr() * clRad;
       var csx = clx + Math.cos(ca) * cd;
       var csy = cly + Math.sin(ca) * cd;
-      var cbr = 0.08 + sr() * 0.25;
-      var css = 0.2 + sr() * 0.5;
+      var cbr = 0.06 + sr() * 0.20;
+      var css = 0.2 + sr() * 0.45;
       var ct = sr();
       var cr, cg, cb;
-      if (ct < 0.3) { cr = 180 + sr() * 75 | 0; cg = 195 + sr() * 60 | 0; cb = 245 + sr() * 10 | 0; }
-      else if (ct < 0.6) { cr = 240 + sr() * 15 | 0; cg = 230 + sr() * 25 | 0; cb = 200 + sr() * 55 | 0; }
-      else { cr = 220 + sr() * 35 | 0; cg = 220 + sr() * 35 | 0; cb = 225 + sr() * 30 | 0; }
+      if (ct < 0.3) { cr = 180 + sr()*70|0; cg = 195 + sr()*55|0; cb = 240 + sr()*15|0; }
+      else if (ct < 0.6) { cr = 235 + sr()*20|0; cg = 228 + sr()*27|0; cb = 200 + sr()*50|0; }
+      else { cr = 215 + sr()*40|0; cg = 215 + sr()*40|0; cb = 220 + sr()*35|0; }
       g.fillStyle = 'rgba(' + cr + ',' + cg + ',' + cb + ',' + cbr + ')';
       g.beginPath(); g.arc(csx, csy, css, 0, Math.PI * 2); g.fill();
     }
   }
 
-  // Layer 3: Medium stars (~500) with spectral type color
-  var medCount = Math.round(500 * (bw * bh) / (1920 * 1080));
+  // Layer 3: Medium stars with spectral colors
+  var medCount = Math.round(250 * (bw * bh) / (1920 * 1080));
   for (var i = 0; i < medCount; i++) {
     var sx = sr() * bw, sy = sr() * bh;
-    var isBright = sr() < 0.03;
-    var br = isBright ? (0.3 + sr() * 0.55) : (0.04 + sr() * 0.18);
-    var ss = isBright ? (0.5 + sr() * 1.6) : (0.2 + sr() * 0.55);
+    var isBright = sr() < 0.04;
+    var br = isBright ? (0.35 + sr() * 0.5) : (0.05 + sr() * 0.18);
+    var ss = isBright ? (0.5 + sr() * 1.4) : (0.2 + sr() * 0.5);
     var ct = sr();
     var cr, cg, cb;
-    // Spectral types: O/B blue, A white, F yellow-white, G yellow, K orange, M red
-    if (ct < 0.15) { cr = 155 + sr() * 50 | 0; cg = 175 + sr() * 50 | 0; cb = 240 + sr() * 15 | 0; } // O/B
-    else if (ct < 0.30) { cr = 200 + sr() * 55 | 0; cg = 210 + sr() * 45 | 0; cb = 240 + sr() * 15 | 0; } // A
-    else if (ct < 0.50) { cr = 240 + sr() * 15 | 0; cg = 230 + sr() * 25 | 0; cb = 195 + sr() * 40 | 0; } // F
-    else if (ct < 0.65) { cr = 245 + sr() * 10 | 0; cg = 220 + sr() * 30 | 0; cb = 150 + sr() * 55 | 0; } // G
-    else if (ct < 0.80) { cr = 240 + sr() * 15 | 0; cg = 180 + sr() * 40 | 0; cb = 120 + sr() * 50 | 0; } // K
-    else if (ct < 0.90) { cr = 230 + sr() * 25 | 0; cg = 140 + sr() * 40 | 0; cb = 110 + sr() * 35 | 0; } // M
-    else { cr = 185 + sr() * 70 | 0; cg = 190 + sr() * 65 | 0; cb = 210 + sr() * 45 | 0; } // misc
+    if (ct < 0.15) { cr = 155+sr()*50|0; cg = 175+sr()*50|0; cb = 240+sr()*15|0; }
+    else if (ct < 0.30) { cr = 200+sr()*55|0; cg = 210+sr()*45|0; cb = 240+sr()*15|0; }
+    else if (ct < 0.50) { cr = 240+sr()*15|0; cg = 230+sr()*25|0; cb = 195+sr()*40|0; }
+    else if (ct < 0.65) { cr = 245+sr()*10|0; cg = 220+sr()*30|0; cb = 150+sr()*55|0; }
+    else if (ct < 0.80) { cr = 240+sr()*15|0; cg = 180+sr()*40|0; cb = 120+sr()*50|0; }
+    else { cr = 185+sr()*70|0; cg = 190+sr()*65|0; cb = 210+sr()*45|0; }
     g.fillStyle = 'rgba(' + cr + ',' + cg + ',' + cb + ',' + br + ')';
     g.beginPath(); g.arc(sx, sy, ss, 0, Math.PI * 2); g.fill();
     if (isBright) {
-      // Diffraction spikes (cross pattern)
-      var spLen = ss * 2.5 + sr() * 4;
-      g.strokeStyle = 'rgba(' + cr + ',' + cg + ',' + cb + ',' + (br * 0.22) + ')';
+      var spLen = ss * 2.5 + sr() * 3;
+      g.strokeStyle = 'rgba(' + cr + ',' + cg + ',' + cb + ',' + (br * 0.2) + ')';
       g.lineWidth = 0.3;
       g.beginPath(); g.moveTo(sx - spLen, sy); g.lineTo(sx + spLen, sy); g.stroke();
       g.beginPath(); g.moveTo(sx, sy - spLen * 0.7); g.lineTo(sx, sy + spLen * 0.7); g.stroke();
-      // Airy disk glow
-      var airyGrad = g.createRadialGradient(sx, sy, 0, sx, sy, ss * 3);
-      airyGrad.addColorStop(0, 'rgba(' + cr + ',' + cg + ',' + cb + ',' + (br * 0.15) + ')');
-      airyGrad.addColorStop(0.5, 'rgba(' + cr + ',' + cg + ',' + cb + ',' + (br * 0.04) + ')');
-      airyGrad.addColorStop(1, 'rgba(' + cr + ',' + cg + ',' + cb + ',0)');
-      g.fillStyle = airyGrad;
-      g.beginPath(); g.arc(sx, sy, ss * 3, 0, Math.PI * 2); g.fill();
     }
   }
 
-  // ===== Pass 5: Distant Galaxy (small tilted spiral) =====
-  g.globalCompositeOperation = 'lighter';
-  var gx = bw * 0.05, gy = bh * 0.52;
-  g.save();
-  g.translate(gx, gy);
-  g.rotate(0.4);
-  g.scale(1, 0.45);
-  // Core
-  var galGrad = g.createRadialGradient(0, 0, 0, 0, 0, 18);
-  galGrad.addColorStop(0, 'rgba(200,180,220,0.12)');
-  galGrad.addColorStop(0.3, 'rgba(140,120,180,0.06)');
-  galGrad.addColorStop(0.7, 'rgba(90,70,140,0.02)');
-  galGrad.addColorStop(1, 'rgba(50,30,90,0)');
-  g.fillStyle = galGrad;
-  g.beginPath(); g.arc(0, 0, 18, 0, Math.PI * 2); g.fill();
-  // Spiral arms (simplified)
-  for (var ai = 0; ai < 2; ai++) {
-    g.strokeStyle = 'rgba(160,140,200,' + (0.04 + ai * 0.01) + ')';
-    g.lineWidth = 1.5;
-    g.beginPath();
-    for (var t = 0; t < 4; t += 0.05) {
-      var sa = t * 2.2 + ai * Math.PI;
-      var sr3 = 2 + t * 5;
-      var sx = Math.cos(sa) * sr3, sy = Math.sin(sa) * sr3;
-      if (t === 0) g.moveTo(sx, sy); else g.lineTo(sx, sy);
-    }
-    g.stroke();
-  }
-  g.restore();
-
-  // Second distant galaxy (edge-on, like a lens)
-  var gx2 = bw * 0.72, gy2 = bh * 0.06;
-  g.save();
-  g.translate(gx2, gy2);
-  g.rotate(-0.3);
-  g.scale(1, 0.15);
-  var galGrad2 = g.createRadialGradient(0, 0, 0, 0, 0, 22);
-  galGrad2.addColorStop(0, 'rgba(180,170,210,0.10)');
-  galGrad2.addColorStop(0.4, 'rgba(120,110,160,0.04)');
-  galGrad2.addColorStop(1, 'rgba(60,50,100,0)');
-  g.fillStyle = galGrad2;
-  g.beginPath(); g.arc(0, 0, 22, 0, Math.PI * 2); g.fill();
-  // Central dust lane
+  // ===== Vignette =====
   g.globalCompositeOperation = 'source-over';
-  g.fillStyle = 'rgba(5,8,16,0.15)';
-  g.fillRect(-22, -1, 44, 2);
-  g.restore();
-  g.globalCompositeOperation = 'source-over';
-
-  // ===== Pass 7: Vignette =====
-  g.globalCompositeOperation = 'source-over';
-  var vg = g.createRadialGradient(bw / 2, bh / 2, bw * 0.1, bw / 2, bh / 2, bw * 0.65);
-  vg.addColorStop(0, 'rgba(5,8,16,0)');
-  vg.addColorStop(0.5, 'rgba(5,8,16,0)');
-  vg.addColorStop(0.8, 'rgba(4,6,12,0.35)');
-  vg.addColorStop(1, 'rgba(2,3,8,0.7)');
+  var vg = g.createRadialGradient(bw / 2, bh / 2, bw * 0.15, bw / 2, bh / 2, bw * 0.6);
+  vg.addColorStop(0, 'rgba(4,6,16,0)');
+  vg.addColorStop(0.6, 'rgba(4,6,16,0)');
+  vg.addColorStop(0.85, 'rgba(8,12,25,0.3)');
+  vg.addColorStop(1, 'rgba(5,8,18,0.55)');
   g.fillStyle = vg; g.fillRect(0, 0, bw, bh);
 
   if (bgSprite.texture !== PIXI.Texture.EMPTY) bgSprite.texture.destroy(true);
@@ -1288,6 +1391,7 @@ function buildBackground() {
   bgSprite.width = screenW;
   bgSprite.height = screenH;
 }
+
 
 // ===== Animated Sky =====
 var STAR_COLORS = [0xd0d8ff, 0xeef0ff, 0xffe8d0, 0xddccff, 0xcce8ff, 0xffd0d0, 0xc8e0ff];
@@ -1323,7 +1427,7 @@ function buildSky() {
       baseX: spr.x, baseY: spr.y,
       vx: (Math.random() - 0.5) * 3,
       vy: (Math.random() - 0.5) * 2.5,
-      baseAlpha: 0.015 + Math.random() * 0.04,
+      baseAlpha: 0.004 + Math.random() * 0.008,
       freq: 0.03 + Math.random() * 0.08,
       phase: Math.random() * Math.PI * 2,
       rotSpeed: (Math.random() - 0.5) * 0.02,
@@ -1397,6 +1501,47 @@ function buildSky() {
 }
 
 // ===== Layout Engine =====
+
+// --- Community Detection ---
+// Union-Find for connected components on high-similarity links within each category
+function detectClusters(catMemIds, catLinks) {
+  var parent = {}, rank = {};
+  catMemIds.forEach(function(id) { parent[id] = id; rank[id] = 0; });
+  function find(x) { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+  function union(a, b) {
+    var ra = find(a), rb = find(b);
+    if (ra === rb) return;
+    if (rank[ra] < rank[rb]) { var t = ra; ra = rb; rb = t; }
+    parent[rb] = ra;
+    if (rank[ra] === rank[rb]) rank[ra]++;
+  }
+  catLinks.forEach(function(l) { union(l.source, l.target); });
+  // Group by root
+  var groups = {};
+  catMemIds.forEach(function(id) {
+    var root = find(id);
+    if (!groups[root]) groups[root] = [];
+    groups[root].push(id);
+  });
+  return Object.values(groups);
+}
+
+function autoLabel(memIds) {
+  // Pick highest-importance memory, extract first meaningful words
+  var best = null, bestImp = -1;
+  for (var i = 0; i < memIds.length; i++) {
+    var m = nodeMap[memIds[i]];
+    if (m && (m.importance || 0) > bestImp) { bestImp = m.importance || 0; best = m; }
+  }
+  if (!best) return 'cluster';
+  var text = (best.content || '').replace(/\[.*?\]/g, '').replace(/[#*_`]/g, '').trim();
+  // Extract first meaningful phrase — skip common prefixes
+  text = text.replace(/^(Updated|Added|Fixed|Created|Deployed|Completed|Configured|Installed|Set up|Built)\s*/i, '');
+  var words = text.split(/\s+/).slice(0, 5).join(' ');
+  if (words.length > 35) words = words.slice(0, 32) + '…';
+  return words || 'cluster';
+}
+
 function computeLayout() {
   var cx = screenW / 2, cy = screenH / 2;
   centerPos = { x: cx, y: cy };
@@ -1411,6 +1556,12 @@ function computeLayout() {
   });
 
   var activeCats = catList.filter(function(c) { return catGroups[c] && catGroups[c].length > 0; });
+
+  // Scale nucleus radius based on total memory count — more memories = wider spread
+  var totalMems = memories.length;
+  var dynamicR = Math.max(400, 250 + Math.sqrt(totalMems) * 18);
+  NUCLEUS_R = dynamicR;
+
   nuclei = {};
   nucleiOrbitData = {};
   trunkSegs = [];
@@ -1422,22 +1573,28 @@ function computeLayout() {
     var ny = cy + Math.sin(angle) * NUCLEUS_R;
     nuclei[cat] = { x: nx, y: ny, angle: angle, count: catGroups[cat].length };
 
-    // Orbital params for nucleus
     var dir = Math.sin(i * 3.7 + 0.5) > 0 ? 1 : -1;
     nucleiOrbitData[cat] = {
       baseAngle: angle,
       angSpeed: NUCLEUS_ORBIT_SPEED * (0.8 + Math.sin(i * 2.7) * 0.4) * dir
     };
 
-    // Trunk segment (dynamic endpoints via getSegPts)
     var curvature = 25 + Math.sin(i * 1.7) * 15;
     trunkSegs.push({ _isTrunk: true, _curveOff: curvature, col: COLORS[cat], cat: cat });
   }
 
+  // ===== Cluster Detection =====
+  clusters = {};
+  clusterPositions = {};
+  clusterOrbitData = {};
+  clusterProcessOrder = [];
+  memToCluster = {};
   nodePositions = {};
   orbitData = {};
   nodeProcessOrder = [];
   branchSegs = [];
+
+  var clusterIdCounter = 1;
 
   activeCats.forEach(function(cat) {
     var mems = catGroups[cat];
@@ -1445,56 +1602,139 @@ function computeLayout() {
     var nuc = nuclei[cat];
     var col = COLORS[cat] || COLORS.general;
 
-    var childrenOf = {}, hasParent = {};
-    mems.forEach(function(m) {
-      if (m.parent_memory_id && nodeMap[m.parent_memory_id]) {
-        var parent = nodeMap[m.parent_memory_id];
-        if (parent.category === cat) {
-          if (!childrenOf[m.parent_memory_id]) childrenOf[m.parent_memory_id] = [];
-          childrenOf[m.parent_memory_id].push(m);
-          hasParent[m.id] = true;
-        }
+    // Build adjacency from links within this category
+    var catIdSet = {};
+    mems.forEach(function(m) { catIdSet[m.id] = true; });
+    var catLinks = links.filter(function(l) {
+      return catIdSet[l.source] && catIdSet[l.target] && (l.similarity || 0) >= CLUSTER_SIM_THRESHOLD;
+    });
+
+    // Detect communities
+    var memIds = mems.map(function(m) { return m.id; });
+    var groups = detectClusters(memIds, catLinks);
+
+    // Split into clusters (>= threshold) and individuals
+    var clusterGroups = [];
+    var individualMems = [];
+    groups.forEach(function(group) {
+      if (group.length >= CLUSTER_THRESHOLD) {
+        clusterGroups.push(group);
+      } else {
+        group.forEach(function(id) { individualMems.push(nodeMap[id]); });
       }
     });
 
-    var roots = mems.filter(function(m) { return !hasParent[m.id]; });
-    roots.sort(function(a, b) { return (b.importance || 0) - (a.importance || 0); });
-
+    // Position clusters around nucleus using golden angle spiral
     var outwardAngle = nuc.angle;
-    for (var ri = 0; ri < roots.length; ri++) {
-      var root = roots[ri];
+    var allItems = []; // unified list of { type: 'cluster'|'individual', ... } for spiral placement
+
+    // Sort clusters by size descending (biggest closest)
+    clusterGroups.sort(function(a, b) { return b.length - a.length; });
+    clusterGroups.forEach(function(group) {
+      var avgImp = 0;
+      group.forEach(function(id) { avgImp += (nodeMap[id].importance || 5); });
+      avgImp /= group.length;
+      allItems.push({ type: 'cluster', memIds: group, importance: avgImp, cat: cat });
+    });
+
+    // Sort individuals by importance
+    individualMems.sort(function(a, b) { return (b.importance || 0) - (a.importance || 0); });
+    individualMems.forEach(function(m) {
+      allItems.push({ type: 'individual', mem: m, cat: cat });
+    });
+
+    for (var ri = 0; ri < allItems.length; ri++) {
+      var item = allItems[ri];
       var spiralAngle = outwardAngle + GOLDEN_ANGLE * ri;
-      var baseR = 50 + Math.sqrt(ri) * 18;
-      var noise = Math.sin(root.id * 3.7) * 8;
+      var baseR = 80 + Math.sqrt(ri) * 30;
+      var noise = Math.sin((item.type === 'cluster' ? item.memIds[0] : item.mem.id) * 3.7) * 8;
       var dist = baseR + noise;
-      var rx = nuc.x + Math.cos(spiralAngle) * dist;
-      var ry = nuc.y + Math.sin(spiralAngle) * dist;
-      nodePositions[root.id] = { x: rx, y: ry, depth: 0 };
 
-      // Orbital params
-      var rDir = Math.sin(root.id * 3.1) > 0 ? 1 : -1;
-      orbitData[root.id] = {
-        parentType: 'nucleus', parentKey: cat,
-        baseAngle: spiralAngle, baseDist: dist,
-        angSpeed: ROOT_ORBIT_SPEED * (0.6 + Math.sin(root.id * 1.3) * 0.5) * rDir
-      };
-      nodeProcessOrder.push(root.id);
+      if (item.type === 'cluster') {
+        var cid = 'c' + (clusterIdCounter++);
+        var label = autoLabel(item.memIds);
+        clusters[cid] = {
+          id: cid, cat: cat, label: label,
+          memIds: item.memIds, importance: item.importance,
+          expanded: !!expandedClusters[cid]
+        };
+        item.memIds.forEach(function(mid) { memToCluster[mid] = cid; });
 
-      var bCurve = dist * 0.2 * (Math.sin(root.id * 2.1) > 0 ? 1 : -1);
-      branchSegs.push({ _isTrunk: false, _curveOff: bCurve, col: col, depth: 0, fromId: null, toId: root.id, cat: cat });
+        var clx = nuc.x + Math.cos(spiralAngle) * dist;
+        var cly = nuc.y + Math.sin(spiralAngle) * dist;
+        clusterPositions[cid] = { x: clx, y: cly };
 
-      placeChildren(root.id, rx, ry, spiralAngle, dist, 1, col, cat, childrenOf);
+        var cDir = Math.sin(item.memIds[0] * 3.1) > 0 ? 1 : -1;
+        clusterOrbitData[cid] = {
+          parentType: 'nucleus', parentKey: cat,
+          baseAngle: spiralAngle, baseDist: dist,
+          angSpeed: ROOT_ORBIT_SPEED * 0.7 * (0.6 + Math.sin(item.memIds[0] * 1.3) * 0.4) * cDir
+        };
+        clusterProcessOrder.push(cid);
+
+        var bCurve = dist * 0.2 * (Math.sin(item.memIds[0] * 2.1) > 0 ? 1 : -1);
+        branchSegs.push({ _isTrunk: false, _curveOff: bCurve, col: col, depth: 0, fromId: null, toId: cid, cat: cat, isCluster: true });
+
+        // If expanded, place children around cluster center
+        if (clusters[cid].expanded) {
+          placeClusterChildren(cid, clx, cly, spiralAngle, col, cat);
+        }
+      } else {
+        // Individual memory (not in a cluster)
+        var m = item.mem;
+        var rx = nuc.x + Math.cos(spiralAngle) * dist;
+        var ry = nuc.y + Math.sin(spiralAngle) * dist;
+        nodePositions[m.id] = { x: rx, y: ry, depth: 0 };
+
+        var rDir = Math.sin(m.id * 3.1) > 0 ? 1 : -1;
+        orbitData[m.id] = {
+          parentType: 'nucleus', parentKey: cat,
+          baseAngle: spiralAngle, baseDist: dist,
+          angSpeed: ROOT_ORBIT_SPEED * (0.6 + Math.sin(m.id * 1.3) * 0.5) * rDir
+        };
+        nodeProcessOrder.push(m.id);
+
+        var bCurve2 = dist * 0.2 * (Math.sin(m.id * 2.1) > 0 ? 1 : -1);
+        branchSegs.push({ _isTrunk: false, _curveOff: bCurve2, col: col, depth: 0, fromId: null, toId: m.id, cat: cat });
+      }
     }
   });
 
   initParticles();
 }
 
+function placeClusterChildren(cid, clx, cly, baseAngle, col, cat) {
+  var cluster = clusters[cid];
+  if (!cluster) return;
+  var mems = cluster.memIds.map(function(id) { return nodeMap[id]; }).filter(Boolean);
+  mems.sort(function(a, b) { return (b.importance || 0) - (a.importance || 0); });
+
+  for (var ci = 0; ci < mems.length; ci++) {
+    var m = mems[ci];
+    var childAngle = baseAngle + GOLDEN_ANGLE * ci;
+    var childDist = 25 + Math.sqrt(ci) * 14;
+    var mx = clx + Math.cos(childAngle) * childDist;
+    var my = cly + Math.sin(childAngle) * childDist;
+    nodePositions[m.id] = { x: mx, y: my, depth: 1 };
+
+    var cDir = Math.sin(m.id * 2.7) > 0 ? 1 : -1;
+    orbitData[m.id] = {
+      parentType: 'cluster', parentKey: cid,
+      baseAngle: childAngle, baseDist: childDist,
+      angSpeed: CHILD_ORBIT_SPEED * 0.6 * (0.5 + Math.sin(m.id * 2.1) * 0.5) * cDir
+    };
+    nodeProcessOrder.push(m.id);
+
+    var bCurve = childDist * 0.15 * (Math.sin(m.id * 1.9) > 0 ? 1 : -1);
+    branchSegs.push({ _isTrunk: false, _curveOff: bCurve, col: col, depth: 1, fromId: cid, toId: m.id, cat: cat, fromCluster: true });
+  }
+}
+
 function placeChildren(parentId, px, py, parentAngle, parentDist, depth, col, cat, childrenOf) {
   var children = childrenOf[parentId];
   if (!children || children.length === 0) return;
   var spreadNarrow = Math.PI * 0.6 / Math.pow(1.5, depth);
-  var childDist = 35 + 10 / (depth + 1);
+  var childDist = 45 + 14 / (depth + 1);
   for (var ci = 0; ci < children.length; ci++) {
     var child = children[ci];
     var childAngle = children.length === 1
@@ -1506,7 +1746,6 @@ function placeChildren(parentId, px, py, parentAngle, parentDist, depth, col, ca
     var cyp = py + Math.sin(childAngle) * actualDist;
     nodePositions[child.id] = { x: cxp, y: cyp, depth: depth };
 
-    // Orbital params — slower at deeper levels
     var cDir = Math.sin(child.id * 2.7) > 0 ? 1 : -1;
     orbitData[child.id] = {
       parentType: 'node', parentKey: parentId,
@@ -1557,6 +1796,29 @@ function computeAnimatedPositions() {
     };
   }
 
+  // Cluster orbit positions (parent-first order)
+  for (var i = 0; i < clusterProcessOrder.length; i++) {
+    var cid = clusterProcessOrder[i];
+    var od = clusterOrbitData[cid];
+    if (!od) {
+      var bp = clusterPositions[cid];
+      clusterAnimPos[cid] = bp ? { x: bp.x, y: bp.y } : { x: 0, y: 0 };
+      continue;
+    }
+    var a = od.baseAngle + od.angSpeed * time;
+    var pcx, pcy;
+    if (od.parentType === 'nucleus') {
+      var nap = nucleiAnimPos[od.parentKey];
+      pcx = nap ? nap.x : centerAnimPos.x;
+      pcy = nap ? nap.y : centerAnimPos.y;
+    } else {
+      var pap = clusterAnimPos[od.parentKey];
+      pcx = pap ? pap.x : centerAnimPos.x;
+      pcy = pap ? pap.y : centerAnimPos.y;
+    }
+    clusterAnimPos[cid] = { x: pcx + Math.cos(a) * od.baseDist, y: pcy + Math.sin(a) * od.baseDist };
+  }
+
   // Nodes orbit in parent-first order
   for (var i = 0; i < nodeProcessOrder.length; i++) {
     var id = nodeProcessOrder[i];
@@ -1572,6 +1834,10 @@ function computeAnimatedPositions() {
       var nap = nucleiAnimPos[od.parentKey];
       pcx = nap ? nap.x : centerAnimPos.x;
       pcy = nap ? nap.y : centerAnimPos.y;
+    } else if (od.parentType === 'cluster') {
+      var cap = clusterAnimPos[od.parentKey];
+      pcx = cap ? cap.x : centerAnimPos.x;
+      pcy = cap ? cap.y : centerAnimPos.y;
     } else {
       var pap = nodeAnimPos[od.parentKey];
       pcx = pap ? pap.x : centerAnimPos.x;
@@ -1596,7 +1862,7 @@ function getHighlightPath(memId) {
 
 // ===== Scene Building =====
 function clearScene() {
-  var layers = [glowLayer, orbLayer, coronaLayer, particleLayer, orbitLayer, sparkLayer];
+  var layers = [glowLayer, orbLayer, coronaLayer, innerLayer, particleLayer, orbitLayer, sparkLayer];
   for (var l = 0; l < layers.length; l++) {
     var ch = layers[l].removeChildren();
     for (var i = 0; i < ch.length; i++) ch[i].destroy();
@@ -1608,9 +1874,10 @@ function clearScene() {
   pulseGfx.clear();
   nodeSprites = {};
   nucleiSprites = {};
+  clusterSprites = {};
   coronaSprites = {};
   nucLabels = {};
-  hubGlow = null; hubOrb = null; hubCorona = null; hubLabel = null;
+  hubGlow = null; hubOrb = null; hubCorona = null; hubLabel = null; hubInnerGalaxy = null; hubInnerCore = null;
   orbitParts = [];
   pulseRings = [];
   nodeSparks = [];
@@ -1654,6 +1921,22 @@ function buildScene() {
   hubCorona.blendMode = PIXI.BLEND_MODES.ADD;
   hubCorona.position.set(centerAnimPos.x, centerAnimPos.y);
   coronaLayer.addChild(hubCorona);
+
+  // Hub inner galaxy
+  hubInnerGalaxy = new PIXI.Sprite(innerGalaxyTex);
+  hubInnerGalaxy.anchor.set(0.5);
+  hubInnerGalaxy.tint = 0xf0e0c0;
+  hubInnerGalaxy.blendMode = PIXI.BLEND_MODES.ADD;
+  hubInnerGalaxy.position.set(centerAnimPos.x, centerAnimPos.y);
+  innerLayer.addChild(hubInnerGalaxy);
+
+  // Hub inner core
+  hubInnerCore = new PIXI.Sprite(innerCoreTex);
+  hubInnerCore.anchor.set(0.5);
+  hubInnerCore.tint = 0xffffff;
+  hubInnerCore.blendMode = PIXI.BLEND_MODES.ADD;
+  hubInnerCore.position.set(centerAnimPos.x, centerAnimPos.y);
+  innerLayer.addChild(hubInnerCore);
 
   hubLabel = new PIXI.Text('ENGRAM', {
     fontFamily: 'Inter, sans-serif', fontSize: 20, fontWeight: '500', fill: 0xf0e0c0
@@ -1750,9 +2033,77 @@ function buildScene() {
     nextPulseTime[cat] = time + rng(0.5, PULSE_MAX);
   }
 
+  // ===== Cluster Constellation Orbs =====
+  clusterSprites = {};
+  var cids = Object.keys(clusters);
+  for (var ci = 0; ci < cids.length; ci++) {
+    var cid = cids[ci];
+    var cluster = clusters[cid];
+    var ap = clusterAnimPos[cid] || clusterPositions[cid];
+    if (!ap) continue;
+    var col = COLORS[cluster.cat] || COLORS.general;
+
+    // Cluster glow — larger than individual nodes
+    var cg = new PIXI.Sprite(glowTex);
+    cg.anchor.set(0.5);
+    cg.tint = col.hex;
+    cg.blendMode = PIXI.BLEND_MODES.ADD;
+    cg.position.set(ap.x, ap.y);
+    glowLayer.addChild(cg);
+
+    // Cluster orb — bigger, uses count to scale
+    var co = new PIXI.Sprite(orbTex);
+    co.anchor.set(0.5);
+    co.tint = col.hex;
+    co.position.set(ap.x, ap.y);
+    orbLayer.addChild(co);
+
+    // Cluster corona
+    var cc = new PIXI.Sprite(coronaTex);
+    cc.anchor.set(0.5);
+    cc.tint = col.hex;
+    cc.blendMode = PIXI.BLEND_MODES.ADD;
+    cc.position.set(ap.x, ap.y);
+    coronaLayer.addChild(cc);
+
+    // Inner galaxy for cluster
+    var cig = new PIXI.Sprite(innerGalaxyTex);
+    cig.anchor.set(0.5);
+    cig.tint = col.hex;
+    cig.blendMode = PIXI.BLEND_MODES.ADD;
+    cig.position.set(ap.x, ap.y);
+    innerLayer.addChild(cig);
+
+    // Count badge label
+    var badgeText = cluster.memIds.length + '';
+    var badge = new PIXI.Text(badgeText, {
+      fontFamily: 'JetBrains Mono, monospace', fontSize: 14, fontWeight: '700',
+      fill: 0xffffff, stroke: col.hex, strokeThickness: 2
+    });
+    badge.anchor.set(0.5);
+    badge.position.set(ap.x, ap.y);
+    labelLayer.addChild(badge);
+
+    // Cluster label
+    var clLabel = new PIXI.Text(cluster.label, {
+      fontFamily: 'Inter, sans-serif', fontSize: 11, fontWeight: '500',
+      fill: col.hex, wordWrap: true, wordWrapWidth: 120
+    });
+    clLabel.anchor.set(0.5, 0);
+    clLabel.position.set(ap.x, ap.y + 20);
+    labelLayer.addChild(clLabel);
+
+    clusterSprites[cid] = { glow: cg, orb: co, corona: cc, innerGalaxy: cig, badge: badge, label: clLabel };
+  }
+
   // ===== Memory Nodes =====
   for (var mi = 0; mi < memories.length; mi++) {
     var m = memories[mi];
+
+    // Skip memories that are in a collapsed cluster
+    var mCluster = memToCluster[m.id];
+    if (mCluster && !clusters[mCluster].expanded) continue;
+
     var ap = nodeAnimPos[m.id] || nodePositions[m.id];
     if (!ap) continue;
     var col = COLORS[m.category] || COLORS.general;
@@ -1777,7 +2128,23 @@ function buildScene() {
     mc.position.set(ap.x, ap.y);
     coronaLayer.addChild(mc);
 
-    nodeSprites[m.id] = { glow: mg, orb: mo, corona: mc };
+    // Inner galaxy spiral
+    var mig = new PIXI.Sprite(innerGalaxyTex);
+    mig.anchor.set(0.5);
+    mig.tint = col.hex;
+    mig.blendMode = PIXI.BLEND_MODES.ADD;
+    mig.position.set(ap.x, ap.y);
+    innerLayer.addChild(mig);
+
+    // Inner pulsing core
+    var mic = new PIXI.Sprite(innerCoreTex);
+    mic.anchor.set(0.5);
+    mic.tint = 0xffffff;
+    mic.blendMode = PIXI.BLEND_MODES.ADD;
+    mic.position.set(ap.x, ap.y);
+    innerLayer.addChild(mic);
+
+    nodeSprites[m.id] = { glow: mg, orb: mo, corona: mc, innerGalaxy: mig, innerCore: mic };
   }
 
   // ===== Branch Particle Sprites =====
@@ -1922,19 +2289,6 @@ function updateShootingStars(dt) {
 
 function updateGrid() {
   gridGfx.clear();
-  var gridSpacing = GRID_SPACING_BASE * transform.k;
-  if (gridSpacing <= 20) return;
-  var offsetX = transform.x % gridSpacing;
-  var offsetY = transform.y % gridSpacing;
-  if (offsetX < 0) offsetX += gridSpacing;
-  if (offsetY < 0) offsetY += gridSpacing;
-  gridGfx.lineStyle(1, 0x94a3b8, 0.025);
-  for (var gx = offsetX; gx < screenW; gx += gridSpacing) {
-    gridGfx.moveTo(gx, 0); gridGfx.lineTo(gx, screenH);
-  }
-  for (var gy = offsetY; gy < screenH; gy += gridSpacing) {
-    gridGfx.moveTo(0, gy); gridGfx.lineTo(screenW, gy);
-  }
 }
 
 // Dynamic curves using animated positions
@@ -1947,16 +2301,16 @@ function updateCurves(phaseTrunk, phaseBranch, dimEased) {
   for (var ti = 0; ti < trunkSegs.length; ti++) {
     var ts = trunkSegs[ti];
     if (currentFilter !== 'all' && ts.cat !== currentFilter) continue;
-    var tA = trunkAlpha * 0.3;
+    var tA = trunkAlpha * 0.7;
     if (selectedNode && ts.cat !== selectedNode.category) tA *= (1 - dimEased * 0.85);
     if (tA < 0.005) continue;
     var pts = getSegPts(ts);
     // Trunk glow
-    curvesGfx.lineStyle(3.5 / transform.k, ts.col.hex, tA * 0.15);
+    curvesGfx.lineStyle(2.0 / transform.k, ts.col.hex, tA * 0.08);
     curvesGfx.moveTo(pts.x1, pts.y1);
     curvesGfx.quadraticCurveTo(pts.cx, pts.cy, pts.x2, pts.y2);
     // Trunk core
-    curvesGfx.lineStyle(1.8 / transform.k, ts.col.hex, tA);
+    curvesGfx.lineStyle(1.0 / transform.k, ts.col.hex, tA * 1.5);
     curvesGfx.moveTo(pts.x1, pts.y1);
     curvesGfx.quadraticCurveTo(pts.cx, pts.cy, pts.x2, pts.y2);
   }
@@ -1965,8 +2319,12 @@ function updateCurves(phaseTrunk, phaseBranch, dimEased) {
   for (var bi = 0; bi < branchSegs.length; bi++) {
     var bs = branchSegs[bi];
     if (currentFilter !== 'all' && bs.cat !== currentFilter) continue;
+    // Hide curves to nodes inside collapsed clusters
+    if (bs.fromCluster && typeof bs.fromId === 'string' && clusters[bs.fromId] && !clusters[bs.fromId].expanded) continue;
+    // Hide curves to collapsed cluster orbs if cluster is expanded (children show individual curves)
+    if (bs.isCluster && clusters[bs.toId] && clusters[bs.toId].expanded) continue;
     var isHL = hlIndexSet[bi] || false;
-    var bA = branchAlpha * 0.2 / (1 + bs.depth * 0.3);
+    var bA = branchAlpha * 0.5 / (1 + bs.depth * 0.12);
     if (selectedNode) {
       if (isHL) bA = 0.7;
       else bA *= (1 - dimEased * 0.88);
@@ -1975,14 +2333,14 @@ function updateCurves(phaseTrunk, phaseBranch, dimEased) {
     var pts = getSegPts(bs);
 
     if (isHL) {
-      curvesGfx.lineStyle(5 / transform.k, bs.col.hex, 0.12);
+      curvesGfx.lineStyle(2.5 / transform.k, bs.col.hex, 0.08);
       curvesGfx.moveTo(pts.x1, pts.y1);
       curvesGfx.quadraticCurveTo(pts.cx, pts.cy, pts.x2, pts.y2);
-      curvesGfx.lineStyle(1.5 / transform.k, bs.col.hex, bA);
+      curvesGfx.lineStyle(0.8 / transform.k, bs.col.hex, bA);
       curvesGfx.moveTo(pts.x1, pts.y1);
       curvesGfx.quadraticCurveTo(pts.cx, pts.cy, pts.x2, pts.y2);
     } else {
-      curvesGfx.lineStyle(Math.max(0.5, 1.0 - bs.depth * 0.12) / transform.k, bs.col.hex, bA);
+      curvesGfx.lineStyle(Math.max(0.4, 0.8 - bs.depth * 0.06) / transform.k, bs.col.hex, Math.min(bA * 1.4, 0.5));
       curvesGfx.moveTo(pts.x1, pts.y1);
       curvesGfx.quadraticCurveTo(pts.cx, pts.cy, pts.x2, pts.y2);
     }
@@ -1991,7 +2349,7 @@ function updateCurves(phaseTrunk, phaseBranch, dimEased) {
     if (bA > 0.05) {
       curvesGfx.lineStyle(0);
       curvesGfx.beginFill(bs.col.hex, bA * 0.35);
-      curvesGfx.drawCircle(pts.x2, pts.y2, 1.5 / transform.k);
+      curvesGfx.drawCircle(pts.x2, pts.y2, 0.8 / transform.k);
       curvesGfx.endFill();
     }
   }
@@ -2127,9 +2485,9 @@ function updatePulseRings(entryEased, dimEased) {
       alpha *= (1 - dimEased * 0.85);
     }
     if (alpha < 0.004) continue;
-    pulseGfx.lineStyle(3 / transform.k, ring.color, alpha * 0.3);
+    pulseGfx.lineStyle(1.5 / transform.k, ring.color, alpha * 0.2);
     pulseGfx.drawCircle(ring.x, ring.y, r);
-    pulseGfx.lineStyle(1.2 / transform.k, ring.color, alpha);
+    pulseGfx.lineStyle(0.6 / transform.k, ring.color, alpha * 0.8);
     pulseGfx.drawCircle(ring.x, ring.y, r);
   }
 }
@@ -2237,12 +2595,12 @@ function updateHub(phaseCenter) {
   var r = CENTER_HUB_R * pulse;
 
   var glowBreath = 1 + Math.sin(time * 0.5) * 0.22 + Math.sin(time * 1.3) * 0.08;
-  var glowDiam = r * 16;
+  var glowDiam = r * 2.5;
   hubGlow.position.set(centerAnimPos.x, centerAnimPos.y);
   hubGlow.scale.set(glowDiam / 128);
-  hubGlow.alpha = alpha * 0.85 * glowBreath;
+  hubGlow.alpha = alpha * 0.12 * glowBreath;
 
-  var orbDiam = r * 2;
+  var orbDiam = r * 2.8;
   hubOrb.position.set(centerAnimPos.x, centerAnimPos.y);
   hubOrb.scale.set(orbDiam / 128);
   hubOrb.alpha = alpha;
@@ -2251,8 +2609,24 @@ function updateHub(phaseCenter) {
   if (hubCorona) {
     hubCorona.position.set(centerAnimPos.x, centerAnimPos.y);
     hubCorona.rotation = time * 0.06;
-    hubCorona.scale.set(r * 5.5 / 64);
-    hubCorona.alpha = alpha * 0.45;
+    hubCorona.scale.set(r * 3.5 / 64);
+    hubCorona.alpha = alpha * 0.2;
+  }
+
+  // Hub inner galaxy — slow counter-rotate
+  if (typeof hubInnerGalaxy !== 'undefined' && hubInnerGalaxy) {
+    hubInnerGalaxy.position.set(centerAnimPos.x, centerAnimPos.y);
+    hubInnerGalaxy.scale.set(r * 1.8 / 64, r * 1.2 / 64);
+    hubInnerGalaxy.rotation = -time * 0.04;
+    hubInnerGalaxy.alpha = alpha * 0.45;
+  }
+
+  // Hub inner core — heartbeat
+  if (typeof hubInnerCore !== 'undefined' && hubInnerCore) {
+    var hubHeart = Math.pow(Math.abs(Math.sin(time * 1.2)), 0.4) * 0.5 + 0.5;
+    hubInnerCore.position.set(centerAnimPos.x, centerAnimPos.y);
+    hubInnerCore.scale.set(r * 0.45 * hubHeart / 32);
+    hubInnerCore.alpha = alpha * (0.4 + hubHeart * 0.5);
   }
 
   if (hubLabel) {
@@ -2299,21 +2673,21 @@ function updateNuclei(phaseNuclei, dimEased) {
     var r = NUCLEUS_ORB_R * pulse;
 
     var glowBreath = 1 + Math.sin(time * 0.6 + ni * 0.9) * 0.22 + Math.sin(time * 1.8 + ni * 1.7) * 0.08;
-    var glowDiam = r * 12;
+    var glowDiam = r * 2;
     ns.glow.position.set(nap.x, nap.y);
     ns.glow.scale.set(glowDiam / 128);
-    ns.glow.alpha = alpha * 0.85 * glowBreath;
+    ns.glow.alpha = alpha * 0.12 * glowBreath;
 
-    var orbDiam = r * 2;
+    var orbDiam = r * 2.8;
     ns.orb.position.set(nap.x, nap.y);
     ns.orb.scale.set(orbDiam / 128);
-    ns.orb.alpha = alpha;
+    ns.orb.alpha = Math.min(1, alpha * 1.3);
     ns.orb.rotation = time * 0.08 * (ni % 2 === 0 ? 1 : -1);
 
     ns.corona.position.set(nap.x, nap.y);
     ns.corona.rotation = time * (0.1 + ni * 0.015) * (ni % 2 === 0 ? -1 : 1);
-    ns.corona.scale.set(r * 4.5 / 64);
-    ns.corona.alpha = alpha * 0.45;
+    ns.corona.scale.set(r * 3.0 / 64);
+    ns.corona.alpha = alpha * 0.2;
 
     if (nucLabels[cat]) {
       var showLabels = transform.k > 0.3;
@@ -2331,6 +2705,83 @@ function updateNuclei(phaseNuclei, dimEased) {
   }
 }
 
+// Cluster constellation orbs — animated positions + count badges
+function updateClusters(phaseNodes, dimEased) {
+  var cids = Object.keys(clusterSprites);
+  for (var ci = 0; ci < cids.length; ci++) {
+    var cid = cids[ci];
+    var cluster = clusters[cid];
+    var cs = clusterSprites[cid];
+    if (!cs || !cluster) continue;
+
+    var vis = currentFilter === 'all' || cluster.cat === currentFilter;
+    // Hide cluster orb if expanded (children are shown instead)
+    if (cluster.expanded) vis = false;
+
+    cs.glow.visible = vis;
+    cs.orb.visible = vis;
+    cs.corona.visible = vis;
+    cs.innerGalaxy.visible = vis;
+    cs.badge.visible = vis && transform.k > 0.15;
+    cs.label.visible = vis && transform.k > 0.3;
+    if (!vis) continue;
+
+    var ap = clusterAnimPos[cid];
+    if (!ap) { cs.glow.visible = false; cs.orb.visible = false; cs.corona.visible = false; cs.innerGalaxy.visible = false; cs.badge.visible = false; cs.label.visible = false; continue; }
+
+    // Cluster radius based on member count — bigger clusters = bigger orbs
+    var count = cluster.memIds.length;
+    var baseR = 3.5 + Math.sqrt(count) * 1.5 + Math.log2(count + 1) * 0.8;
+
+    var alpha = phaseNodes;
+    if (dimProgress > 0) alpha *= (1 - dimEased * 0.6);
+
+    // Breathing
+    var pulse = 1 + Math.sin(time * 0.8 + ci * 1.7) * 0.08 + Math.sin(time * 2.1 + ci * 0.9) * 0.04;
+    var pr = baseR * pulse;
+
+    // Glow
+    var glowBreath = 1 + Math.sin(time * 0.5 + ci * 1.3) * 0.2;
+    var glowDiam = pr * 3.0 * 2;
+    cs.glow.position.set(ap.x, ap.y);
+    cs.glow.scale.set(glowDiam / 128);
+    cs.glow.alpha = alpha * 0.18 * glowBreath;
+
+    // Orb
+    var orbDiam = pr * 3.6;
+    cs.orb.position.set(ap.x, ap.y);
+    cs.orb.scale.set(orbDiam / 128);
+    cs.orb.alpha = Math.min(1, alpha * 1.2);
+    cs.orb.rotation = time * 0.08 * (ci % 2 === 0 ? 1 : -1);
+
+    // Corona
+    cs.corona.position.set(ap.x, ap.y);
+    cs.corona.rotation = time * 0.1 * (ci % 3 === 0 ? -1 : 1);
+    var coronaScale = pr * 3.4 / 64;
+    cs.corona.scale.set(coronaScale);
+    cs.corona.alpha = alpha * 0.15;
+    cs.corona.visible = vis && transform.k > 0.15;
+
+    // Inner galaxy
+    cs.innerGalaxy.position.set(ap.x, ap.y);
+    var igScale = pr * 2.2 / 64;
+    cs.innerGalaxy.scale.set(igScale, igScale * 0.6);
+    cs.innerGalaxy.rotation = -time * 0.04 * (ci % 2 === 0 ? 1 : -1);
+    cs.innerGalaxy.alpha = alpha * 0.5;
+
+    // Badge (count number)
+    cs.badge.position.set(ap.x, ap.y);
+    cs.badge.scale.set(0.7 / transform.k);
+    cs.badge.alpha = alpha * 0.9;
+
+    // Label
+    var labelY = ap.y + pr * 3.8 / transform.k * 0.3 + 8 / transform.k;
+    cs.label.position.set(ap.x, labelY);
+    cs.label.scale.set(0.45 / transform.k);
+    cs.label.alpha = alpha * 0.55;
+  }
+}
+
 // Memory nodes — animated positions + orb rotation + corona
 function updateNodes(phaseNodes, dimEased) {
   for (var mi = 0; mi < memories.length; mi++) {
@@ -2342,10 +2793,12 @@ function updateNodes(phaseNodes, dimEased) {
     ns.glow.visible = vis;
     ns.orb.visible = vis;
     ns.corona.visible = vis;
+    if (ns.innerGalaxy) ns.innerGalaxy.visible = vis;
+    if (ns.innerCore) ns.innerCore.visible = vis;
     if (!vis) continue;
 
     var ap = nodeAnimPos[m.id];
-    if (!ap) { ns.glow.visible = false; ns.orb.visible = false; ns.corona.visible = false; continue; }
+    if (!ap) { ns.glow.visible = false; ns.orb.visible = false; ns.corona.visible = false; if (ns.innerGalaxy) ns.innerGalaxy.visible = false; if (ns.innerCore) ns.innerCore.visible = false; continue; }
 
     var r = nodeRadius(m);
     var isSelected = selectedNode && selectedNode.id === m.id;
@@ -2360,7 +2813,7 @@ function updateNodes(phaseNodes, dimEased) {
     var alpha = nodeEntry;
     if (selectedNode && !isSelected && !isOnPath) alpha *= (1 - dimEased * 0.88);
     if (m.is_forgotten) alpha *= 0.25;
-    if (alpha < 0.01) { ns.glow.visible = false; ns.orb.visible = false; ns.corona.visible = false; continue; }
+    if (alpha < 0.01) { ns.glow.visible = false; ns.orb.visible = false; ns.corona.visible = false; if (ns.innerGalaxy) ns.innerGalaxy.visible = false; if (ns.innerCore) ns.innerCore.visible = false; continue; }
 
     // Compound breathing
     var pulse = 1
@@ -2371,29 +2824,53 @@ function updateNodes(phaseNodes, dimEased) {
 
     // Glow
     var glowBreath = 1 + Math.sin(time * 0.7 + m.id * 1.1) * 0.18 + Math.sin(time * 2.1 + m.id * 0.5) * 0.08;
-    var bloomMult = (isSelected || isHovered || isSearchHit) ? 10 : 8;
+    var bloomMult = (isSelected || isHovered || isSearchHit) ? 2.5 : 1.5;
     var glowDiam = pr * bloomMult * 2;
     ns.glow.position.set(ap.x, ap.y);
     ns.glow.scale.set(glowDiam / 128);
-    ns.glow.alpha = alpha * (isSelected || isHovered ? 0.8 : 0.6) * glowBreath;
+    ns.glow.alpha = alpha * (isSelected || isHovered ? 0.3 : 0.12) * glowBreath;
     ns.glow.visible = true;
 
     // Orb with rotation
-    var orbDiam = pr * 2;
+    var orbDiam = pr * 3.2;
     ns.orb.position.set(ap.x, ap.y);
     ns.orb.scale.set(orbDiam / 128);
-    ns.orb.alpha = alpha;
+    ns.orb.alpha = Math.min(1, alpha * 1.3);
     ns.orb.rotation = time * (0.12 + (m.id % 17) * 0.008) * (m.id % 2 === 0 ? 1 : -1);
     ns.orb.visible = true;
 
     // Corona ring
     ns.corona.position.set(ap.x, ap.y);
     ns.corona.rotation = time * (0.15 + (m.id % 13) * 0.01) * (m.id % 3 === 0 ? -1 : 1);
-    var coronaScale = pr * 3.5 / 64;
+    var coronaScale = pr * 3.0 / 64;
     ns.corona.scale.set(coronaScale);
-    var coronaAlpha = alpha * (0.08 + ((m.importance || 1) / 10) * 0.28);
+    var coronaAlpha = alpha * (0.06 + ((m.importance || 1) / 10) * 0.18);
     ns.corona.alpha = coronaAlpha;
     ns.corona.visible = coronaAlpha > 0.01 && transform.k > 0.2;
+
+    // Inner galaxy — counter-rotates inside orb, perspective-tilted
+    if (ns.innerGalaxy) {
+      var igBase = pr * 1.95 / 64;
+      // Perspective tilt — squish Y for 3D disk look
+      var tiltAngle = 0.5 + (m.id % 7) * 0.12;
+      ns.innerGalaxy.position.set(ap.x, ap.y);
+      ns.innerGalaxy.scale.set(igBase, igBase * (0.5 + Math.cos(tiltAngle) * 0.2));
+      ns.innerGalaxy.rotation = -time * (0.06 + (m.id % 11) * 0.004) * (m.id % 2 === 0 ? 1 : -1);
+      ns.innerGalaxy.alpha = alpha * 0.5;
+      ns.innerGalaxy.visible = true;
+    }
+
+    // Inner core — independent heartbeat pulse
+    if (ns.innerCore) {
+      // Heartbeat: quick expand, slow contract (asymmetric sine)
+      var heartPhase = (time * 1.8 + m.id * 0.9) % (Math.PI * 2);
+      var heartbeat = Math.pow(Math.abs(Math.sin(heartPhase)), 0.4) * 0.5 + 0.5;
+      var coreScale = pr * 0.6 * heartbeat / 32;
+      ns.innerCore.position.set(ap.x, ap.y);
+      ns.innerCore.scale.set(coreScale);
+      ns.innerCore.alpha = alpha * (0.3 + heartbeat * 0.5);
+      ns.innerCore.visible = true;
+    }
   }
 }
 
@@ -2514,6 +2991,7 @@ app.ticker.add(function() {
   updateNodeSparks(dt, entryEased, dimEased);
   updateHub(phaseCenter);
   updateNuclei(phaseNuclei, dimEased);
+  updateClusters(phaseNodes, dimEased);
   updateNodes(phaseNodes, dimEased);
   updateOverlay();
 });
@@ -2538,6 +3016,9 @@ function findNode(sx, sy) {
   for (var i = 0; i < memories.length; i++) {
     var m = memories[i];
     if (!nodeVisible(m)) continue;
+    // Skip memories in collapsed clusters
+    var mCluster = memToCluster[m.id];
+    if (mCluster && !clusters[mCluster].expanded) continue;
     var ap = nodeAnimPos[m.id];
     if (!ap) continue;
     var dx = ap.x - wx, dy = ap.y - wy;
@@ -2546,6 +3027,40 @@ function findNode(sx, sy) {
     if (dist < hitR && dist < closestDist) { closest = m; closestDist = dist; }
   }
   return closest;
+}
+
+function findCluster(sx, sy) {
+  var wxy = screenToWorld(sx, sy), wx = wxy[0], wy = wxy[1];
+  var cids = Object.keys(clusters);
+  for (var i = 0; i < cids.length; i++) {
+    var cid = cids[i];
+    var cluster = clusters[cid];
+    if (cluster.expanded) continue; // Don't hit expanded clusters
+    if (currentFilter !== 'all' && cluster.cat !== currentFilter) continue;
+    var ap = clusterAnimPos[cid];
+    if (!ap) continue;
+    var count = cluster.memIds.length;
+    var hitR = (3.5 + Math.sqrt(count) * 1.5) * 3.6 / 128 * 128 + 12 / transform.k;
+    // Simpler: use a generous hit radius based on count
+    hitR = 8 + Math.sqrt(count) * 3 + 6 / transform.k;
+    var dx = ap.x - wx, dy = ap.y - wy;
+    if (Math.sqrt(dx * dx + dy * dy) < hitR) return cid;
+  }
+  return null;
+}
+
+function toggleCluster(cid) {
+  if (expandedClusters[cid]) {
+    delete expandedClusters[cid];
+  } else {
+    expandedClusters[cid] = true;
+  }
+  // Rebuild layout and scene with new expand state
+  computeLayout();
+  computeAnimatedPositions();
+  buildScene();
+  entryProgress = 1; // skip entry animation
+  if (listPanelOpen) renderListPanel();
 }
 
 function findNucleus(sx, sy) {
@@ -2582,23 +3097,51 @@ function showTooltip(m, x, y) {
 }
 function hideTooltip() { tooltip.style.opacity = '0'; }
 
+function showClusterTooltip(cid, x, y) {
+  var cluster = clusters[cid];
+  if (!cluster) return;
+  var col = COLORS[cluster.cat] || COLORS.general;
+  tooltip.querySelector('.tt-id').textContent = '⬡ ' + cluster.memIds.length + ' memories';
+  tooltip.querySelector('.tt-cat').textContent = cluster.cat;
+  tooltip.querySelector('.tt-cat').style.color = col.core;
+  tooltip.querySelector('.tt-text').textContent = cluster.label + ' — click to expand';
+  var tx = x + 16, ty = y - 16;
+  if (tx + 320 > screenW) tx = x - 336;
+  if (ty < 0) ty = 16;
+  tooltip.style.left = tx + 'px';
+  tooltip.style.top = ty + 'px';
+  tooltip.style.opacity = '1';
+}
+
 // ===== Mouse Events =====
 app.view.addEventListener('mousemove', function(e) {
   var node = findNode(e.clientX, e.clientY);
+  var clHit = !node ? findCluster(e.clientX, e.clientY) : null;
   if (node !== hoveredNode) {
     hoveredNode = node;
-    var nucHit = !node ? findNucleus(e.clientX, e.clientY) : null;
-    var hubHit = !node && !nucHit ? hitCenterHub(e.clientX, e.clientY) : false;
-    app.view.style.cursor = (node || nucHit || hubHit) ? 'pointer' : 'default';
-    if (node) showTooltip(node, e.clientX, e.clientY); else hideTooltip();
+    var nucHit = !node && !clHit ? findNucleus(e.clientX, e.clientY) : null;
+    var hubHit = !node && !nucHit && !clHit ? hitCenterHub(e.clientX, e.clientY) : false;
+    app.view.style.cursor = (node || nucHit || hubHit || clHit) ? 'pointer' : 'default';
+    if (node) {
+      showTooltip(node, e.clientX, e.clientY);
+    } else if (clHit) {
+      showClusterTooltip(clHit, e.clientX, e.clientY);
+    } else {
+      hideTooltip();
+    }
   } else if (node) {
     showTooltip(node, e.clientX, e.clientY);
+  } else if (clHit) {
+    showClusterTooltip(clHit, e.clientX, e.clientY);
+    app.view.style.cursor = 'pointer';
   }
 });
 
 app.view.addEventListener('click', function(e) {
   var node = findNode(e.clientX, e.clientY);
   if (node) { openSidebar(node); return; }
+  var clusterHit = findCluster(e.clientX, e.clientY);
+  if (clusterHit) { toggleCluster(clusterHit); return; }
   var nucHit = findNucleus(e.clientX, e.clientY);
   if (nucHit) { currentFilter = currentFilter === nucHit ? 'all' : nucHit; return; }
   if (hitCenterHub(e.clientX, e.clientY)) { currentFilter = 'all'; closeSidebar(); return; }
@@ -2764,7 +3307,54 @@ function buildListFilters() {
     html += '<span class="lp-chip-count">' + count + '</span>';
     html += '</button>';
   });
+
+  // Source filter chips
+  var sources = {};
+  memories.forEach(function(m) { if (m.source) sources[m.source] = (sources[m.source] || 0) + 1; });
+  var sourceKeys = Object.keys(sources).sort(function(a, b) { return sources[b] - sources[a]; });
+  if (sourceKeys.length > 1) {
+    html += '<div style="width:100%;height:1px;background:rgba(255,255,255,0.04);margin:6px 0"></div>';
+    var srcActive = sourceFilter === 'all' ? ' active' : '';
+    html += '<button class="lp-chip' + srcActive + '" onclick="setSourceFilter(\'all\')">All sources</button>';
+    sourceKeys.forEach(function(src) {
+      var srcAct = sourceFilter === src ? ' active' : '';
+      html += '<button class="lp-chip' + srcAct + '" style="--chip-color:#818cf8;--chip-bg:rgba(129,140,248,0.1)" onclick="setSourceFilter(\'' + src.replace(/'/g, "\\'") + '\')">';
+      html += src + '<span class="lp-chip-count">' + sources[src] + '</span></button>';
+    });
+  }
+
+  // Cluster summary
+  var clusterCount = Object.keys(clusters).length;
+  var expandedCount = Object.keys(expandedClusters).length;
+  if (clusterCount > 0) {
+    html += '<div style="width:100%;height:1px;background:rgba(255,255,255,0.04);margin:6px 0"></div>';
+    html += '<div style="display:flex;gap:6px;align-items:center;width:100%">';
+    html += '<span style="font-size:10px;color:#666;flex:1">⬡ ' + clusterCount + ' clusters';
+    if (expandedCount > 0) html += ' (' + expandedCount + ' expanded)';
+    html += '</span>';
+    if (expandedCount > 0) {
+      html += '<button class="lp-chip" onclick="collapseAll()" style="font-size:9px;padding:2px 8px">Collapse all</button>';
+    }
+    html += '</div>';
+  }
+
   container.innerHTML = html;
+}
+
+function setSourceFilter(src) {
+  sourceFilter = src;
+  buildListFilters();
+  renderListItems();
+}
+
+function collapseAll() {
+  expandedClusters = {};
+  computeLayout();
+  computeAnimatedPositions();
+  buildScene();
+  entryProgress = 1;
+  buildListFilters();
+  renderListItems();
 }
 
 function setListFilter(cat) {
@@ -2790,6 +3380,9 @@ function getFilteredMemories() {
   }
   if (listFilter !== 'all') {
     source = source.filter(function(m) { return m.category === listFilter; });
+  }
+  if (sourceFilter !== 'all') {
+    source = source.filter(function(m) { return (m.source || '') === sourceFilter; });
   }
   if (listSearchQuery && !listSearchResults) {
     var q = listSearchQuery.toLowerCase();
@@ -3131,14 +3724,46 @@ async function deleteMemoryConfirm(id) {
 }
 
 // ===== Data Loading =====
+function normalizeGraphData(gData) {
+  var rawNodes = gData.nodes || gData.memories || [];
+  var rawLinks = gData.links || gData.edges || [];
+  var mems = rawNodes.map(function(n) {
+    var numId = typeof n.id === 'string' && n.id.match(/^m(\d+)$/) ? parseInt(n.id.slice(1)) : n.id;
+    return {
+      id: numId,
+      content: n.content || n.label || '',
+      category: n.category || n.group || 'general',
+      importance: n.importance || 5,
+      is_forgotten: n.is_forgotten || false,
+      is_archived: n.is_archived || false,
+      is_static: n.is_static || false,
+      parent_memory_id: n.parent_memory_id || null,
+      confidence: n.confidence,
+      source_count: n.source_count || 1,
+      source: n.source || '',
+      created_at: n.created_at || '',
+      version: n.version || 1,
+      tags: n.tags || [],
+      forget_after: n.forget_after || null
+    };
+  });
+  var lnks = rawLinks.map(function(l) {
+    var src = l.source_id || l.source;
+    var tgt = l.target_id || l.target;
+    if (typeof src === 'string' && src.match(/^m\d+$/)) src = parseInt(src.slice(1));
+    if (typeof tgt === 'string' && tgt.match(/^m\d+$/)) tgt = parseInt(tgt.slice(1));
+    return { source: src, target: tgt, similarity: l.similarity || l.weight || 0.5, type: l.type || 'similarity' };
+  });
+  return { memories: mems, links: lnks };
+}
+
 async function loadData() {
   try {
     var gRes = await fetch(BASE + '/graph');
     var gData = await gRes.json();
-    memories = gData.memories || [];
-    links = (gData.links || []).map(function(l) {
-      return { source: l.source_id, target: l.target_id, similarity: l.similarity, type: l.type || 'similarity' };
-    });
+    var norm = normalizeGraphData(gData);
+    memories = norm.memories;
+    links = norm.links;
     nodeMap = {};
     memories.forEach(function(m) { nodeMap[m.id] = m; });
     lastMemoryCount = memories.length;
@@ -3147,6 +3772,7 @@ async function loadData() {
     document.getElementById('stat-links').textContent = links.length;
     document.getElementById('loading').style.display = 'none';
     computeLayout();
+    document.getElementById('stat-clusters').textContent = Object.keys(clusters).length;
     computeAnimatedPositions();
     buildScene();
     loadTime = performance.now();
@@ -3170,10 +3796,9 @@ async function refreshData() {
   try {
     var gRes = await fetch(BASE + '/graph');
     var gData = await gRes.json();
-    var newMems = gData.memories || [];
-    var newLinks = (gData.links || []).map(function(l) {
-      return { source: l.source_id, target: l.target_id, similarity: l.similarity, type: l.type || 'similarity' };
-    });
+    var norm = normalizeGraphData(gData);
+    var newMems = norm.memories;
+    var newLinks = norm.links;
     var newMaxId = newMems.reduce(function(mx, m) { return m.id > mx ? m.id : mx; }, 0);
 
     if (newMems.length !== lastMemoryCount || newMaxId !== lastMaxId) {
@@ -3186,6 +3811,7 @@ async function refreshData() {
       document.getElementById('stat-nodes').textContent = memories.length;
       document.getElementById('stat-links').textContent = links.length;
       computeLayout();
+      document.getElementById('stat-clusters').textContent = Object.keys(clusters).length;
       computeAnimatedPositions();
       buildScene();
       entryProgress = 1;
@@ -3238,9 +3864,243 @@ window.addEventListener('resize', function() {
 });
 
 // ===== Init =====
-buildBackground();
-buildSky();
+var _dbg = document.getElementById('loading').querySelector('.text');
+try { _dbg.textContent = 'Step 1: buildBackground...'; buildBackground(); } catch(e) { _dbg.textContent = 'FAIL buildBackground: ' + e.message; throw e; }
+try { _dbg.textContent = 'Step 2: buildSky...'; buildSky(); } catch(e) { _dbg.textContent = 'FAIL buildSky: ' + e.message; throw e; }
+_dbg.textContent = 'Step 3: loadData (fetching /graph)...';
 loadData();
+
+// ========================================================================
+// INBOX / REVIEW QUEUE — v5.1
+// ========================================================================
+var inboxPanelOpen = false;
+var inboxItems = [];
+var inboxSelected = new Set();
+
+function toggleInboxPanel() {
+  inboxPanelOpen = !inboxPanelOpen;
+  document.getElementById('inbox-panel').classList.toggle('open', inboxPanelOpen);
+  document.getElementById('inbox-toggle').classList.toggle('active', inboxPanelOpen);
+  if (inboxPanelOpen) {
+    if (listPanelOpen) toggleListPanel();
+    loadInbox();
+  }
+}
+
+async function loadInbox() {
+  try {
+    var resp = await fetch('/inbox?limit=100');
+    var data = await resp.json();
+    inboxItems = data.pending || [];
+    inboxSelected.clear();
+    renderInbox();
+    updateInboxBadge(data.total || 0);
+  } catch (e) { console.error('Failed to load inbox:', e); }
+}
+
+function updateInboxBadge(count) {
+  var badge = document.getElementById('inbox-badge');
+  var countEl = document.getElementById('inbox-count');
+  if (count > 0) {
+    badge.style.display = 'block';
+    badge.textContent = count > 99 ? '99+' : count;
+    countEl.textContent = count + ' pending';
+  } else {
+    badge.style.display = 'none';
+    countEl.textContent = '0 pending';
+  }
+}
+
+var inboxCatColors = {
+  task: { bg: 'rgba(129,140,248,0.12)', color: '#818cf8' },
+  state: { bg: 'rgba(52,211,153,0.12)', color: '#34d399' },
+  discovery: { bg: 'rgba(251,191,36,0.12)', color: '#fbbf24' },
+  decision: { bg: 'rgba(244,114,182,0.12)', color: '#f472b6' },
+  issue: { bg: 'rgba(248,113,113,0.12)', color: '#f87171' },
+  general: { bg: 'rgba(148,163,184,0.12)', color: '#94a3b8' },
+};
+
+function inboxEsc(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function inboxTimeAgo(dateStr) {
+  var d = new Date(dateStr + 'Z');
+  var diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 60) return Math.floor(diff) + 's ago';
+  if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+  return Math.floor(diff/86400) + 'd ago';
+}
+
+function renderInbox() {
+  var container = document.getElementById('inbox-list');
+  if (!inboxItems.length) {
+    container.innerHTML = '<div class="inbox-empty">' +
+      '<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>' +
+      '<p>Inbox empty</p><small>All memories have been reviewed</small></div>';
+    return;
+  }
+  var html = '';
+  for (var i = 0; i < inboxItems.length; i++) {
+    var m = inboxItems[i];
+    var cc = inboxCatColors[m.category] || inboxCatColors.general;
+    var checked = inboxSelected.has(m.id) ? ' checked' : '';
+    var sel = inboxSelected.has(m.id) ? ' selected' : '';
+    var tags = '';
+    if (m.tags && m.tags.length) {
+      tags = '<div style="margin-top:6px;display:flex;gap:4px;flex-wrap:wrap">';
+      for (var t = 0; t < m.tags.length && t < 5; t++) {
+        tags += '<span style="font-size:9px;padding:1px 6px;border-radius:4px;background:rgba(255,255,255,0.04);color:#555">' + inboxEsc(m.tags[t]) + '</span>';
+      }
+      tags += '</div>';
+    }
+    html += '<div class="inbox-card' + sel + '" data-id="' + m.id + '">' +
+      '<div class="inbox-card-header">' +
+        '<input type="checkbox" onchange="inboxToggleSelect(' + m.id + ')"' + checked + '>' +
+        '<span class="inbox-card-meta">#' + m.id + ' &middot; ' + inboxEsc(m.source || 'unknown') + ' &middot; ' + inboxTimeAgo(m.created_at) + '</span>' +
+        '<span class="inbox-card-cat" style="background:' + cc.bg + ';color:' + cc.color + '">' + inboxEsc(m.category) + '</span>' +
+      '</div>' +
+      '<div class="inbox-card-content" onclick="this.classList.toggle(&quot;expanded&quot;)">' + inboxEsc(m.content) + '</div>' +
+      tags +
+      '<div class="inbox-card-actions">' +
+        '<button class="inbox-btn approve" onclick="inboxApprove(' + m.id + ')">&#10003; Approve</button>' +
+        '<button class="inbox-btn edit" onclick="inboxEdit(' + m.id + ')">&#9998; Edit</button>' +
+        '<button class="inbox-btn reject" onclick="inboxReject(' + m.id + ')">&#10005; Reject</button>' +
+      '</div>' +
+    '</div>';
+  }
+  container.innerHTML = html;
+}
+
+function inboxToggleSelect(id) {
+  if (inboxSelected.has(id)) inboxSelected.delete(id);
+  else inboxSelected.add(id);
+  document.querySelectorAll('.inbox-card').forEach(function(c) {
+    var cid = Number(c.dataset.id);
+    c.classList.toggle('selected', inboxSelected.has(cid));
+    var cb = c.querySelector('input[type="checkbox"]');
+    if (cb) cb.checked = inboxSelected.has(cid);
+  });
+}
+
+function inboxSelectAll() {
+  var allSelected = inboxSelected.size === inboxItems.length;
+  inboxSelected.clear();
+  if (!allSelected) for (var i = 0; i < inboxItems.length; i++) inboxSelected.add(inboxItems[i].id);
+  renderInbox();
+}
+
+async function inboxApprove(id) {
+  try {
+    await fetch('/inbox/' + id + '/approve', { method: 'POST' });
+    inboxItems = inboxItems.filter(function(m) { return m.id !== id; });
+    inboxSelected.delete(id);
+    renderInbox();
+    updateInboxBadge(inboxItems.length);
+    inboxToast('Memory #' + id + ' approved', 'success');
+  } catch (e) { inboxToast('Approve failed: ' + e.message, 'error'); }
+}
+
+async function inboxReject(id) {
+  if (!confirm('Reject memory #' + id + '? It will be archived.')) return;
+  try {
+    await fetch('/inbox/' + id + '/reject', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: 'Rejected from inbox review' })
+    });
+    inboxItems = inboxItems.filter(function(m) { return m.id !== id; });
+    inboxSelected.delete(id);
+    renderInbox();
+    updateInboxBadge(inboxItems.length);
+    inboxToast('Memory #' + id + ' rejected', 'info');
+  } catch (e) { inboxToast('Reject failed: ' + e.message, 'error'); }
+}
+
+async function inboxEdit(id) {
+  var mem = inboxItems.find(function(m) { return m.id === id; });
+  if (!mem) return;
+  var newContent = prompt('Edit memory content:', mem.content);
+  if (newContent === null) return;
+  if (!newContent.trim()) { inboxToast('Content cannot be empty', 'error'); return; }
+  try {
+    await fetch('/inbox/' + id + '/edit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: newContent.trim() })
+    });
+    inboxItems = inboxItems.filter(function(m) { return m.id !== id; });
+    inboxSelected.delete(id);
+    renderInbox();
+    updateInboxBadge(inboxItems.length);
+    inboxToast('Memory #' + id + ' edited & approved', 'success');
+  } catch (e) { inboxToast('Edit failed: ' + e.message, 'error'); }
+}
+
+async function inboxBulkApprove() {
+  var ids = Array.from(inboxSelected);
+  if (!ids.length) { inboxToast('No memories selected', 'info'); return; }
+  try {
+    await fetch('/inbox/bulk', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: ids, action: 'approve' })
+    });
+    inboxItems = inboxItems.filter(function(m) { return !inboxSelected.has(m.id); });
+    inboxSelected.clear();
+    renderInbox();
+    updateInboxBadge(inboxItems.length);
+    inboxToast(ids.length + ' memories approved', 'success');
+  } catch (e) { inboxToast('Bulk approve failed: ' + e.message, 'error'); }
+}
+
+async function inboxBulkReject() {
+  var ids = Array.from(inboxSelected);
+  if (!ids.length) { inboxToast('No memories selected', 'info'); return; }
+  if (!confirm('Reject ' + ids.length + ' memories?')) return;
+  try {
+    await fetch('/inbox/bulk', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: ids, action: 'reject' })
+    });
+    inboxItems = inboxItems.filter(function(m) { return !inboxSelected.has(m.id); });
+    inboxSelected.clear();
+    renderInbox();
+    updateInboxBadge(inboxItems.length);
+    inboxToast(ids.length + ' memories rejected', 'info');
+  } catch (e) { inboxToast('Bulk reject failed: ' + e.message, 'error'); }
+}
+
+function inboxToast(msg, type) {
+  var toast = document.createElement('div');
+  var colors = { success: '#34d399', error: '#f87171', info: '#818cf8' };
+  var c = colors[type] || colors.info;
+  toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);padding:10px 20px;' +
+    'border-radius:10px;font-size:12px;font-family:Inter,sans-serif;z-index:9999;' +
+    'background:rgba(15,20,25,0.95);border:1px solid ' + c + '30;color:' + c + ';' +
+    'backdrop-filter:blur(20px);box-shadow:0 8px 32px rgba(0,0,0,0.4);transition:opacity 0.3s';
+  toast.textContent = msg;
+  document.body.appendChild(toast);
+  setTimeout(function() { toast.style.opacity = '0'; }, 2500);
+  setTimeout(function() { toast.remove(); }, 3000);
+}
+
+// Keyboard shortcut: I to toggle inbox
+document.addEventListener('keydown', function(e) {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.key === 'i' || e.key === 'I') { e.preventDefault(); toggleInboxPanel(); }
+});
+
+// Poll inbox count every 30 seconds
+setInterval(async function() {
+  try { var r = await fetch('/inbox?limit=1'); var d = await r.json(); updateInboxBadge(d.total||0); } catch(e){}
+}, 30000);
+
+// Initial inbox badge load
+(async function() {
+  try { var r = await fetch('/inbox?limit=1'); var d = await r.json(); updateInboxBadge(d.total||0); } catch(e){}
+})();
+// END INBOX
+
 </script>
 </body>
 </html>
