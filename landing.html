@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Engram — Open Source Persistent Memory for AI Agents</title>
 <meta name="description" content="Open source memory server for AI agents. FSRS-6 spaced repetition, native vector search, knowledge graph, local embeddings. Self-hosted, single libsql file, zero external dependencies.">
-<meta name="keywords" content="AI agent memory, persistent memory, spaced repetition, FSRS, vector search, knowledge graph, RAG, MCP server, open source, self-hosted, Bun, libsql, embeddings, LLM memory">
+<meta name="keywords" content="AI agent memory, persistent memory, spaced repetition, FSRS, vector search, knowledge graph, RAG, MCP server, open source, self-hosted, Node.js, TypeScript, libsql, embeddings, LLM memory">
 <meta name="author" content="zanfiel">
 <meta name="theme-color" content="#0a0e17">
 <link rel="canonical" href="https://engram.lol/">
@@ -154,7 +154,7 @@ nav .links a:hover{color:var(--text);text-decoration:none}
 
 <!-- Hero -->
 <section class="hero">
-  <div class="hero-badge"><span class="dot"></span> v5.2 · Open Source</div>
+  <div class="hero-badge"><span class="dot"></span> v5.4 · Open Source</div>
   <h1>Memory for<br><span>AI agents</span></h1>
   <p>Give your agents persistent, searchable, self-organizing memory. Store what they learn. Recall it when it matters. No external APIs required.</p>
   <div class="hero-actions">
@@ -178,43 +178,43 @@ nav .links a:hover{color:var(--text);text-decoration:none}
 
 <!-- Features -->
 
-<!-- What's New in v5.2 -->
+<!-- What's New in v5.4 -->
 <section style="background:var(--bg2);padding:4rem 2rem">
   <div class="container">
-    <div class="section-label" style="color:var(--green)">New in v5.2</div>
-    <h2 class="section-title">Hardened, auditable, observable</h2>
-    <p class="section-desc">Production-grade security and operational tooling.</p>
+    <div class="section-label" style="color:var(--green)">New in v5.4</div>
+    <h2 class="section-title">Node.js native. Hardened. Production-ready.</h2>
+    <p class="section-desc">Migrated from Bun to Node.js 22, with RBAC, CSP, and zero external runtime dependencies.</p>
 
     <div class="features" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
+      <div class="feature" style="border-color:rgba(52,211,153,0.12)">
+        <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">⚡</div>
+        <h3>Node.js 22 Runtime</h3>
+        <p>Migrated from Bun to Node.js with <code>--experimental-strip-types</code>. Run TypeScript natively — no transpiler, no bundler, no Bun-specific APIs. Just <code>node server.ts</code>.</p>
+      </div>
+      <div class="feature" style="border-color:rgba(129,140,248,0.12)">
+        <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">🛡️</div>
+        <h3>RBAC &amp; Roles</h3>
+        <p>API keys now carry <code>admin</code>, <code>writer</code>, or <code>reader</code> roles. Fine-grained access control for multi-agent deployments.</p>
+      </div>
       <div class="feature" style="border-color:rgba(248,113,113,0.12)">
         <div class="feature-icon" style="background:rgba(248,113,113,0.1);color:var(--red)">🔒</div>
         <h3>Security Hardening</h3>
-        <p>Auth required by default. Body &amp; content size limits. GUI auth rate limiting with lockout. Timing-safe password comparison. CORS origin pinning. IP allowlists. Security headers on every response.</p>
-      </div>
-      <div class="feature" style="border-color:rgba(129,140,248,0.12)">
-        <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">📋</div>
-        <h3>Audit Trail</h3>
-        <p>Every mutation logged — who, what, when. Paginated audit endpoint with category filtering. Never wonder what changed or why.</p>
+        <p>HSTS, Content-Security-Policy, SSRF protection on webhooks, per-IP rate limiting, timing-safe auth, CORS origin pinning. Auth required by default.</p>
       </div>
       <div class="feature" style="border-color:rgba(34,211,238,0.12)">
-        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">📊</div>
-        <h3>Structured Logging</h3>
-        <p>JSON logs with request IDs, configurable log levels, and clean formatting. Built for <code>jq</code> pipelines and log aggregation.</p>
+        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">📋</div>
+        <h3>Audit Trail &amp; Logging</h3>
+        <p>Every mutation logged — who, what, when. Structured JSON logs with request IDs. Configurable log levels. Built for <code>jq</code> and log aggregation.</p>
       </div>
-      <div class="feature" style="border-color:rgba(52,211,153,0.12)">
-        <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">📥</div>
+      <div class="feature" style="border-color:rgba(251,191,36,0.12)">
+        <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:#fbbf24">📥</div>
         <h3>Review Queue</h3>
         <p>Memories can land in an inbox for human review before going live. Approve, reject, or edit — individually or in bulk.</p>
       </div>
-      <div class="feature" style="border-color:rgba(251,191,36,0.12)">
-        <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:#fbbf24">💾</div>
+      <div class="feature" style="border-color:rgba(167,139,250,0.12)">
+        <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:#a78bfa">💾</div>
         <h3>Backup &amp; Checkpoint</h3>
         <p>API-triggered WAL checkpoints and full database downloads. Periodic auto-checkpoint. Graceful shutdown with data flush.</p>
-      </div>
-      <div class="feature" style="border-color:rgba(167,139,250,0.12)">
-        <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:#a78bfa">🔄</div>
-        <h3>GUI Hot-Reload</h3>
-        <p>Send SIGHUP or set <code>ENGRAM_HOT_RELOAD=1</code> — the GUI reloads from disk without restarting the server.</p>
       </div>
     </div>
   </div>
@@ -246,7 +246,7 @@ nav .links a:hover{color:var(--text);text-decoration:none}
       <div class="feature" style="border-color:rgba(34,211,238,0.12)">
         <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">🔍</div>
         <h3>Native Vector Search</h3>
-        <p style="margin-bottom:12px">Migrated from bun:sqlite to <strong style="color:var(--text)">libsql with FLOAT32(384) vector columns</strong> and ANN indexing. Search is O(log n) via <code>vector_top_k()</code> instead of brute-force loops.</p>
+        <p style="margin-bottom:12px">Built on <strong style="color:var(--text)">libsql with FLOAT32(384) vector columns</strong> and ANN indexing. Search is O(log n) via <code>vector_top_k()</code> instead of brute-force loops.</p>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <code style="font-size:11px;color:var(--cyan)">vector_top_k(idx, vec, 25)</code>
           <span style="font-size:11px;color:var(--muted)">ANN index</span>
