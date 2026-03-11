@@ -1,11 +1,17 @@
-import { Database } from "bun:sqlite";
-import { resolve } from "path";
+import Database from "libsql";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
+import { readFileSync, writeFileSync, statSync, mkdirSync, copyFileSync, existsSync } from "fs";
+import { readFile } from "fs/promises";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "crypto";
+import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
 
-const DATA_DIR = resolve(import.meta.dir, "data");
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DATA_DIR = resolve(__dirname, "data");
 const DB_PATH = resolve(DATA_DIR, "memory.db");
-const PORT = Number(process.env.ZANMEMORY_PORT || 4200);
-const HOST = process.env.ZANMEMORY_HOST || "0.0.0.0";
+const PORT = Number(process.env.ENGRAM_PORT || process.env.ZANMEMORY_PORT /* deprecated */ || 4200);
+const HOST = process.env.ENGRAM_HOST || process.env.ZANMEMORY_HOST /* deprecated */ || "0.0.0.0";
 
 // Embedding config
 const EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
@@ -22,10 +28,8 @@ const LLM_MODEL = process.env.LLM_MODEL || "claude-sonnet-4-20250514";
 // Auto-forget sweep interval (every 5 minutes)
 const FORGET_SWEEP_INTERVAL = 5 * 60 * 1000;
 
-// Decay configuration
-const DECAY_HALF_LIFE_DAYS = 30;   // importance halves every 30 days without access
-const DECAY_ACCESS_BOOST = 0.1;    // each access adds this much decay resistance
-const DECAY_MAX_BOOST = 2.0;       // cap on access-based boost
+// FSRS-6 configuration (replaces simple exponential decay)
+const FSRS_DEFAULT_RETENTION = 0.9; // target 90% recall probability
 const CONSOLIDATION_THRESHOLD = 8; // auto-consolidate clusters with 8+ related memories
 const CONSOLIDATION_INTERVAL = 30 * 60 * 1000; // check every 30 minutes
 
@@ -38,8 +42,37 @@ const API_KEY_PREFIX = "eg_";
 const DEFAULT_RATE_LIMIT = 120; // requests per minute
 const RATE_WINDOW_MS = 60_000;
 
+// Security config
+const OPEN_ACCESS = process.env.ENGRAM_OPEN_ACCESS === "1";
+const CORS_ORIGIN = process.env.ENGRAM_CORS_ORIGIN || "*";
+const MAX_BODY_SIZE = Number(process.env.ENGRAM_MAX_BODY_SIZE || 1_048_576); // 1MB default
+const MAX_CONTENT_SIZE = Number(process.env.ENGRAM_MAX_CONTENT_SIZE || 102_400); // 100KB per memory
+const ALLOWED_IPS = (process.env.ENGRAM_ALLOWED_IPS || "").split(",").map(s => s.trim()).filter(Boolean);
+const GUI_AUTH_MAX_ATTEMPTS = 5;
+const GUI_AUTH_WINDOW_MS = 60_000; // 1 minute
+const GUI_AUTH_LOCKOUT_MS = 600_000; // 10 min lockout after max attempts
+
+// Logging config
+const LOG_LEVEL_MAP: Record<string, number> = { debug: 0, info: 1, warn: 2, error: 3, none: 4 };
+const LOG_LEVEL = LOG_LEVEL_MAP[process.env.ENGRAM_LOG_LEVEL || "info"] ?? 1;
+
+// Structured logger
+const log = {
+  debug: (...args: any[]) => { if (LOG_LEVEL <= 0) console.log(JSON.stringify({ level: "debug", ts: new Date().toISOString(), ...logPayload(args) })); },
+  info: (...args: any[]) => { if (LOG_LEVEL <= 1) console.log(JSON.stringify({ level: "info", ts: new Date().toISOString(), ...logPayload(args) })); },
+  warn: (...args: any[]) => { if (LOG_LEVEL <= 2) console.warn(JSON.stringify({ level: "warn", ts: new Date().toISOString(), ...logPayload(args) })); },
+  error: (...args: any[]) => { if (LOG_LEVEL <= 3) console.error(JSON.stringify({ level: "error", ts: new Date().toISOString(), ...logPayload(args) })); },
+};
+function logPayload(args: any[]): Record<string, any> {
+  if (args.length === 1 && typeof args[0] === "object") return args[0];
+  return { msg: args.map(a => typeof a === "string" ? a : JSON.stringify(a)).join(" ") };
+}
+
+// GUI auth rate limiting state
+const guiAuthAttempts = new Map<string, { count: number; first: number; locked_until: number }>();
+
 // Ensure data directory exists
-await Bun.$`mkdir -p ${DATA_DIR}`;
+mkdirSync(DATA_DIR, { recursive: true });
 
 // ============================================================================
 // EMBEDDING MODEL
@@ -49,11 +82,11 @@ let embedder: FeatureExtractionPipeline | null = null;
 
 async function initEmbedder(): Promise<void> {
   const start = Date.now();
-  console.log("Loading embedding model...");
+  log.info({ msg: "loading_embedding_model", model: EMBEDDING_MODEL });
   embedder = await pipeline("feature-extraction", EMBEDDING_MODEL, {
     dtype: "fp32",
   }) as FeatureExtractionPipeline;
-  console.log(`Embedding model loaded in ${Date.now() - start}ms (${EMBEDDING_MODEL})`);
+  log.info({ msg: "embedding_model_loaded", model: EMBEDDING_MODEL, ms: Date.now() - start });
 }
 
 async function embed(text: string): Promise<Float32Array> {
@@ -68,13 +101,67 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   return dot;
 }
 
+// ============================================================================
+// IN-MEMORY EMBEDDING CACHE — eliminates cold-start DB reads on every search
+// At 800 memories * 1.5KB/embedding = ~1.2MB. Trivial vs the 5s DB cold-read.
+// ============================================================================
+interface CachedMem {
+  id: number; content: string; category: string; importance: number;
+  embedding: Float32Array; is_static: boolean; source_count: number;
+  is_latest?: boolean; is_forgotten?: boolean;
+}
+let embeddingCache: CachedMem[] = [];
+let embeddingCacheLatest: CachedMem[] = [];
+let embeddingCacheVersion = 0;
+let graphCache: { key: string; data: any; ts: number } | null = null;
+
+function refreshEmbeddingCache(): void {
+  const t0 = Date.now();
+  const allRows = getAllEmbeddings.all() as Array<any>;
+  embeddingCache = [];
+  embeddingCacheLatest = [];
+  for (const row of allRows) {
+    if (!row.embedding) continue;
+    const mem: CachedMem = {
+      id: row.id, content: row.content, category: row.category,
+      importance: row.importance, embedding: bufferToEmbedding(row.embedding),
+      is_static: !!row.is_static, source_count: row.source_count || 1,
+      is_latest: !!row.is_latest, is_forgotten: !!row.is_forgotten,
+    };
+    embeddingCache.push(mem);
+    if (row.is_latest && !row.is_forgotten) embeddingCacheLatest.push(mem);
+  }
+  embeddingCacheVersion++;
+  log.info({ msg: "embedding_cache_refreshed", total: embeddingCache.length, latest: embeddingCacheLatest.length, ms: Date.now() - t0 });
+}
+
+function getCachedEmbeddings(latestOnly: boolean): CachedMem[] {
+  return latestOnly ? embeddingCacheLatest : embeddingCache;
+}
+
+function addToEmbeddingCache(mem: CachedMem): void {
+  embeddingCache.push(mem);
+  if (mem.is_latest && !mem.is_forgotten) embeddingCacheLatest.push(mem);
+}
+
+function invalidateEmbeddingCache(): void {
+  // Full refresh from DB — called after bulk operations
+  refreshEmbeddingCache();
+}
+
 function embeddingToBuffer(emb: Float32Array): Buffer {
   return Buffer.from(emb.buffer, emb.byteOffset, emb.byteLength);
 }
 
-function bufferToEmbedding(buf: Buffer | Uint8Array): Float32Array {
+function bufferToEmbedding(buf: Buffer | Uint8Array | ArrayBuffer): Float32Array {
+  if (buf instanceof ArrayBuffer) return new Float32Array(buf);
   const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
   return new Float32Array(ab);
+}
+
+/** Convert Float32Array to JSON string for libsql vector() function */
+function embeddingToVectorJSON(emb: Float32Array): string {
+  return "[" + Array.from(emb).join(",") + "]";
 }
 
 // ============================================================================
@@ -138,7 +225,7 @@ Return format: [most_relevant_index, next_most_relevant, ...]`;
 // DATABASE
 // ============================================================================
 
-const db = new Database(DB_PATH, { create: true });
+const db = new Database(DB_PATH);
 db.exec("PRAGMA journal_mode=WAL");
 db.exec("PRAGMA foreign_keys=ON");
 db.exec("PRAGMA busy_timeout=5000");
@@ -197,6 +284,17 @@ db.exec(`
   END;
 `);
 
+// Migration helper - logs unexpected errors instead of swallowing them silently
+function migrate(sql: string) {
+  try {
+    db.exec(sql);
+  } catch (e: any) {
+    const msg = String(e);
+    if (msg.includes("duplicate column") || msg.includes("already exists")) return;
+    log.warn({ msg: "migration_error", sql: sql.slice(0, 120), error: msg });
+  }
+}
+
 // v2 -> v3 migrations (safe to re-run)
 const v3Columns: [string, string][] = [
   ["version", "INTEGER NOT NULL DEFAULT 1"],
@@ -212,20 +310,20 @@ const v3Columns: [string, string][] = [
   ["is_archived", "BOOLEAN NOT NULL DEFAULT 0"],
 ];
 for (const [col, def] of v3Columns) {
-  try { db.exec(`ALTER TABLE memories ADD COLUMN ${col} ${def}`); } catch {}
+  migrate(`ALTER TABLE memories ADD COLUMN ${col} ${def}`);
 }
-try { db.exec("ALTER TABLE memories ADD COLUMN importance INTEGER NOT NULL DEFAULT 5"); } catch {}
-try { db.exec("ALTER TABLE memories ADD COLUMN embedding BLOB"); } catch {}
+migrate("ALTER TABLE memories ADD COLUMN importance INTEGER NOT NULL DEFAULT 5");
+migrate("ALTER TABLE memories ADD COLUMN embedding BLOB");
 
 // v3.1 indexes
-try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_archived ON memories(is_archived) WHERE is_archived = 1"); } catch {}
+migrate("CREATE INDEX IF NOT EXISTS idx_memories_archived ON memories(is_archived) WHERE is_archived = 1");
 
 // v3 indexes
-try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_root ON memories(root_memory_id)"); } catch {}
-try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_parent ON memories(parent_memory_id)"); } catch {}
-try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_latest ON memories(is_latest) WHERE is_latest = 1"); } catch {}
-try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_forgotten ON memories(is_forgotten)"); } catch {}
-try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_forget_after ON memories(forget_after) WHERE forget_after IS NOT NULL"); } catch {}
+migrate("CREATE INDEX IF NOT EXISTS idx_memories_root ON memories(root_memory_id)");
+migrate("CREATE INDEX IF NOT EXISTS idx_memories_parent ON memories(parent_memory_id)");
+migrate("CREATE INDEX IF NOT EXISTS idx_memories_latest ON memories(is_latest) WHERE is_latest = 1");
+migrate("CREATE INDEX IF NOT EXISTS idx_memories_forgotten ON memories(is_forgotten)");
+migrate("CREATE INDEX IF NOT EXISTS idx_memories_forget_after ON memories(forget_after) WHERE forget_after IS NOT NULL");
 
 // v4.1 — Access tracking, tags, episodes
 const v41Columns: [string, string][] = [
@@ -236,16 +334,15 @@ const v41Columns: [string, string][] = [
   ["decay_score", "REAL"],  // cached effective score
 ];
 for (const [col, def] of v41Columns) {
-  try { db.exec(`ALTER TABLE memories ADD COLUMN ${col} ${def}`); } catch {}
+  migrate(`ALTER TABLE memories ADD COLUMN ${col} ${def}`);
 }
-try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_tags ON memories(tags) WHERE tags IS NOT NULL"); } catch {}
-try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_episode ON memories(episode_id) WHERE episode_id IS NOT NULL"); } catch {}
-try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_access ON memories(access_count DESC)"); } catch {}
-try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_decay ON memories(decay_score DESC)"); } catch {}
+migrate("CREATE INDEX IF NOT EXISTS idx_memories_tags ON memories(tags) WHERE tags IS NOT NULL");
+migrate("CREATE INDEX IF NOT EXISTS idx_memories_episode ON memories(episode_id) WHERE episode_id IS NOT NULL");
+migrate("CREATE INDEX IF NOT EXISTS idx_memories_access ON memories(access_count DESC)");
+migrate("CREATE INDEX IF NOT EXISTS idx_memories_decay ON memories(decay_score DESC)");
 
 // Episodes table
-try {
-  db.exec(`
+migrate(`
     CREATE TABLE IF NOT EXISTS episodes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       title TEXT,
@@ -262,11 +359,10 @@ try {
     CREATE INDEX IF NOT EXISTS idx_episodes_user ON episodes(user_id);
     CREATE INDEX IF NOT EXISTS idx_episodes_agent ON episodes(agent);
   `);
-} catch {}
+
 
 // Consolidation tracking
-try {
-  db.exec(`
+migrate(`
     CREATE TABLE IF NOT EXISTS consolidations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       summary_memory_id INTEGER NOT NULL REFERENCES memories(id),
@@ -275,7 +371,7 @@ try {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
-} catch {}
+
 
 // v4.2 — Confidence, sync, webhooks
 const v42Columns: [string, string][] = [
@@ -283,13 +379,36 @@ const v42Columns: [string, string][] = [
   ["sync_id", "TEXT"],  // UUID for cross-instance sync
 ];
 for (const [col, def] of v42Columns) {
-  try { db.exec(`ALTER TABLE memories ADD COLUMN ${col} ${def}`); } catch {}
+  migrate(`ALTER TABLE memories ADD COLUMN ${col} ${def}`);
 }
-try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_sync_id ON memories(sync_id) WHERE sync_id IS NOT NULL"); } catch {}
+migrate("CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_sync_id ON memories(sync_id) WHERE sync_id IS NOT NULL");
+
+// v5.1 — Review queue: status column (pending/approved/rejected)
+migrate("ALTER TABLE memories ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'");
+migrate("CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)");
+
+// v5.0 — FSRS-6 spaced repetition columns
+const v50Columns: [string, string][] = [
+  ["fsrs_stability", "REAL"],
+  ["fsrs_difficulty", "REAL"],
+  ["fsrs_storage_strength", "REAL DEFAULT 1.0"],
+  ["fsrs_retrieval_strength", "REAL DEFAULT 1.0"],
+  ["fsrs_learning_state", "INTEGER DEFAULT 0"],
+  ["fsrs_reps", "INTEGER DEFAULT 0"],
+  ["fsrs_lapses", "INTEGER DEFAULT 0"],
+  ["fsrs_last_review_at", "TEXT"],
+];
+for (const [col, def] of v50Columns) {
+  migrate(`ALTER TABLE memories ADD COLUMN ${col} ${def}`);
+}
+migrate("CREATE INDEX IF NOT EXISTS idx_memories_fsrs_stability ON memories(fsrs_stability) WHERE fsrs_stability IS NOT NULL");
+
+// v5.0 — Native vector column (libsql FLOAT32)
+migrate("ALTER TABLE memories ADD COLUMN embedding_vec FLOAT32(384)");
+migrate("CREATE INDEX IF NOT EXISTS memories_vec_idx ON memories(libsql_vector_idx(embedding_vec))");
 
 // Webhooks table
-try {
-  db.exec(`
+migrate(`
     CREATE TABLE IF NOT EXISTS webhooks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       url TEXT NOT NULL,
@@ -303,11 +422,35 @@ try {
     );
     CREATE INDEX IF NOT EXISTS idx_webhooks_user ON webhooks(user_id);
   `);
-} catch {}
+
+
+// Audit log table
+migrate(`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      action TEXT NOT NULL,
+      target_type TEXT,
+      target_id INTEGER,
+      details TEXT,
+      ip TEXT,
+      request_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+migrate("CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC)");
+migrate("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action)");
+migrate("CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_log(target_type, target_id)");
+
+const insertAudit = db.prepare(
+  "INSERT INTO audit_log (user_id, action, target_type, target_id, details, ip, request_id) VALUES (?, ?, ?, ?, ?, ?, ?)"
+);
+function audit(userId: number | null, action: string, targetType: string | null, targetId: number | null, details: string | null, ip: string | null, requestId: string | null) {
+  try { insertAudit.run(userId, action, targetType, targetId, details, ip, requestId); } catch (e: any) { log.warn({ msg: "audit_write_fail", action, error: String(e).slice(0, 200) }); }
+}
 
 // v4.3 — Entities, Projects
-try {
-  db.exec(`
+migrate(`
     CREATE TABLE IF NOT EXISTS entities (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -361,11 +504,10 @@ try {
     );
     CREATE INDEX IF NOT EXISTS idx_mp_project ON memory_projects(project_id);
   `);
-} catch {}
+
 
 // v4.5 — Digests, Reflections, Contradiction tracking
-try {
-  db.exec(`
+migrate(`
     CREATE TABLE IF NOT EXISTS digests (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL DEFAULT 1,
@@ -398,7 +540,7 @@ try {
     CREATE INDEX IF NOT EXISTS idx_reflections_user ON reflections(user_id);
     CREATE INDEX IF NOT EXISTS idx_reflections_period ON reflections(period_end DESC);
   `);
-} catch {}
+
 
 // ============================================================================
 // SCHEMA v4 — Multi-tenant: users, API keys, spaces
@@ -445,24 +587,24 @@ for (const [tbl, col, def] of [
   ["memories", "space_id", "INTEGER"],
   ["conversations", "user_id", "INTEGER NOT NULL DEFAULT 1"],
 ] as const) {
-  try { db.exec(`ALTER TABLE ${tbl} ADD COLUMN ${col} ${def}`); } catch {}
+  migrate(`ALTER TABLE ${tbl} ADD COLUMN ${col} ${def}`);
 }
-try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id)"); } catch {}
-try { db.exec("CREATE INDEX IF NOT EXISTS idx_memories_space ON memories(space_id)"); } catch {}
-try { db.exec("CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id)"); } catch {}
+migrate("CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id)");
+migrate("CREATE INDEX IF NOT EXISTS idx_memories_space ON memories(space_id)");
+migrate("CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id)");
 
 // Ensure default user exists (backwards compat — all existing data is user_id=1)
 const defaultUser = db.prepare("SELECT id FROM users WHERE id = 1").get();
 if (!defaultUser) {
   db.exec("INSERT INTO users (id, username, is_admin) VALUES (1, 'owner', 1)");
-  console.log("Created default owner user (id=1)");
+  log.info({ msg: "created_default_user", id: 1 });
 }
 
 // Ensure default space for owner
 const defaultSpace = db.prepare("SELECT id FROM spaces WHERE user_id = 1 AND name = 'default'").get();
 if (!defaultSpace) {
   db.exec("INSERT INTO spaces (user_id, name, description) VALUES (1, 'default', 'Default memory space')");
-  console.log("Created default space for owner");
+  log.info({ msg: "created_default_space" });
 }
 
 // ============================================================================
@@ -484,7 +626,7 @@ db.exec(`
 `);
 
 // v3 migration: add type column
-try { db.exec("ALTER TABLE memory_links ADD COLUMN type TEXT NOT NULL DEFAULT 'similarity'"); } catch {}
+migrate("ALTER TABLE memory_links ADD COLUMN type TEXT NOT NULL DEFAULT 'similarity'");
 
 // ============================================================================
 // CONVERSATIONS TABLE (unchanged from v2)
@@ -549,6 +691,16 @@ const updateMemoryEmbedding = db.prepare(
   `UPDATE memories SET embedding = ? WHERE id = ?`
 );
 
+const updateMemoryVec = db.prepare(
+  `UPDATE memories SET embedding_vec = vector(?) WHERE id = ?`
+);
+
+/** Write vector column for a newly inserted memory (call after insertMemory) */
+function writeVec(memoryId: number, embArray: Float32Array | null): void {
+  if (!embArray) return;
+  try { updateMemoryVec.run(embeddingToVectorJSON(embArray), memoryId); } catch {}
+}
+
 const getAllEmbeddings = db.prepare(
   `SELECT id, content, category, importance, embedding, is_latest, is_forgotten, is_static, source_count
    FROM memories WHERE embedding IS NOT NULL AND is_forgotten = 0`
@@ -556,7 +708,7 @@ const getAllEmbeddings = db.prepare(
 
 const getLatestEmbeddings = db.prepare(
   `SELECT id, content, category, importance, embedding, is_static, source_count
-   FROM memories WHERE embedding IS NOT NULL AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1`
+   FROM memories WHERE embedding IS NOT NULL AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND status = 'approved'`
 );
 
 const searchMemoriesFTS = db.prepare(
@@ -574,15 +726,15 @@ const searchMemoriesFTS = db.prepare(
 const listRecent = db.prepare(
   `SELECT id, content, category, source, session_id, importance, created_at,
      version, is_latest, parent_memory_id, root_memory_id, source_count,
-     is_static, is_forgotten, is_inference, forget_after, is_archived
-   FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND user_id = ? ORDER BY created_at DESC LIMIT ?`
+     is_static, is_forgotten, is_inference, forget_after, is_archived, status
+   FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND status != 'pending' AND user_id = ? ORDER BY created_at DESC LIMIT ?`
 );
 
 const listByCategory = db.prepare(
   `SELECT id, content, category, source, session_id, importance, created_at,
      version, is_latest, parent_memory_id, root_memory_id, source_count,
-     is_static, is_forgotten, is_inference, forget_after, is_archived
-   FROM memories WHERE category = ? AND is_forgotten = 0 AND is_archived = 0 AND user_id = ? ORDER BY created_at DESC LIMIT ?`
+     is_static, is_forgotten, is_inference, forget_after, is_archived, status
+   FROM memories WHERE category = ? AND is_forgotten = 0 AND is_archived = 0 AND status != 'pending' AND user_id = ? ORDER BY created_at DESC LIMIT ?`
 );
 
 const deleteMemory = db.prepare(`DELETE FROM memories WHERE id = ?`);
@@ -591,7 +743,7 @@ const getMemory = db.prepare(`SELECT * FROM memories WHERE id = ?`);
 const getMemoryWithoutEmbedding = db.prepare(
   `SELECT id, content, category, source, session_id, importance, created_at, updated_at,
      version, is_latest, parent_memory_id, root_memory_id, source_count,
-     is_static, is_forgotten, forget_after, forget_reason, is_inference, is_archived
+     is_static, is_forgotten, forget_after, forget_reason, is_inference, is_archived, status
    FROM memories WHERE id = ?`
 );
 
@@ -659,24 +811,74 @@ const getNoEmbedding = db.prepare(
 // Profile queries
 const getStaticMemories = db.prepare(
   `SELECT id, content, category, source_count, created_at, updated_at
-   FROM memories WHERE is_static = 1 AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?
+   FROM memories WHERE is_static = 1 AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND status = 'approved' AND user_id = ?
    ORDER BY source_count DESC, updated_at DESC`
 );
 
-// Access tracking
+// Access tracking + FSRS review processing
 const trackAccess = db.prepare(
   `UPDATE memories SET access_count = access_count + 1, last_accessed_at = datetime('now') WHERE id = ?`
 );
+const updateFSRS = db.prepare(
+  `UPDATE memories SET fsrs_stability = ?, fsrs_difficulty = ?, fsrs_storage_strength = ?,
+   fsrs_retrieval_strength = ?, fsrs_learning_state = ?, fsrs_reps = ?, fsrs_lapses = ?,
+   fsrs_last_review_at = ? WHERE id = ?`
+);
+const getFSRS = db.prepare(
+  `SELECT fsrs_stability, fsrs_difficulty, fsrs_storage_strength, fsrs_retrieval_strength,
+   fsrs_learning_state, fsrs_reps, fsrs_lapses, fsrs_last_review_at, last_accessed_at, created_at
+   FROM memories WHERE id = ?`
+);
+
+/** Track access AND process as FSRS review (Grade: Good=recall, Again=forget) */
+function trackAccessWithFSRS(memoryId: number, grade: FSRSRating = FSRSRating.Good): void {
+  trackAccess.run(memoryId);
+  const row = getFSRS.get(memoryId) as any;
+  if (!row) return;
+
+  const state: FSRSMemoryState | null = row.fsrs_stability != null ? {
+    stability: row.fsrs_stability, difficulty: row.fsrs_difficulty,
+    storage_strength: row.fsrs_storage_strength ?? 1, retrieval_strength: row.fsrs_retrieval_strength ?? 1,
+    learning_state: row.fsrs_learning_state ?? 0, reps: row.fsrs_reps ?? 0, lapses: row.fsrs_lapses ?? 0,
+    last_review_at: row.fsrs_last_review_at ?? row.created_at,
+  } : null;
+
+  const refTime = state?.last_review_at || row.last_accessed_at || row.created_at;
+  const elapsed = (Date.now() - new Date(refTime + "Z").getTime()) / 86400000;
+  const newState = fsrsProcessReview(state, grade, elapsed);
+
+  updateFSRS.run(
+    newState.stability, newState.difficulty, newState.storage_strength,
+    newState.retrieval_strength, newState.learning_state, newState.reps, newState.lapses,
+    newState.last_review_at, memoryId
+  );
+}
 
 // Tags
 const getByTag = db.prepare(
   `SELECT id, content, category, source, importance, created_at, tags, access_count, episode_id
-   FROM memories WHERE tags LIKE ? AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?
+   FROM memories WHERE tags LIKE ? ESCAPE '\\' AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?
    ORDER BY created_at DESC LIMIT ?`
 );
 
 const getAllTags = db.prepare(
   `SELECT DISTINCT tags FROM memories WHERE tags IS NOT NULL AND is_forgotten = 0 AND is_archived = 0 AND user_id = ?`
+);
+
+// Inbox / Review queue prepared statements
+const listPending = db.prepare(
+  `SELECT id, content, category, source, session_id, importance, created_at, tags, confidence, decay_score, status
+   FROM memories WHERE status = 'pending' AND is_forgotten = 0 AND user_id = ?
+   ORDER BY created_at DESC LIMIT ? OFFSET ?`
+);
+const countPending = db.prepare(
+  `SELECT COUNT(*) as count FROM memories WHERE status = 'pending' AND is_forgotten = 0 AND user_id = ?`
+);
+const approveMemory = db.prepare(
+  `UPDATE memories SET status = 'approved', updated_at = datetime('now') WHERE id = ? AND user_id = ?`
+);
+const rejectMemory = db.prepare(
+  `UPDATE memories SET status = 'rejected', is_archived = 1, updated_at = datetime('now') WHERE id = ? AND user_id = ?`
 );
 
 // Episodes
@@ -920,13 +1122,24 @@ const touchConversation = db.prepare(
   `UPDATE conversations SET updated_at = datetime('now') WHERE id = ?`
 );
 
+// Transaction-safe inserts (no RETURNING — avoids libsql "statements in progress" bug)
+const insertConversationTx = db.prepare(
+  `INSERT INTO conversations (agent, session_id, title, metadata) VALUES (?, ?, ?, ?)`
+);
+const insertMessageTx = db.prepare(
+  `INSERT INTO messages (conversation_id, role, content, metadata) VALUES (?, ?, ?, ?)`
+);
+const getLastRowId = db.prepare(`SELECT last_insert_rowid() as id`);
+
 const bulkInsertConvo = db.transaction(
   (agent: string, sessionId: string | null, title: string | null, metadata: string | null,
    msgs: Array<{ role: string; content: string; metadata?: string | null }>) => {
-    const conv = insertConversation.get(agent, sessionId, title, metadata) as { id: number; started_at: string };
+    insertConversationTx.run(agent, sessionId, title, metadata);
+    const { id } = getLastRowId.get() as { id: number };
     for (const msg of msgs) {
-      insertMessage.run(conv.id, msg.role, msg.content, msg.metadata || null);
+      insertMessageTx.run(id, msg.role, msg.content, msg.metadata || null);
     }
+    const conv = getConversation.get(id) as { id: number; started_at: string };
     return conv;
   }
 );
@@ -1048,7 +1261,7 @@ async function extractFacts(
     const result = JSON.parse(jsonStr) as FactExtractionResult;
     return result;
   } catch (e: any) {
-    console.error("Fact extraction failed:", e.message);
+    log.error({ msg: "fact_extraction_failed", error: e.message });
     return null;
   }
 }
@@ -1070,7 +1283,7 @@ function processExtractionResult(
       incrementSourceCount.run(rel.existing_memory_id);
       markSuperseded.run(newMemoryId);
       insertLink.run(newMemoryId, rel.existing_memory_id, 1.0, "derives");
-      console.log(`Memory #${newMemoryId} is duplicate of #${rel.existing_memory_id}, incremented source_count`);
+      log.debug({ msg: "duplicate_detected", new_id: newMemoryId, existing_id: rel.existing_memory_id });
       return;
     }
   }
@@ -1087,31 +1300,31 @@ function processExtractionResult(
       ).run(newVersion, rootId, existing.id, newMemoryId);
       insertLink.run(newMemoryId, rel.existing_memory_id, 1.0, "updates");
       propagateConfidence(newMemoryId, "updates", rel.existing_memory_id);
-      console.log(`Memory #${newMemoryId} updates #${rel.existing_memory_id} (v${newVersion}, root=#${rootId})`);
+      log.debug({ msg: "memory_updated", new_id: newMemoryId, existing_id: rel.existing_memory_id, version: newVersion, root: rootId });
     }
   }
 
   if (rel.type === "extends" && rel.existing_memory_id) {
     insertLink.run(newMemoryId, rel.existing_memory_id, 0.9, "extends");
     propagateConfidence(newMemoryId, "extends", rel.existing_memory_id);
-    console.log(`Memory #${newMemoryId} extends #${rel.existing_memory_id}`);
+    log.debug({ msg: "memory_extends", new_id: newMemoryId, existing_id: rel.existing_memory_id });
   }
 
   if (rel.type === "contradicts" && rel.existing_memory_id) {
     insertLink.run(newMemoryId, rel.existing_memory_id, 0.85, "contradicts");
     insertLink.run(rel.existing_memory_id, newMemoryId, 0.85, "contradicts");
     propagateConfidence(newMemoryId, "contradicts", rel.existing_memory_id);
-    console.log(`Memory #${newMemoryId} contradicts #${rel.existing_memory_id}`);
+    log.info({ msg: "memory_contradicts", new_id: newMemoryId, existing_id: rel.existing_memory_id });
   }
 
   if (rel.type === "caused_by" && rel.existing_memory_id) {
     insertLink.run(newMemoryId, rel.existing_memory_id, 0.8, "caused_by");
-    console.log(`Memory #${newMemoryId} caused by #${rel.existing_memory_id}`);
+    log.debug({ msg: "memory_caused_by", new_id: newMemoryId, cause: rel.existing_memory_id });
   }
 
   if (rel.type === "prerequisite_for" && rel.existing_memory_id) {
     insertLink.run(rel.existing_memory_id, newMemoryId, 0.8, "prerequisite_for");
-    console.log(`Memory #${rel.existing_memory_id} is prerequisite for #${newMemoryId}`);
+    log.debug({ msg: "memory_prerequisite", prerequisite: rel.existing_memory_id, for_id: newMemoryId });
   }
 
   // Apply fact classifications to the memory
@@ -1140,14 +1353,221 @@ function processExtractionResult(
       if (mem?.tags) try { existing = JSON.parse(mem.tags); } catch {}
       const merged = [...new Set([...existing, ...inferred])];
       db.prepare("UPDATE memories SET tags = ? WHERE id = ?").run(JSON.stringify(merged), newMemoryId);
-      console.log(`Auto-tagged memory #${newMemoryId}: [${merged.join(", ")}]`);
+      log.debug({ msg: "auto_tagged", id: newMemoryId, tags: merged });
     }
   }
 }
 
 // ============================================================================
-// DECAY SCORING — Time-weighted importance with access reinforcement
+// FSRS-6 — Free Spaced Repetition Scheduler (ported from Vestige/Rust)
+// Power-law forgetting curve, 20-30% more efficient than SM-2/exponential
+// Reference: https://github.com/open-spaced-repetition/fsrs4anki
 // ============================================================================
+
+// 21 default weights trained on millions of Anki reviews
+const FSRS6_WEIGHTS: number[] = [
+  0.212,   // w0:  Initial stability for Again
+  1.2931,  // w1:  Initial stability for Hard
+  2.3065,  // w2:  Initial stability for Good
+  8.2956,  // w3:  Initial stability for Easy
+  6.4133,  // w4:  Initial difficulty base
+  0.8334,  // w5:  Initial difficulty grade modifier
+  3.0194,  // w6:  Difficulty delta
+  0.001,   // w7:  Difficulty mean reversion
+  1.8722,  // w8:  Stability increase base
+  0.1666,  // w9:  Stability saturation
+  0.796,   // w10: Retrievability influence on stability
+  1.4835,  // w11: Forget stability base
+  0.0614,  // w12: Forget difficulty influence
+  0.2629,  // w13: Forget stability influence
+  1.6483,  // w14: Forget retrievability influence
+  0.6014,  // w15: Hard penalty
+  1.8729,  // w16: Easy bonus
+  0.5425,  // w17: Same-day review base (FSRS-6)
+  0.0912,  // w18: Same-day review grade modifier (FSRS-6)
+  0.0658,  // w19: Same-day review stability influence (FSRS-6)
+  0.1542,  // w20: Forgetting curve decay (FSRS-6, personalizable)
+];
+
+const FSRS_MIN_STABILITY = 0.1;
+const FSRS_MAX_STABILITY = 36500; // 100 years
+const FSRS_MIN_DIFFICULTY = 1.0;
+const FSRS_MAX_DIFFICULTY = 10.0;
+const FSRS_MAX_STORAGE = 10.0;
+
+const FSRSRating = { Again: 1, Hard: 2, Good: 3, Easy: 4 } as const;
+const FSRSState = { New: 0, Learning: 1, Review: 2, Relearning: 3 } as const;
+
+/** Forgetting factor: 0.9^(-1/w20) - 1 */
+function fsrsForgettingFactor(w20: number = FSRS6_WEIGHTS[20]): number {
+  return Math.pow(0.9, -1.0 / w20) - 1.0;
+}
+
+/**
+ * FSRS-6 Retrievability — probability of recall at time t
+ * R = (1 + factor * t / S)^(-w20)  — power law, more accurate than exponential
+ */
+function fsrsRetrievability(stability: number, elapsedDays: number, w20: number = FSRS6_WEIGHTS[20]): number {
+  if (stability <= 0) return 0;
+  if (elapsedDays <= 0) return 1;
+  const factor = fsrsForgettingFactor(w20);
+  return Math.max(0, Math.min(1, Math.pow(1 + factor * elapsedDays / stability, -w20)));
+}
+
+/** Initial difficulty: D0(G) = w4 - e^(w5*(G-1)) + 1 */
+function fsrsInitialDifficulty(grade: FSRSRating): number {
+  const d = FSRS6_WEIGHTS[4] - Math.exp(FSRS6_WEIGHTS[5] * (grade - 1)) + 1;
+  return Math.max(FSRS_MIN_DIFFICULTY, Math.min(FSRS_MAX_DIFFICULTY, d));
+}
+
+/** Initial stability: S0(G) = w[G-1] */
+function fsrsInitialStability(grade: FSRSRating): number {
+  return Math.max(FSRS_MIN_STABILITY, FSRS6_WEIGHTS[grade - 1]);
+}
+
+/** Next difficulty with mean reversion: D' = w7*D0(4) + (1-w7)*(D + delta*((10-D)/9)) */
+function fsrsNextDifficulty(currentD: number, grade: FSRSRating): number {
+  const d0 = fsrsInitialDifficulty(FSRSRating.Easy);
+  const delta = -FSRS6_WEIGHTS[6] * (grade - 3);
+  const meanReversionScale = (10 - currentD) / 9;
+  const newD = currentD + delta * meanReversionScale;
+  const finalD = FSRS6_WEIGHTS[7] * d0 + (1 - FSRS6_WEIGHTS[7]) * newD;
+  return Math.max(FSRS_MIN_DIFFICULTY, Math.min(FSRS_MAX_DIFFICULTY, finalD));
+}
+
+/** Stability after successful recall: S' = S * (e^w8 * (11-D) * S^(-w9) * (e^(w10*(1-R)) - 1) * HP * EB + 1) */
+function fsrsRecallStability(S: number, D: number, R: number, grade: FSRSRating): number {
+  if (grade === FSRSRating.Again) return fsrsForgetStability(D, S, R);
+  const hardPenalty = grade === FSRSRating.Hard ? FSRS6_WEIGHTS[15] : 1;
+  const easyBonus = grade === FSRSRating.Easy ? FSRS6_WEIGHTS[16] : 1;
+  const factor = Math.exp(FSRS6_WEIGHTS[8]) * (11 - D)
+    * Math.pow(S, -FSRS6_WEIGHTS[9])
+    * (Math.exp(FSRS6_WEIGHTS[10] * (1 - R)) - 1)
+    * hardPenalty * easyBonus + 1;
+  return Math.max(FSRS_MIN_STABILITY, Math.min(FSRS_MAX_STABILITY, S * factor));
+}
+
+/** Stability after lapse: S'f = w11 * D^(-w12) * ((S+1)^w13 - 1) * e^(w14*(1-R)) */
+function fsrsForgetStability(D: number, S: number, R: number): number {
+  const newS = FSRS6_WEIGHTS[11] * Math.pow(D, -FSRS6_WEIGHTS[12])
+    * (Math.pow(S + 1, FSRS6_WEIGHTS[13]) - 1)
+    * Math.exp(FSRS6_WEIGHTS[14] * (1 - R));
+  return Math.max(FSRS_MIN_STABILITY, Math.min(Math.min(newS, S), FSRS_MAX_STABILITY));
+}
+
+/** Same-day review stability (FSRS-6): S'(S,G) = S * e^(w17*(G-3+w18)) * S^(-w19) */
+function fsrsSameDayStability(S: number, grade: FSRSRating): number {
+  const newS = S * Math.exp(FSRS6_WEIGHTS[17] * (grade - 3 + FSRS6_WEIGHTS[18]))
+    * Math.pow(S, -FSRS6_WEIGHTS[19]);
+  return Math.max(FSRS_MIN_STABILITY, Math.min(FSRS_MAX_STABILITY, newS));
+}
+
+/** Optimal review interval: t = S/factor * (R^(-1/w20) - 1) */
+function fsrsNextInterval(stability: number, desiredR: number = FSRS_DEFAULT_RETENTION): number {
+  if (stability <= 0 || desiredR >= 1 || desiredR <= 0) return 0;
+  const factor = fsrsForgettingFactor();
+  return Math.max(0, Math.round(stability / factor * (Math.pow(desiredR, -1 / FSRS6_WEIGHTS[20]) - 1)));
+}
+
+// --- Dual-Strength Model (Bjork & Bjork 1992) ---
+
+interface DualStrength { storage: number; retrieval: number; }
+
+function dualStrengthRetention(ds: DualStrength): number {
+  return (ds.retrieval * 0.7) + ((ds.storage / FSRS_MAX_STORAGE) * 0.3);
+}
+
+function dualStrengthOnRecall(ds: DualStrength): DualStrength {
+  return { storage: Math.min(ds.storage + 0.1, FSRS_MAX_STORAGE), retrieval: 1.0 };
+}
+
+function dualStrengthOnLapse(ds: DualStrength): DualStrength {
+  return { storage: Math.min(ds.storage + 0.3, FSRS_MAX_STORAGE), retrieval: 1.0 };
+}
+
+function dualStrengthDecay(ds: DualStrength, elapsedDays: number, stability: number): DualStrength {
+  if (elapsedDays <= 0 || stability <= 0) return ds;
+  const retrieval = Math.max(0, Math.min(1,
+    Math.pow(1 + elapsedDays / (9.0 * stability), -1.0 / 0.5)
+  ));
+  return { storage: ds.storage, retrieval };
+}
+
+// --- Review processor: maps memory access events to FSRS state updates ---
+
+interface FSRSMemoryState {
+  stability: number;
+  difficulty: number;
+  storage_strength: number;
+  retrieval_strength: number;
+  learning_state: number; // FSRSState enum
+  reps: number;
+  lapses: number;
+  last_review_at: string;
+}
+
+function fsrsProcessReview(
+  state: FSRSMemoryState | null,
+  grade: FSRSRating,
+  elapsedDays: number
+): FSRSMemoryState {
+  const now = new Date().toISOString().replace("T", " ").slice(0, 19);
+
+  // First review (new memory)
+  if (!state || state.learning_state === FSRSState.New) {
+    const d = fsrsInitialDifficulty(grade);
+    const s = fsrsInitialStability(grade);
+    return {
+      stability: s, difficulty: d,
+      storage_strength: 1.0, retrieval_strength: 1.0,
+      learning_state: grade <= FSRSRating.Hard ? FSRSState.Learning : FSRSState.Review,
+      reps: 1, lapses: grade === FSRSRating.Again ? 1 : 0,
+      last_review_at: now,
+    };
+  }
+
+  const R = fsrsRetrievability(state.stability, elapsedDays);
+  const isSameDay = elapsedDays < 1;
+  let ds: DualStrength = { storage: state.storage_strength, retrieval: state.retrieval_strength };
+
+  let newS: number, newD: number, newState: number, newLapses: number;
+
+  if (isSameDay) {
+    // Same-day review — FSRS-6 special handling
+    newS = fsrsSameDayStability(state.stability, grade);
+    newD = fsrsNextDifficulty(state.difficulty, grade);
+    newState = state.learning_state;
+    newLapses = state.lapses;
+    ds = dualStrengthOnRecall(ds);
+  } else if (grade === FSRSRating.Again) {
+    // Lapse — forgot it
+    newS = fsrsForgetStability(state.difficulty, state.stability, R);
+    newD = fsrsNextDifficulty(state.difficulty, FSRSRating.Again);
+    newState = FSRSState.Relearning;
+    newLapses = state.lapses + 1;
+    ds = dualStrengthOnLapse(ds);
+  } else {
+    // Successful recall
+    newS = fsrsRecallStability(state.stability, state.difficulty, R, grade);
+    newD = fsrsNextDifficulty(state.difficulty, grade);
+    newState = FSRSState.Review;
+    newLapses = state.lapses;
+    ds = dualStrengthOnRecall(ds);
+  }
+
+  return {
+    stability: Math.round(newS * 1000) / 1000,
+    difficulty: Math.round(newD * 1000) / 1000,
+    storage_strength: Math.round(ds.storage * 1000) / 1000,
+    retrieval_strength: Math.round(ds.retrieval * 1000) / 1000,
+    learning_state: newState,
+    reps: state.reps + 1,
+    lapses: newLapses,
+    last_review_at: now,
+  };
+}
+
+// --- Backward-compatible decay score using FSRS retrievability ---
 
 function calculateDecayScore(
   importance: number,
@@ -1155,41 +1575,31 @@ function calculateDecayScore(
   accessCount: number = 0,
   lastAccessedAt: string | null = null,
   isStatic: boolean = false,
-  sourceCount: number = 1
+  sourceCount: number = 1,
+  stability?: number
 ): number {
-  // Static memories don't decay
   if (isStatic) return importance;
 
   const now = Date.now();
-  const created = new Date(createdAt + "Z").getTime();
-  const daysSinceCreation = (now - created) / (1000 * 60 * 60 * 24);
+  // Use last_accessed_at if available, otherwise created_at
+  const refTime = lastAccessedAt
+    ? new Date(lastAccessedAt + "Z").getTime()
+    : new Date(createdAt + "Z").getTime();
+  const elapsedDays = (now - refTime) / (1000 * 60 * 60 * 24);
 
-  // Access boost: each access slows decay, capped at DECAY_MAX_BOOST
-  const accessBoost = Math.min(accessCount * DECAY_ACCESS_BOOST, DECAY_MAX_BOOST);
+  // Use FSRS stability if available, otherwise estimate from access patterns
+  const effectiveStability = stability && stability > 0
+    ? stability
+    : fsrsInitialStability(FSRSRating.Good) * (1 + Math.min(accessCount * 0.3, 3) + Math.min((sourceCount - 1) * 0.2, 1));
 
-  // Source count boost: confirmed memories decay slower
-  const sourceBoost = Math.min((sourceCount - 1) * 0.05, 0.5);
-
-  // Recency of last access matters — recently accessed memories decay slower
-  let accessRecencyBoost = 0;
-  if (lastAccessedAt) {
-    const lastAccess = new Date(lastAccessedAt + "Z").getTime();
-    const daysSinceAccess = (now - lastAccess) / (1000 * 60 * 60 * 24);
-    accessRecencyBoost = Math.max(0, 1 - (daysSinceAccess / DECAY_HALF_LIFE_DAYS)) * 0.5;
-  }
-
-  // Effective half-life increases with access
-  const effectiveHalfLife = DECAY_HALF_LIFE_DAYS * (1 + accessBoost + sourceBoost + accessRecencyBoost);
-
-  // Exponential decay
-  const decayFactor = Math.pow(0.5, daysSinceCreation / effectiveHalfLife);
-
-  return importance * decayFactor;
+  // FSRS-6 power-law retrievability instead of exponential decay
+  const R = fsrsRetrievability(effectiveStability, elapsedDays);
+  return importance * R;
 }
 
 function updateDecayScores(): number {
   const memories = db.prepare(
-    `SELECT id, importance, created_at, access_count, last_accessed_at, is_static, source_count
+    `SELECT id, importance, created_at, access_count, last_accessed_at, is_static, source_count, fsrs_stability
      FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1`
   ).all() as Array<any>;
 
@@ -1200,7 +1610,7 @@ function updateDecayScores(): number {
     for (const m of memories) {
       const score = calculateDecayScore(
         m.importance, m.created_at, m.access_count, m.last_accessed_at,
-        !!m.is_static, m.source_count
+        !!m.is_static, m.source_count, m.fsrs_stability
       );
       updateDecay.run(Math.round(score * 1000) / 1000, m.id);
       updated++;
@@ -1286,11 +1696,12 @@ async function consolidateCluster(
        VALUES (?, ?, ?)`
     ).run(summaryMem.id, JSON.stringify(members.map(m => m.id)), result.title);
 
+    writeVec(summaryMem.id, embArray);
     await autoLink(summaryMem.id, embArray);
-    console.log(`Consolidated ${archived} memories into #${summaryMem.id}: "${result.title}"`);
+    log.info({ msg: "consolidated", archived, summary_id: summaryMem.id, title: result.title });
     return { summaryId: summaryMem.id, archivedCount: archived };
   } catch (e: any) {
-    console.error(`Consolidation failed for cluster around #${centerMemoryId}:`, e.message);
+    log.error({ msg: "consolidation_failed", center_id: centerMemoryId, error: e.message });
     return null;
   }
 }
@@ -1326,7 +1737,7 @@ async function emitWebhookEvent(
       const body = JSON.stringify({ event, timestamp: new Date().toISOString(), data: payload });
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (hook.secret) {
-        const hmac = new Bun.CryptoHasher("sha256", hook.secret).update(body).digest("hex");
+        const hmac = createHmac("sha256", hook.secret).update(body).digest("hex");
         headers["X-Engram-Signature"] = `sha256=${hmac}`;
       }
 
@@ -1410,33 +1821,23 @@ async function hybridSearch(
 ): Promise<SearchResult[]> {
   const results = new Map<number, SearchResult>();
 
-  // 1. Vector search
+  // 1. Vector search — in-memory cosine similarity (<1ms for 800 memories)
   try {
     const queryEmb = await embed(query);
-    const allMems = (latestOnly ? getLatestEmbeddings : getAllEmbeddings).all() as Array<{
-      id: number; content: string; category: string; importance: number; embedding: Buffer;
-      is_latest?: boolean; is_forgotten?: boolean; is_static?: boolean; source_count?: number;
-    }>;
-
-    for (const mem of allMems) {
-      if (!mem.embedding) continue;
-      const memEmb = bufferToEmbedding(mem.embedding);
-      const sim = cosineSimilarity(queryEmb, memEmb);
+    const cached = getCachedEmbeddings(latestOnly);
+    for (const mem of cached) {
+      const sim = cosineSimilarity(queryEmb, mem.embedding);
       if (sim > 0.25) {
         results.set(mem.id, {
-          id: mem.id,
-          content: mem.content,
-          category: mem.category,
-          importance: mem.importance,
-          created_at: "",
-          score: sim * 0.55,
-          is_static: !!mem.is_static,
+          id: mem.id, content: mem.content, category: mem.category,
+          importance: mem.importance, created_at: "",
+          score: sim * 0.55, is_static: !!mem.is_static,
           source_count: mem.source_count || 1,
         });
       }
     }
   } catch (e: any) {
-    console.error("Vector search failed:", e.message);
+    log.error({ msg: "vector_search_failed", error: e.message });
   }
 
   // 2. FTS5 keyword search
@@ -1594,19 +1995,13 @@ async function hybridSearch(
 // ============================================================================
 
 async function autoLink(memoryId: number, embedding: Float32Array): Promise<number> {
-  const allMems = getLatestEmbeddings.all() as Array<{
-    id: number; content: string; category: string; importance: number; embedding: Buffer;
-  }>;
-
+  // In-memory cosine scan — <1ms for 800 memories
   const similarities: Array<{ id: number; similarity: number }> = [];
-
-  for (const mem of allMems) {
-    if (mem.id === memoryId || !mem.embedding) continue;
-    const memEmb = bufferToEmbedding(mem.embedding);
-    const sim = cosineSimilarity(embedding, memEmb);
-    if (sim >= AUTO_LINK_THRESHOLD) {
-      similarities.push({ id: mem.id, similarity: sim });
-    }
+  const cached = getCachedEmbeddings(true);
+  for (const mem of cached) {
+    if (mem.id === memoryId) continue;
+    const sim = cosineSimilarity(embedding, mem.embedding);
+    if (sim >= AUTO_LINK_THRESHOLD) similarities.push({ id: mem.id, similarity: sim });
   }
 
   similarities.sort((a, b) => b.similarity - a.similarity);
@@ -1630,7 +2025,7 @@ function sweepExpiredMemories(): number {
   const expired = getExpiredMemories.all() as Array<{ id: number; content: string; forget_reason: string }>;
   for (const mem of expired) {
     markForgotten.run(mem.id);
-    console.log(`Auto-forgot memory #${mem.id}: ${mem.forget_reason || "expired"}`);
+    log.debug({ msg: "auto_forgot", id: mem.id, reason: mem.forget_reason || "expired" });
   }
   return expired.length;
 }
@@ -1680,7 +2075,7 @@ async function generateProfile(userId: number = 1, generateSummary: boolean = fa
       );
       profile.summary = summary.trim();
     } catch (e: any) {
-      console.error("Profile summary generation failed:", e.message);
+      log.error({ msg: "profile_summary_failed", error: e.message });
     }
   }
 
@@ -1698,10 +2093,10 @@ async function backfillEmbeddings(batchSize: number = 50): Promise<number> {
   for (const mem of missing) {
     try {
       const emb = await embed(mem.content);
-      updateMemoryEmbedding.run(embeddingToBuffer(emb), mem.id);
+      updateMemoryEmbedding.run(embeddingToBuffer(emb), mem.id); try { updateMemoryVec.run(embeddingToVectorJSON(emb), mem.id); } catch {}
       count++;
     } catch (e: any) {
-      console.error(`Failed to embed memory #${mem.id}: ${e.message}`);
+      log.error({ msg: "embed_failed", id: mem.id, error: e.message });
     }
   }
 
@@ -1722,20 +2117,28 @@ async function backfillEmbeddings(batchSize: number = 50): Promise<number> {
 // HELPERS
 // ============================================================================
 
-function json(data: unknown, status = 200) {
+function securityHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  return {
+    "Access-Control-Allow-Origin": CORS_ORIGIN,
+    "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Space, X-Engram-Space, X-Request-Id",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "X-XSS-Protection": "0",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    ...extra,
+  };
+}
+
+function json(data: unknown, status = 200, extra: Record<string, string> = {}) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    },
+    headers: securityHeaders({ "Content-Type": "application/json", ...extra }),
   });
 }
 
-function errorResponse(message: string, status = 400) {
-  return json({ error: message }, status);
+function errorResponse(message: string, status = 400, requestId?: string) {
+  return json({ error: message, ...(requestId ? { request_id: requestId } : {}) }, status);
 }
 
 function sanitizeFTS(query: string): string {
@@ -1759,15 +2162,21 @@ interface AuthContext {
   is_admin: boolean;
 }
 
+// Auth error signals (rate limit, bad space, etc.) - never silently fall through to getAuthOrDefault
+interface AuthError { error: string; status: number; headers?: Record<string, string> }
+function isAuthError(r: AuthContext | AuthError | null): r is AuthError {
+  return r !== null && typeof r === "object" && "error" in r;
+}
+
 const rateLimitMap = new Map<number, { count: number; reset: number }>();
 
-function authenticate(req: Request): AuthContext | null {
+function authenticate(req: Request): AuthContext | AuthError | null {
   const authHeader = req.headers.get("Authorization");
   if (!authHeader || !authHeader.startsWith("Bearer eg_")) return null;
 
   const key = authHeader.slice(7); // strip "Bearer "
   const prefix = key.slice(0, 11); // "eg_" + 8 chars
-  const hash = new Bun.CryptoHasher("sha256").update(key).digest("hex");
+  const hash = createHash("sha256").update(key).digest("hex");
 
   const row = db.prepare(
     `SELECT ak.id, ak.user_id, ak.scopes, ak.rate_limit, u.is_admin
@@ -1788,14 +2197,15 @@ function authenticate(req: Request): AuthContext | null {
     rateLimitMap.set(row.id, rl);
   }
   rl.count++;
-  if (rl.count > row.rate_limit) return null; // rate limited
+  if (rl.count > row.rate_limit) return { error: "Rate limit exceeded", status: 429, headers: { "Retry-After": String(Math.ceil((rl.reset - now) / 1000)) } };
 
   // Determine space — only filter by space if explicitly requested
   let space_id: number | null = null;
   const spaceHeader = req.headers.get("X-Space") || req.headers.get("X-Engram-Space");
   if (spaceHeader) {
     const space = db.prepare("SELECT id FROM spaces WHERE user_id = ? AND name = ?").get(row.user_id, spaceHeader) as any;
-    if (space) space_id = space.id;
+    if (!space) return { error: `Space '${spaceHeader}' not found`, status: 400 };
+    space_id = space.id;
   }
 
   return {
@@ -1807,11 +2217,14 @@ function authenticate(req: Request): AuthContext | null {
   };
 }
 
-function getAuthOrDefault(req: Request): AuthContext {
+function getAuthOrDefault(req: Request): AuthContext | AuthError | null {
   const auth = authenticate(req);
+  if (isAuthError(auth)) return auth; // propagate rate limit, bad space, etc. — never fall through to OPEN_ACCESS
   if (auth) return auth;
-  // Default to owner user (backwards compat for unauthenticated access)
-  return { user_id: 1, space_id: null, key_id: null, scopes: ["read", "write", "admin"], is_admin: true };
+  if (OPEN_ACCESS) {
+    return { user_id: 1, space_id: null, key_id: null, scopes: ["read", "write", "admin"], is_admin: true };
+  }
+  return null;
 }
 
 function hasScope(auth: AuthContext, scope: string): boolean {
@@ -1823,7 +2236,7 @@ function generateApiKey(): { key: string; prefix: string; hash: string } {
   const raw = Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
   const key = `eg_${raw}`;
   const prefix = key.slice(0, 11);
-  const hash = new Bun.CryptoHasher("sha256").update(key).digest("hex");
+  const hash = createHash("sha256").update(key).digest("hex");
   return { key, prefix, hash };
 }
 
@@ -1831,12 +2244,30 @@ function generateApiKey(): { key: string; prefix: string; hash: string } {
 // WEB GUI AUTH
 // ============================================================================
 
-const GUI_PASSWORD = process.env.ENGRAM_GUI_PASSWORD || process.env.MEGAMIND_GUI_PASSWORD /* legacy fallback */ || "changeme";
-const GUI_HMAC_SECRET = process.env.ENGRAM_HMAC_SECRET || crypto.randomUUID() + crypto.randomUUID();
+const GUI_PASSWORD = (() => {
+  if (process.env.ENGRAM_GUI_PASSWORD) return process.env.ENGRAM_GUI_PASSWORD;
+  if (process.env.MEGAMIND_GUI_PASSWORD) {
+    log.warn({ msg: "deprecated_env", var: "MEGAMIND_GUI_PASSWORD", use: "ENGRAM_GUI_PASSWORD" });
+    return process.env.MEGAMIND_GUI_PASSWORD;
+  }
+  return "changeme";
+})();
+const GUI_HMAC_SECRET = await (async () => {
+  if (process.env.ENGRAM_HMAC_SECRET) return process.env.ENGRAM_HMAC_SECRET;
+  const secretFile = resolve(DATA_DIR, ".hmac_secret");
+  try {
+    return readFileSync(secretFile, "utf-8");
+  } catch {
+    const secret = randomUUID() + randomUUID();
+    writeFileSync(secretFile, secret);
+    log.info({ msg: "generated_hmac_secret", path: secretFile });
+    return secret;
+  }
+})();
 const GUI_COOKIE_MAX_AGE = 7 * 24 * 60 * 60;
 
 function guiSignCookie(ts: number): string {
-  const h = new Bun.CryptoHasher("sha256");
+  const h = createHash("sha256");
   h.update(GUI_HMAC_SECRET + ":" + String(ts));
   return ts + "." + h.digest("hex");
 }
@@ -1847,7 +2278,7 @@ function guiVerifyCookie(cookie: string): boolean {
   const ts = cookie.substring(0, dot), sig = cookie.substring(dot + 1);
   const t = parseInt(ts);
   if (isNaN(t) || Date.now() / 1000 - t > GUI_COOKIE_MAX_AGE) return false;
-  const h = new Bun.CryptoHasher("sha256");
+  const h = createHash("sha256");
   h.update(GUI_HMAC_SECRET + ":" + ts);
   return h.digest("hex") === sig;
 }
@@ -1864,8 +2295,22 @@ function guiAuthed(req: Request): boolean {
 // WEB GUI HTML
 // ============================================================================
 
-const GUI_HTML = await Bun.file(import.meta.dir + "/engram-gui.html").text();
-const LOGIN_HTML = await Bun.file(import.meta.dir + "/engram-login.html").text();
+let GUI_HTML = readFileSync(resolve(__dirname, "engram-gui.html"), "utf-8");
+let LOGIN_HTML = readFileSync(resolve(__dirname, "engram-login.html"), "utf-8");
+const GUI_HOT_RELOAD = process.env.ENGRAM_HOT_RELOAD === "1";
+async function getGuiHtml(): Promise<string> {
+  if (GUI_HOT_RELOAD) return readFileSync(resolve(__dirname, "engram-gui.html"), "utf-8");
+  return GUI_HTML;
+}
+async function getLoginHtml(): Promise<string> {
+  if (GUI_HOT_RELOAD) return readFileSync(resolve(__dirname, "engram-login.html"), "utf-8");
+  return LOGIN_HTML;
+}
+process.on("SIGHUP", async () => {
+  GUI_HTML = readFileSync(resolve(__dirname, "engram-gui.html"), "utf-8");
+  LOGIN_HTML = readFileSync(resolve(__dirname, "engram-login.html"), "utf-8");
+  log.info({ msg: "gui_reloaded", trigger: "SIGHUP" });
+});
 
 // ============================================================================
 // DIGEST HELPERS
@@ -1964,13 +2409,13 @@ async function sendDigestWebhook(digest: any, payload: any): Promise<void> {
       db.prepare("UPDATE digests SET next_send_at = ? WHERE id = ?").run(
         calculateNextSend(digest.schedule), digest.id
       );
-      console.error(`Digest #${digest.id} webhook returned ${resp.status}`);
+      log.error({ msg: "digest_webhook_error", digest_id: digest.id, status: resp.status });
     }
   } catch (e: any) {
     db.prepare("UPDATE digests SET next_send_at = ? WHERE id = ?").run(
       calculateNextSend(digest.schedule), digest.id
     );
-    console.error(`Digest #${digest.id} webhook failed: ${e.message}`);
+    log.error({ msg: "digest_webhook_failed", digest_id: digest.id, error: e.message });
   }
 }
 
@@ -1996,7 +2441,7 @@ async function processScheduledDigests(): Promise<number> {
       await sendDigestWebhook(digest, payload);
       sent++;
     } catch (e: any) {
-      console.error(`Digest #${digest.id} processing failed: ${e.message}`);
+      log.error({ msg: "digest_processing_failed", digest_id: digest.id, error: e.message });
     }
   }
   return sent;
@@ -2008,32 +2453,98 @@ async function processScheduledDigests(): Promise<number> {
 
 await initEmbedder();
 
-const server = Bun.serve({
-  port: PORT,
-  hostname: HOST,
-  async fetch(req) {
+// Pre-warm: load embedding cache + run dummy embed to JIT-compile ONNX model
+{
+  const _warmStart = Date.now();
+  refreshEmbeddingCache();
+  await embed("warmup");  // forces ONNX JIT compilation before first real request
+  log.info({ msg: "warmup_complete", cache_size: embeddingCacheLatest.length, ms: Date.now() - _warmStart });
+}
+
+// Node HTTP → Web Request/Response adapter
+let _currentClientIp = "unknown";
+
+async function nodeToWebRequest(nodeReq: IncomingMessage): Promise<Request> {
+  const proto = nodeReq.headers["x-forwarded-proto"] || "http";
+  const host = nodeReq.headers.host || `${HOST}:${PORT}`;
+  const url = new URL(nodeReq.url || "/", `${proto}://${host}`);
+  const method = nodeReq.method || "GET";
+  const headers = new Headers();
+  for (const [key, val] of Object.entries(nodeReq.headers)) {
+    if (val) headers.set(key, Array.isArray(val) ? val.join(", ") : val);
+  }
+  let body: BodyInit | undefined;
+  if (method !== "GET" && method !== "HEAD") {
+    body = await new Promise<Buffer>((resolve) => {
+      const chunks: Buffer[] = [];
+      nodeReq.on("data", (c: Buffer) => chunks.push(c));
+      nodeReq.on("end", () => resolve(Buffer.concat(chunks)));
+    });
+  }
+  return new Request(url.toString(), { method, headers, body, duplex: "half" } as any);
+}
+
+async function writeWebResponse(nodeRes: ServerResponse, webRes: Response) {
+  nodeRes.writeHead(webRes.status, Object.fromEntries(webRes.headers.entries()));
+  const body = webRes.body;
+  if (!body) { nodeRes.end(); return; }
+  const reader = body.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    nodeRes.write(value);
+  }
+  nodeRes.end();
+}
+
+async function fetchHandler(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const method = req.method;
 
     // CORS preflight
     if (method === "OPTIONS") {
-      return new Response(null, {
-        status: 204,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
-        },
-      });
+      return new Response(null, { status: 204, headers: securityHeaders() });
+    }
+
+    // ========================================================================
+    // REQUEST MIDDLEWARE — ID, IP check, body limit
+    // ========================================================================
+    const requestId = req.headers.get("X-Request-Id") || randomUUID().slice(0, 8);
+    const clientIp = _currentClientIp || req.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() || "unknown";
+    const requestStart = performance.now();
+
+    // IP allowlist check
+    if (ALLOWED_IPS.length > 0 && !ALLOWED_IPS.includes(clientIp) && clientIp !== "127.0.0.1" && clientIp !== "::1") {
+      log.warn({ msg: "blocked_ip", ip: clientIp, path: url.pathname, rid: requestId });
+      return new Response("Forbidden", { status: 403 });
+    }
+
+    // Body size limit
+    if (method === "POST" || method === "PATCH" || method === "PUT" || method === "DELETE") {
+      const cl = req.headers.get("Content-Length");
+      if (cl && Number(cl) > MAX_BODY_SIZE) {
+        log.warn({ msg: "body_too_large", size: Number(cl), limit: MAX_BODY_SIZE, ip: clientIp, rid: requestId });
+        return json({ error: "Request body too large", limit: MAX_BODY_SIZE }, 413);
+      }
     }
 
     // ========================================================================
     // WEB GUI AUTH
     // ========================================================================
     if (url.pathname === "/gui/auth" && method === "POST") {
+      // Rate limit GUI auth attempts
+      const now = Date.now();
+      const ga = guiAuthAttempts.get(clientIp);
+      if (ga && now < ga.locked_until) {
+        log.warn({ msg: "gui_auth_locked", ip: clientIp, rid: requestId });
+        return json({ error: "Too many attempts. Try again later." }, 429);
+      }
+      if (ga && now - ga.first > GUI_AUTH_WINDOW_MS) guiAuthAttempts.delete(clientIp);
       try {
         const body = await req.json() as { password?: string };
-        if (body.password === GUI_PASSWORD) {
+        const pwMatch = body.password && body.password.length === GUI_PASSWORD.length &&
+          timingSafeEqual(Buffer.from(body.password), Buffer.from(GUI_PASSWORD));
+        if (pwMatch) {
           const cookie = guiSignCookie(Math.floor(Date.now() / 1000));
           return new Response(JSON.stringify({ ok: true }), {
             headers: {
@@ -2042,13 +2553,19 @@ const server = Bun.serve({
             }
           });
         }
+        const att = guiAuthAttempts.get(clientIp) || { count: 0, first: Date.now(), locked_until: 0 };
+        att.count++;
+        if (att.count >= GUI_AUTH_MAX_ATTEMPTS) att.locked_until = Date.now() + GUI_AUTH_LOCKOUT_MS;
+        guiAuthAttempts.set(clientIp, att);
+        audit(null, "gui_auth_fail", null, null, null, clientIp, requestId);
+        log.warn({ msg: "gui_auth_fail", ip: clientIp, attempts: att.count, rid: requestId });
         return json({ error: "Invalid password" }, 401);
-      } catch { return json({ error: "Bad request" }, 400); }
+      } catch (e: any) { log.error({ msg: "gui_auth_error", error: e.message, stack: e.stack?.split("\n")[1]?.trim() }); return json({ error: "Bad request" }, 400); }
     }
 
     if (url.pathname === "/gui/logout" && method === "GET") {
-      return new Response(LOGIN_HTML, {
-        headers: { "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "engram_auth=; Path=/; HttpOnly; Max-Age=0" }
+      return new Response(await getLoginHtml(), {
+        headers: securityHeaders({ "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "engram_auth=; Path=/; HttpOnly; Max-Age=0" })
       });
     }
 
@@ -2057,15 +2574,26 @@ const server = Bun.serve({
     // ========================================================================
     if ((url.pathname === "/" || url.pathname === "/gui") && method === "GET") {
       if (guiAuthed(req)) {
-        return new Response(GUI_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+        return new Response(await getGuiHtml(), { headers: securityHeaders({ "Content-Type": "text/html; charset=utf-8" }) });
       }
-      return new Response(LOGIN_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+      return new Response(await getLoginHtml(), { headers: securityHeaders({ "Content-Type": "text/html; charset=utf-8" }) });
     }
 
     // ========================================================================
-    // AUTH CONTEXT — extract user from API key or default to owner
+    // AUTH CONTEXT — extract user from API key or require auth
     // ========================================================================
-    const auth = getAuthOrDefault(req);
+    const maybeAuth = getAuthOrDefault(req);
+    if (isAuthError(maybeAuth)) {
+      const elapsed = (performance.now() - requestStart).toFixed(1);
+      log.info({ msg: "req", method, path: url.pathname, status: maybeAuth.status, ms: elapsed, ip: clientIp, rid: requestId });
+      return json({ error: maybeAuth.error }, maybeAuth.status, { "X-Request-Id": requestId, ...(maybeAuth.headers || {}) });
+    }
+    if (!maybeAuth && url.pathname !== "/health") {
+      const elapsed = (performance.now() - requestStart).toFixed(1);
+      log.info({ msg: "req", method, path: url.pathname, status: 401, ms: elapsed, ip: clientIp, rid: requestId });
+      return json({ error: "Authentication required. Provide Bearer eg_* token." }, 401, { "X-Request-Id": requestId });
+    }
+    const auth: AuthContext = maybeAuth || { user_id: 1, space_id: null, key_id: null, scopes: ["read"], is_admin: false };
 
     // ========================================================================
     // USER MANAGEMENT (admin only)
@@ -2272,7 +2800,7 @@ const server = Bun.serve({
 
         // Queue embedding backfill for imported memories
         if (imported > 0) {
-          backfillEmbeddings(imported).catch(e => console.error("Import backfill error:", e));
+          backfillEmbeddings(imported).then(() => invalidateEmbeddingCache()).catch(e => log.error({ msg: "import_backfill_error", error: String(e) }));
         }
 
         return json({ imported, failed, total: items.length });
@@ -2285,6 +2813,7 @@ const server = Bun.serve({
     // HEALTH
     // ========================================================================
     if (url.pathname === "/health" && method === "GET") {
+      log.debug({ msg: "req", method: "GET", path: "/health", status: 200, ip: clientIp, rid: requestId });
       const memCount = db.prepare("SELECT COUNT(*) as count FROM memories").get() as { count: number };
       const convCount = db.prepare("SELECT COUNT(*) as count FROM conversations").get() as { count: number };
       const msgCount = db.prepare("SELECT COUNT(*) as count FROM messages").get() as { count: number };
@@ -2295,21 +2824,25 @@ const server = Bun.serve({
       const staticCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_static = 1 AND is_forgotten = 0").get() as { count: number };
       const versionedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE version > 1").get() as { count: number };
       const archivedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_archived = 1 AND is_forgotten = 0").get() as { count: number };
+      const pendingCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE status = 'pending' AND is_forgotten = 0").get() as { count: number };
+      const rejectedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE status = 'rejected'").get() as { count: number };
       const episodeCount = db.prepare("SELECT COUNT(*) as count FROM episodes").get() as { count: number };
       const consolidationCount = db.prepare("SELECT COUNT(*) as count FROM consolidations").get() as { count: number };
       const taggedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE tags IS NOT NULL AND is_forgotten = 0").get() as { count: number };
       const entityCount = db.prepare("SELECT COUNT(*) as count FROM entities").get() as { count: number };
       const projectCount = db.prepare("SELECT COUNT(*) as count FROM projects").get() as { count: number };
-      const dbSize = Bun.file(DB_PATH).size;
+      const dbSize = statSync(DB_PATH).size;
       return json({
         status: "ok",
-        version: 4.5,
+        version: 5.0,
         memories: memCount.count,
         embedded: embCount.count,
         unembedded: noEmbCount,
         links: linkCount.count,
         forgotten: forgottenCount.count,
         archived: archivedCount.count,
+          pending: pendingCount.count,
+          rejected: rejectedCount.count,
         static: staticCount.count,
         versioned: versionedCount.count,
         tagged: taggedCount.count,
@@ -2323,7 +2856,9 @@ const server = Bun.serve({
         llm_model: LLM_MODEL,
         llm_configured: !!LLM_API_KEY,
         features: {
-          decay: true,
+          decay: "fsrs6",
+          fsrs6: true,
+          dual_strength: true,
           tags: true,
           episodes: true,
           consolidation: !!LLM_API_KEY,
@@ -2423,12 +2958,12 @@ If no meaningful facts, return {"facts": []}`;
             if (jsonMatch) {
               extracted = JSON.parse(jsonMatch[0]);
             } else {
-              console.error("Conversation extraction: unparseable LLM response:", cleaned.substring(0, 500));
+              log.error({ msg: "conversation_extraction_parse_error", response: cleaned.substring(0, 500) });
               return errorResponse("LLM returned unparseable response", 500);
             }
           }
         } catch (parseErr: any) {
-          console.error("Conversation extraction parse error:", parseErr.message);
+          log.error({ msg: "conversation_extraction_error", error: parseErr.message });
           return errorResponse("LLM returned unparseable response", 500);
         }
 
@@ -2453,7 +2988,7 @@ If no meaningful facts, return {"facts": []}`;
             fact.forget_after || null, null, 0
           ) as { id: number; created_at: string };
 
-          const syncId = crypto.randomUUID();
+          const syncId = randomUUID();
           const tagsJson = fact.tags?.length ? JSON.stringify(fact.tags) : null;
           db.prepare(
             "UPDATE memories SET user_id = ?, space_id = ?, tags = ?, episode_id = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
@@ -2464,7 +2999,7 @@ If no meaningful facts, return {"facts": []}`;
           if (projectIds) for (const pid of projectIds) linkMemoryProject.run(result.id, pid);
 
           // Auto-link
-          if (embArray) await autoLink(result.id, embArray);
+          if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray); }
 
           // Queue async fact extraction (for relationship detection)
           if (LLM_API_KEY) {
@@ -2679,7 +3214,7 @@ Return JSON:
               null, null, 0
             ) as { id: number; created_at: string };
 
-            const syncId = crypto.randomUUID();
+            const syncId = randomUUID();
             const tags = fact.tags?.length ? JSON.stringify(fact.tags) : null;
             db.prepare(
               "UPDATE memories SET user_id = ?, space_id = ?, tags = ?, episode_id = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
@@ -2688,7 +3223,7 @@ Return JSON:
             if (entity_ids) for (const eid of entity_ids) linkMemoryEntity.run(result.id, eid);
             if (project_ids) for (const pid of project_ids) linkMemoryProject.run(result.id, pid);
 
-            if (embArray) await autoLink(result.id, embArray);
+            if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray); }
 
             if (LLM_API_KEY) {
               (async () => {
@@ -2765,10 +3300,7 @@ Return JSON:
         // Scan for potential contradictions: high similarity but different content patterns
         // Same category memories with high embedding similarity often contain updates/contradictions
         if (contradictions.length < limitParam) {
-          const allMems = getLatestEmbeddings.all() as Array<{
-            id: number; content: string; category: string; importance: number;
-            embedding: Buffer; is_static: boolean; source_count: number;
-          }>;
+          const allMems = getCachedEmbeddings(true);
 
           const seenPairs = new Set(contradictions.map(c =>
             `${Math.min(c.memory_a.id, c.memory_b.id)}-${Math.max(c.memory_a.id, c.memory_b.id)}`
@@ -2777,7 +3309,7 @@ Return JSON:
           const candidates: Array<{ a: any; b: any; sim: number }> = [];
 
           for (let i = 0; i < allMems.length && candidates.length < limitParam * 3; i++) {
-            const embA = bufferToEmbedding(allMems[i].embedding);
+            const embA = allMems[i].embedding;
             for (let j = i + 1; j < allMems.length; j++) {
               const pairKey = `${Math.min(allMems[i].id, allMems[j].id)}-${Math.max(allMems[i].id, allMems[j].id)}`;
               if (seenPairs.has(pairKey)) continue;
@@ -2785,7 +3317,7 @@ Return JSON:
               // Same or related category + high similarity = potential contradiction
               if (allMems[i].category !== allMems[j].category && threshold < 0.8) continue;
 
-              const embB = bufferToEmbedding(allMems[j].embedding);
+              const embB = allMems[j].embedding;
               const sim = cosineSimilarity(embA, embB);
 
               // Sweet spot: similar enough to be about the same thing (>0.6) but not identical (>0.95)
@@ -2937,7 +3469,7 @@ Only include pairs that are actual contradictions.`;
           insertLink.run(result.id, memory_b_id, 1.0, "resolves");
           db.prepare("DELETE FROM memory_links WHERE type = 'contradicts' AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))").run(memory_a_id, memory_b_id, memory_b_id, memory_a_id);
 
-          if (embArray) await autoLink(result.id, embArray);
+          if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray); }
 
           return json({ resolved: true, merged_memory_id: result.id, content: merged.content, archived: [memory_a_id, memory_b_id] });
         }
@@ -3171,8 +3703,9 @@ Only include pairs that are actual contradictions.`;
           }
         }
 
-        // Track access for all included memories
-        for (const b of blocks) trackAccess.run(b.id);
+        // Defer access tracking to after response
+        const blockIds = blocks.map(b => b.id);
+        setTimeout(() => { try { const batch = db.transaction(() => { for (const id of blockIds) trackAccessWithFSRS(id); }); batch(); } catch {} }, 0);
 
         // Build formatted context string
         const contextParts: string[] = [];
@@ -3469,13 +4002,16 @@ Return JSON:
     // STORE — v3 with async fact extraction
     // ========================================================================
 
-    if (url.pathname === "/store" && method === "POST") {
+    if ((url.pathname === "/store" || url.pathname === "/memory" || url.pathname === "/memories") && method === "POST") {
       if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const body = await req.json();
         const { content, category, source, session_id, importance, tags, episode } = body;
         if (!content || typeof content !== "string" || content.trim().length === 0) {
           return errorResponse("content is required and must be a non-empty string");
+        }
+        if (content.length > MAX_CONTENT_SIZE) {
+          return errorResponse(`Content too large (${content.length} bytes). Max: ${MAX_CONTENT_SIZE}`, 413);
         }
 
         const imp = Math.max(1, Math.min(10, Number(importance) || DEFAULT_IMPORTANCE));
@@ -3511,7 +4047,7 @@ Return JSON:
           embArray = await embed(content.trim());
           embBuffer = embeddingToBuffer(embArray);
         } catch (e: any) {
-          console.error("Embedding failed, storing without:", e.message);
+          log.warn({ msg: "embedding_failed_storing_without", error: e.message });
         }
 
         const result = insertMemory.get(
@@ -3525,10 +4061,11 @@ Return JSON:
         ) as { id: number; created_at: string };
 
         // Set user_id, space_id, tags, episode_id, sync_id, confidence
-        const syncId = crypto.randomUUID();
+        const syncId = randomUUID();
+        const memStatus = body.status === "pending" ? "pending" : "approved";
         db.prepare(
-          "UPDATE memories SET user_id = ?, space_id = ?, tags = ?, episode_id = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
-        ).run(auth.user_id, auth.space_id || null, tagsJson, episodeId, syncId, result.id);
+          "UPDATE memories SET user_id = ?, space_id = ?, tags = ?, episode_id = ?, sync_id = ?, confidence = 1.0, status = ? WHERE id = ?"
+        ).run(auth.user_id, auth.space_id || null, tagsJson, episodeId, syncId, memStatus, result.id);
 
         // Link to entities and projects if provided
         const entityIds = body.entity_ids as number[] | undefined;
@@ -3545,66 +4082,96 @@ Return JSON:
           updateEpisode.run(null, null, null, episodeId);
         }
 
-        // Calculate initial decay score
-        const decayScore = calculateDecayScore(imp, result.created_at, 0, null, false, 1);
-        db.prepare("UPDATE memories SET decay_score = ? WHERE id = ?").run(
-          Math.round(decayScore * 1000) / 1000, result.id
+        // Calculate initial decay score + FSRS state
+        const initFSRS = fsrsProcessReview(null, FSRSRating.Good, 0);
+        const decayScore = calculateDecayScore(imp, result.created_at, 0, null, false, 1, initFSRS.stability);
+        db.prepare("UPDATE memories SET decay_score = ?, fsrs_stability = ?, fsrs_difficulty = ?, fsrs_storage_strength = ?, fsrs_retrieval_strength = ?, fsrs_learning_state = ?, fsrs_reps = ?, fsrs_lapses = ?, fsrs_last_review_at = ? WHERE id = ?").run(
+          Math.round(decayScore * 1000) / 1000,
+          initFSRS.stability, initFSRS.difficulty, initFSRS.storage_strength,
+          initFSRS.retrieval_strength, initFSRS.learning_state, initFSRS.reps, initFSRS.lapses,
+          initFSRS.last_review_at, result.id
         );
 
-        let linked = 0;
-        if (embArray) {
-          linked = await autoLink(result.id, embArray);
-        }
-
-        // Async fact extraction (non-blocking)
-        if (LLM_API_KEY && embArray) {
-          const capturedEmbArray = embArray;
-          (async () => {
-            try {
-              const allMems = getLatestEmbeddings.all() as Array<{
-                id: number; content: string; category: string; importance: number; embedding: Buffer;
-              }>;
-              const similarities: Array<{ id: number; content: string; category: string; score: number }> = [];
-              for (const mem of allMems) {
-                if (mem.id === result.id || !mem.embedding) continue;
-                const memEmb = bufferToEmbedding(mem.embedding);
-                const sim = cosineSimilarity(capturedEmbArray, memEmb);
-                if (sim > 0.4) {
-                  similarities.push({ id: mem.id, content: mem.content, category: mem.category, score: sim });
-                }
-              }
-              similarities.sort((a, b) => b.score - a.score);
-              const top3 = similarities.slice(0, 3);
-
-              const extraction = await extractFacts(content.trim(), category || "general", top3);
-              if (extraction) {
-                processExtractionResult(result.id, extraction, capturedEmbArray);
-                console.log(`Fact extraction complete for memory #${result.id}: ${extraction.relation_to_existing.type}`);
-              }
-            } catch (e: any) {
-              console.error(`Async fact extraction failed for #${result.id}:`, e.message);
-            }
-          })();
-        }
-
-        // Emit webhook event
+        // Emit webhook event (sync, fast)
         emitWebhookEvent("memory.created", {
           id: result.id, content: content.trim(), category: category || "general",
           importance: imp, tags: tagsJson ? JSON.parse(tagsJson) : [], episode_id: episodeId,
         }, auth.user_id);
 
-        return json({
+        // Return response IMMEDIATELY — vector indexing + autoLink + fact extraction happen async
+        const response = json({
           stored: true,
           id: result.id,
           created_at: result.created_at,
           importance: imp,
-          linked,
+          linked: 0, // will be computed async
           embedded: !!embBuffer,
           tags: tagsJson ? JSON.parse(tagsJson) : [],
           episode_id: episodeId,
           decay_score: decayScore,
           fact_extraction: LLM_API_KEY ? "queued" : "disabled",
+          status: memStatus,
         });
+
+        audit(auth.user_id, "memory.store", "memory", result.id, (category || "general"), clientIp, requestId);
+
+        // === ASYNC POST-STORE PIPELINE (non-blocking) ===
+        // CRITICAL: Use setTimeout(0) to defer heavy work to NEXT event loop tick.
+        // Without this, synchronous libsql calls (writeVec, autoLink) block the 
+        // response from being flushed, defeating the async pattern.
+        if (embArray) {
+          const capturedEmbArray = embArray;
+          const capturedMemId = result.id;
+          const capturedContent = content.trim();
+          const capturedCategory = category || "general";
+          setTimeout(async () => {
+            try {
+              // 1. Write vector column + update in-memory cache
+              const _t1 = Date.now();
+              writeVec(capturedMemId, capturedEmbArray);
+              addToEmbeddingCache({
+                id: capturedMemId, content: capturedContent, category: capturedCategory,
+                importance: imp, embedding: capturedEmbArray,
+                is_static: false, source_count: 1, is_latest: true, is_forgotten: false,
+              });
+              log.debug({ msg: "store_writeVec", id: capturedMemId, ms: Date.now() - _t1 });
+
+              // 2. Auto-link to similar memories (in-memory cosine, <1ms)
+              const _t2 = Date.now();
+              const linked = await autoLink(capturedMemId, capturedEmbArray);
+              log.debug({ msg: "store_autoLink", id: capturedMemId, ms: Date.now() - _t2, linked });
+
+              // 3. Fact extraction via LLM (slowest — external API call)
+              if (LLM_API_KEY) {
+                try {
+                  const allMems = getCachedEmbeddings(true);
+                  const similarities: Array<{ id: number; content: string; category: string; score: number }> = [];
+                  for (const mem of allMems) {
+                    if (mem.id === capturedMemId) continue;
+                    const sim = cosineSimilarity(capturedEmbArray, mem.embedding);
+                    if (sim > 0.4) {
+                      similarities.push({ id: mem.id, content: mem.content, category: mem.category, score: sim });
+                    }
+                  }
+                  similarities.sort((a, b) => b.score - a.score);
+                  const top3 = similarities.slice(0, 3);
+
+                  const extraction = await extractFacts(capturedContent, capturedCategory, top3);
+                  if (extraction) {
+                    processExtractionResult(capturedMemId, extraction, capturedEmbArray);
+                    log.debug({ msg: "fact_extraction_done", id: capturedMemId, relation: extraction.relation_to_existing.type });
+                  }
+                } catch (e: any) {
+                  log.error({ msg: "fact_extraction_failed", id: capturedMemId, error: e.message });
+                }
+              }
+            } catch (e: any) {
+              log.error({ msg: "store_pipeline_failed", id: capturedMemId, error: e.message });
+            }
+          }, 0);
+        }
+
+        return response;
       } catch (e: any) {
         return errorResponse(`Failed to store: ${e.message}`, 500);
       }
@@ -3614,11 +4181,13 @@ Return JSON:
     // SEARCH — v3
     // ========================================================================
 
-    if (url.pathname === "/search" && method === "POST") {
+    if ((url.pathname === "/search" || url.pathname === "/memories/search") && method === "POST") {
       try {
+        const _searchT0 = performance.now();
         const body = await req.json();
         const { query, limit, include_links, expand_relationships, latest_only, tag, episode_id: filterEpisode } = body;
         if (!query || typeof query !== "string") return errorResponse("query is required");
+        const _searchT1 = performance.now();
         let results = await hybridSearch(
           query,
           Math.min(limit || 10, 50),
@@ -3626,6 +4195,9 @@ Return JSON:
           expand_relationships ?? true,
           latest_only ?? true
         );
+
+        const _searchT2 = performance.now();
+        log.info({ msg: "search_timing", phase: "hybridSearch", ms: (_searchT2 - _searchT1).toFixed(1) });
 
         // Filter by tag if specified
         if (tag) {
@@ -3645,42 +4217,29 @@ Return JSON:
         }
 
         // Rerank results for better precision
-        const doRerank = body.rerank !== false; // opt-out with rerank: false
+        const doRerank = body.rerank === true; // opt-in: pass rerank: true to enable LLM reranking
         if (doRerank && results.length > 3) {
           results = await rerank(query, results);
           // Re-trim to requested limit after reranking
           results = results.slice(0, Math.min(limit || 10, 50));
         }
 
-        // Track access on returned results
-        for (const r of results) {
-          trackAccess.run(r.id);
-        }
+        // Defer access tracking to after response (non-blocking, batched in transaction)
+        const resultIds = results.map(r => r.id);
+        setTimeout(() => {
+          try {
+            const batch = db.transaction(() => {
+              for (const id of resultIds) trackAccessWithFSRS(id);
+            });
+            batch();
+          } catch {}
+        }, 0);
 
-        // Episodic expansion: if a result belongs to an episode, include episode context
+        // Lightweight: skip episodic expansion (available via /memory/:id)
         const episodeContext: Array<{ episode_id: number; title: string; memories: any[] }> = [];
-        const seenEpisodes = new Set<number>();
-        for (const r of results) {
-          const mem = getMemoryWithoutEmbedding.get(r.id) as any;
-          if (mem?.episode_id && !seenEpisodes.has(mem.episode_id)) {
-            seenEpisodes.add(mem.episode_id);
-            const ep = getEpisode.get(mem.episode_id) as any;
-            if (ep) {
-              const epMems = getEpisodeMemories.all(mem.episode_id) as any[];
-              episodeContext.push({
-                episode_id: mem.episode_id,
-                title: ep.title || `Session ${ep.session_id || ep.id}`,
-                memories: epMems.map(m => ({ id: m.id, content: m.content, category: m.category })),
-              });
-            }
-          }
-          // Attach tags to results
-          if (mem?.tags) {
-            try { r.tags = JSON.parse(mem.tags); } catch {}
-          }
-          r.episode_id = mem?.episode_id;
-          r.access_count = mem?.access_count;
-        }
+
+        const _searchT3 = performance.now();
+        log.info({ msg: "search_timing", total_ms: (_searchT3 - _searchT0).toFixed(1), hybrid_ms: (_searchT2 - _searchT1).toFixed(1), post_ms: (_searchT3 - _searchT2).toFixed(1), results: results.length });
 
         return json({
           results,
@@ -3714,6 +4273,8 @@ Return JSON:
       if (body.reason) {
         db.prepare("UPDATE memories SET forget_reason = ? WHERE id = ?").run(body.reason, id);
       }
+      audit(auth.user_id, "memory.forget", "memory", id, body.reason || "manual", clientIp, requestId);
+      invalidateEmbeddingCache();
       return json({ forgotten: true, id });
     }
 
@@ -3727,6 +4288,8 @@ Return JSON:
       const mem = getMemoryWithoutEmbedding.get(id) as any;
       if (!mem) return errorResponse("Not found", 404);
       markArchived.run(id);
+      audit(auth.user_id, "memory.archive", "memory", id, null, clientIp, requestId);
+      invalidateEmbeddingCache();
       return json({ archived: true, id });
     }
 
@@ -3736,6 +4299,8 @@ Return JSON:
       const mem = getMemoryWithoutEmbedding.get(id) as any;
       if (!mem) return errorResponse("Not found", 404);
       markUnarchived.run(id);
+      audit(auth.user_id, "memory.unarchive", "memory", id, null, clientIp, requestId);
+      invalidateEmbeddingCache();
       return json({ unarchived: true, id });
     }
 
@@ -3767,7 +4332,7 @@ Return JSON:
           embArray = await embed(newContent.trim());
           embBuffer = embeddingToBuffer(embArray);
         } catch (e: any) {
-          console.error("Embedding failed for update:", e.message);
+          log.warn({ msg: "embedding_failed_update", error: e.message });
         }
 
         // Determine version chain
@@ -3803,10 +4368,11 @@ Return JSON:
         // Auto-link new version
         let linked = 0;
         if (embArray) {
+          writeVec(result.id, embArray);
           linked = await autoLink(result.id, embArray);
         }
 
-        console.log(`Memory #${id} updated -> #${result.id} (v${newVersion}, root=#${rootId})`);
+        log.info({ msg: "memory_version_created", old_id: id, new_id: result.id, version: newVersion, root: rootId });
 
         return json({
           updated: true,
@@ -3831,10 +4397,7 @@ Return JSON:
         const threshold = Number(url.searchParams.get("threshold") || 0.85);
         const limitParam = Math.min(Number(url.searchParams.get("limit") || 50), 200);
 
-        const allMems = getLatestEmbeddings.all() as Array<{
-          id: number; content: string; category: string; importance: number;
-          embedding: Buffer; is_static: boolean; source_count: number;
-        }>;
+        const allMems = getCachedEmbeddings(true);
 
         // Find clusters of similar memories
         const clusters: Array<{
@@ -3845,12 +4408,12 @@ Return JSON:
 
         for (let i = 0; i < allMems.length; i++) {
           if (seen.has(allMems[i].id)) continue;
-          const embA = bufferToEmbedding(allMems[i].embedding);
+          const embA = allMems[i].embedding;
           const dupes: Array<{ id: number; content: string; category: string; similarity: number }> = [];
 
           for (let j = i + 1; j < allMems.length; j++) {
             if (seen.has(allMems[j].id)) continue;
-            const embB = bufferToEmbedding(allMems[j].embedding);
+            const embB = allMems[j].embedding;
             const sim = cosineSimilarity(embA, embB);
             if (sim >= threshold) {
               dupes.push({
@@ -3894,10 +4457,7 @@ Return JSON:
         const dryRun = body.dry_run !== false; // default to dry run for safety
         const maxMerge = Math.min(Number(body.max_merge || 50), 500);
 
-        const allMems = getLatestEmbeddings.all() as Array<{
-          id: number; content: string; category: string; importance: number;
-          embedding: Buffer; is_static: boolean; source_count: number;
-        }>;
+        const allMems = getCachedEmbeddings(true);
 
         const merged: Array<{ kept: number; archived: number[]; similarity: number }> = [];
         const seen = new Set<number>();
@@ -3905,12 +4465,12 @@ Return JSON:
 
         for (let i = 0; i < allMems.length && merged.length < maxMerge; i++) {
           if (seen.has(allMems[i].id)) continue;
-          const embA = bufferToEmbedding(allMems[i].embedding);
+          const embA = allMems[i].embedding;
           const dupes: Array<{ id: number; similarity: number; source_count: number }> = [];
 
           for (let j = i + 1; j < allMems.length; j++) {
             if (seen.has(allMems[j].id)) continue;
-            const embB = bufferToEmbedding(allMems[j].embedding);
+            const embB = allMems[j].embedding;
             const sim = cosineSimilarity(embA, embB);
             if (sim >= threshold) {
               dupes.push({ id: allMems[j].id, similarity: sim, source_count: allMems[j].source_count || 1 });
@@ -3961,7 +4521,7 @@ Return JSON:
     if (url.pathname === "/recall" && method === "POST") {
       try {
         const body = await req.json() as any;
-        const context = body.context || ""; // user's first message or topic
+        const context = body.context || body.query || ""; // 'query' for BotMemory compat
         const limit = Math.min(Number(body.limit) || 20, 50);
         const includeTags = body.tags as string[] | undefined;
 
@@ -4028,7 +4588,7 @@ Return JSON:
 
         // Track access on recalled memories
         for (const s of sorted) {
-          trackAccess.run(s.memory.id);
+          trackAccessWithFSRS(s.memory.id);
         }
 
         // Episodic expansion: find episodes referenced by recalled memories
@@ -4050,6 +4610,7 @@ Return JSON:
         }
 
         return json({
+          // Standard Engram format
           memories: sorted.map(s => ({
             ...s.memory,
             recall_source: s.source,
@@ -4063,6 +4624,17 @@ Return JSON:
             recent: sorted.filter(s => s.source === "recent").length,
           },
           ...(episodeContext.length > 0 ? { episodes: episodeContext } : {}),
+          // BotMemory v1 compat fields (for Discord bots)
+          profile: sorted.filter(s => s.source === "static").map(s => s.memory.content),
+          recent: sorted.filter(s => s.source === "recent").map(s => ({
+            id: s.memory.id, content: s.memory.content, category: s.memory.category,
+            source: s.memory.source, createdAt: s.memory.created_at,
+          })),
+          results: sorted.filter(s => s.source === "semantic" || s.source === "important").map(s => ({
+            id: s.memory.id, content: s.memory.content, category: s.memory.category,
+            source: s.memory.source, score: s.score, createdAt: s.memory.created_at,
+          })),
+          count: sorted.length,
         });
       } catch (e: any) {
         return errorResponse(`Smart recall failed: ${e.message}`, 500);
@@ -4076,7 +4648,7 @@ Return JSON:
       if (!memory) return errorResponse("Not found", 404);
 
       // Track access
-      trackAccess.run(id);
+      trackAccessWithFSRS(id);
 
       const links = getLinksFor.all(id, id) as Array<{
         id: number; similarity: number; type: string; content: string; category: string;
@@ -4113,6 +4685,8 @@ Return JSON:
       const id = Number(url.pathname.split("/")[2]);
       if (isNaN(id)) return errorResponse("Invalid id");
       deleteMemory.run(id);
+      audit(auth.user_id, "memory.delete", "memory", id, null, clientIp, requestId);
+      invalidateEmbeddingCache();
       return json({ deleted: true, id });
     }
 
@@ -4387,8 +4961,15 @@ Return JSON:
             imp, embBuffer, 1, 1, null, null, 1, body.is_static ? 1 : 0, 0, null, null, 0
           ) as { id: number; created_at: string };
           db.prepare("UPDATE memories SET user_id = ?, tags = ? WHERE id = ?").run(1, tagsJson, result.id);
-          const decayScore = calculateDecayScore(imp, result.created_at, 0, null, !!body.is_static, 1);
-          db.prepare("UPDATE memories SET decay_score = ? WHERE id = ?").run(Math.round(decayScore * 1000) / 1000, result.id);
+          const initFSRS2 = fsrsProcessReview(null, FSRSRating.Good, 0);
+          const decayScore = calculateDecayScore(imp, result.created_at, 0, null, !!body.is_static, 1, initFSRS2.stability);
+          db.prepare("UPDATE memories SET decay_score = ?, fsrs_stability = ?, fsrs_difficulty = ?, fsrs_storage_strength = ?, fsrs_retrieval_strength = ?, fsrs_learning_state = ?, fsrs_reps = ?, fsrs_lapses = ?, fsrs_last_review_at = ? WHERE id = ?").run(
+            Math.round(decayScore * 1000) / 1000,
+            initFSRS2.stability, initFSRS2.difficulty, initFSRS2.storage_strength,
+            initFSRS2.retrieval_strength, initFSRS2.learning_state, initFSRS2.reps, initFSRS2.lapses,
+            initFSRS2.last_review_at, result.id
+          );
+          writeVec(result.id, embArray);
           await autoLink(result.id, embArray);
           return json({ created: true, id: result.id });
         } catch (e: any) {
@@ -4416,7 +4997,7 @@ Return JSON:
         if (body.content !== undefined) {
           try {
             const emb = await embed(body.content.trim());
-            updateMemoryEmbedding.run(embeddingToBuffer(emb), id);
+            updateMemoryEmbedding.run(embeddingToBuffer(emb), id); try { updateMemoryVec.run(embeddingToVectorJSON(emb), id); } catch {}
           } catch {}
         }
         return json({ updated: true, id });
@@ -4427,6 +5008,7 @@ Return JSON:
       if (!guiAuthed(req)) return errorResponse("GUI auth required", 401);
       const id = Number(url.pathname.split("/")[3]);
       deleteMemory.run(id);
+      audit(null, "gui.delete", "memory", id, null, clientIp, requestId);
       return json({ deleted: true, id });
     }
 
@@ -4464,10 +5046,11 @@ Return JSON:
         const tag = body.tag?.trim().toLowerCase();
         if (!tag) return errorResponse("tag is required");
         const limit = Math.min(Number(body.limit) || 20, 100);
-        const results = getByTag.all(`%"${tag}"%`, auth.user_id, limit) as any[];
+        const safeTag = tag.replace(/%/g, "\\%").replace(/_/g, "\\_");
+        const results = getByTag.all(`%"${safeTag}"%`, auth.user_id, limit) as any[];
         for (const r of results) {
           try { r.tags = JSON.parse(r.tags); } catch { r.tags = []; }
-          trackAccess.run(r.id);
+          trackAccessWithFSRS(r.id);
         }
         return json({ results, tag });
       } catch (e: any) {
@@ -4607,11 +5190,62 @@ Return JSON:
       const order = url.searchParams.get("order") === "asc" ? "ASC" : "DESC";
       const rows = db.prepare(
         `SELECT id, content, category, importance, decay_score, access_count, last_accessed_at,
-           created_at, is_static, source_count, confidence
+           created_at, is_static, source_count, confidence,
+           fsrs_stability, fsrs_difficulty, fsrs_storage_strength, fsrs_retrieval_strength,
+           fsrs_learning_state, fsrs_reps, fsrs_lapses, fsrs_last_review_at
          FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1
          ORDER BY COALESCE(decay_score, importance) ${order} LIMIT ?`
       ).all(limit) as any[];
       return json({ memories: rows });
+    }
+
+    // FSRS-6 endpoints
+    if (url.pathname === "/fsrs/review" && method === "POST") {
+      try {
+        const body = await req.json() as any;
+        const id = Number(body.id);
+        const grade = Number(body.grade || 3) as FSRSRating;
+        if (!id || grade < 1 || grade > 4) return errorResponse("id required, grade 1-4", 400);
+        trackAccessWithFSRS(id, grade);
+        const updated = getFSRS.get(id) as any;
+        return json({ id, fsrs: updated });
+      } catch (e: any) { return errorResponse(e.message, 400); }
+    }
+
+    if (url.pathname === "/fsrs/state" && method === "GET") {
+      const id = Number(url.searchParams.get("id"));
+      if (!id) return errorResponse("id required", 400);
+      const row = getFSRS.get(id) as any;
+      if (!row) return errorResponse("not found", 404);
+      const elapsed = row.fsrs_last_review_at
+        ? (Date.now() - new Date(row.fsrs_last_review_at + "Z").getTime()) / 86400000
+        : (Date.now() - new Date(row.created_at + "Z").getTime()) / 86400000;
+      const retrievability = row.fsrs_stability
+        ? fsrsRetrievability(row.fsrs_stability, elapsed)
+        : null;
+      const nextReview = row.fsrs_stability
+        ? fsrsNextInterval(row.fsrs_stability)
+        : null;
+      return json({ id, retrievability, next_review_days: nextReview, ...row });
+    }
+
+    if (url.pathname === "/fsrs/init" && method === "POST") {
+      // Backfill FSRS state for all memories that don't have it
+      const uninitialized = db.prepare(
+        `SELECT id, created_at FROM memories WHERE fsrs_stability IS NULL AND is_forgotten = 0 AND is_latest = 1`
+      ).all() as any[];
+      let count = 0;
+      const batch = db.transaction(() => {
+        for (const m of uninitialized) {
+          const init = fsrsProcessReview(null, FSRSRating.Good, 0);
+          updateFSRS.run(init.stability, init.difficulty, init.storage_strength,
+            init.retrieval_strength, init.learning_state, init.reps, init.lapses,
+            init.last_review_at, m.id);
+          count++;
+        }
+      });
+      batch();
+      return json({ initialized: count });
     }
 
     // ========================================================================
@@ -4674,7 +5308,7 @@ Return JSON:
         }
 
         // Track access
-        for (const p of packed) trackAccess.run(p.id);
+        for (const p of packed) trackAccessWithFSRS(p.id);
 
         // Format output
         let output: string;
@@ -4731,7 +5365,7 @@ Return JSON:
         const important = db.prepare(
           `SELECT id, content, category, importance, decay_score, confidence
            FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?
-           ORDER BY COALESCE(decay_score, importance) DESC LIMIT 20`
+           ORDER BY COALESCE(decay_score, importance) DESC LIMIT 1000`
         ).all(auth.user_id) as Array<any>;
         for (const m of important) {
           if (!candidates.find((c: any) => c.id === m.id)) candidates.push({ ...m, score: (m.decay_score || m.importance) * 2 });
@@ -4745,7 +5379,7 @@ Return JSON:
           if (tokensUsed + t > tokenBudget) continue;
           packed.push(`[${c.category}] ${c.content}`);
           tokensUsed += t;
-          trackAccess.run(c.id);
+          trackAccessWithFSRS(c.id);
         }
 
         const memoryBlock = packed.join("\n\n");
@@ -4865,7 +5499,7 @@ ${memoryBlock}
               // Re-embed on content change
               try {
                 const emb = await embed(mem.content);
-                updateMemoryEmbedding.run(embeddingToBuffer(emb), existing.id);
+                updateMemoryEmbedding.run(embeddingToBuffer(emb), existing.id); try { updateMemoryVec.run(embeddingToVectorJSON(emb), existing.id); } catch {}
               } catch {}
               updated++;
             } else {
@@ -4888,6 +5522,7 @@ ${memoryBlock}
             );
             if (embBuffer) {
               const embArray = await embed(mem.content);
+              writeVec(result.id, embArray);
               await autoLink(result.id, embArray);
             }
             created++;
@@ -4972,7 +5607,7 @@ If no meaningful inferences, return {"derived": []}`;
             if (jsonMatch) {
               parsed = JSON.parse(jsonMatch[0]);
             } else {
-              console.error("Derive: unparseable LLM response:", cleaned.substring(0, 500));
+              log.error({ msg: "derive_parse_error", response: cleaned.substring(0, 500) });
               return json({ derived: 0, facts: [], error: "LLM returned unparseable response" });
             }
           }
@@ -4998,7 +5633,7 @@ If no meaningful inferences, return {"derived": []}`;
             d.importance || 5, embBuffer, 1, 1, null, null, 1, 0, 0, null, null, 0
           ) as { id: number; created_at: string };
 
-          const syncId = crypto.randomUUID();
+          const syncId = randomUUID();
           db.prepare(
             "UPDATE memories SET user_id = ?, sync_id = ?, confidence = ?, tags = ? WHERE id = ?"
           ).run(auth.user_id, syncId, d.confidence || 0.7, JSON.stringify(["derived", ...(d.tags || [])]), result.id);
@@ -5010,7 +5645,7 @@ If no meaningful inferences, return {"derived": []}`;
             }
           }
 
-          if (embArray) await autoLink(result.id, embArray);
+          if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray); }
 
           emitWebhookEvent("memory.derived", {
             id: result.id, content: d.content.trim(), confidence: d.confidence,
@@ -5062,9 +5697,9 @@ If no meaningful inferences, return {"derived": []}`;
 
           db.prepare(
             "UPDATE memories SET user_id = ?, tags = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
-          ).run(auth.user_id, JSON.stringify(tags), crypto.randomUUID(), result.id);
+          ).run(auth.user_id, JSON.stringify(tags), randomUUID(), result.id);
 
-          if (embArray) await autoLink(result.id, embArray);
+          if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray); }
           imported++;
         }
 
@@ -5135,9 +5770,9 @@ If no meaningful inferences, return {"derived": []}`;
 
           db.prepare(
             "UPDATE memories SET user_id = ?, tags = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
-          ).run(auth.user_id, JSON.stringify([...new Set(tags)]), crypto.randomUUID(), result.id);
+          ).run(auth.user_id, JSON.stringify([...new Set(tags)]), randomUUID(), result.id);
 
-          if (embArray) await autoLink(result.id, embArray);
+          if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray); }
           imported++;
         }
 
@@ -5153,124 +5788,144 @@ If no meaningful inferences, return {"derived": []}`;
 
     if (url.pathname === "/graph" && method === "GET") {
       try {
-        const center = url.searchParams.get("center"); // memory ID to center on
+        const center = url.searchParams.get("center");
         const depth = Math.min(Number(url.searchParams.get("depth") || 2), 4);
-        const maxNodes = Math.min(Number(url.searchParams.get("max") || 200), 500);
+        const maxNodes = Math.min(Number(url.searchParams.get("max") || 1000), 2000);
         const includeEntities = url.searchParams.get("entities") !== "0";
         const context = url.searchParams.get("q");
 
-        type GNode = { id: string; label: string; type: string; category?: string; importance?: number; confidence?: number; group?: string; size?: number };
-        type GEdge = { source: string; target: string; type: string; weight: number };
+        // 30s response cache
+        const cacheKey = `graph:${auth.user_id}:${center||""}:${depth}:${maxNodes}:${includeEntities?1:0}:${context||""}`;
+        if (graphCache && graphCache.key === cacheKey && Date.now() - graphCache.ts < 30_000) {
+          return json(graphCache.data);
+        }
 
+        type GNode = { id: string; label: string; type: string; [k: string]: any };
+        type GEdge = { source: string; target: string; type: string; weight: number };
         const nodes: Map<string, GNode> = new Map();
         const edges: GEdge[] = [];
-        const visited = new Set<number>();
 
-        // BFS from center or top memories
-        const queue: Array<{ id: number; currentDepth: number }> = [];
-
+        // Phase 1: Collect memory IDs (no per-row fetches)
+        let memoryIds: number[];
         if (center) {
-          queue.push({ id: Number(center), currentDepth: 0 });
-        } else if (context) {
-          // Semantic search to find starting nodes
-          const results = await hybridSearch(context, 10, false, true, true);
-          for (const r of results) queue.push({ id: r.id, currentDepth: 0 });
-        } else {
-          // Top memories by decay score
-          const top = db.prepare(
-            `SELECT id FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?
-             ORDER BY COALESCE(decay_score, importance) DESC LIMIT 20`
-          ).all(auth.user_id) as any[];
-          for (const t of top) queue.push({ id: t.id, currentDepth: 0 });
-        }
-
-        while (queue.length > 0 && nodes.size < maxNodes) {
-          const { id, currentDepth } = queue.shift()!;
-          if (visited.has(id)) continue;
-          visited.add(id);
-
-          const mem = getMemoryWithoutEmbedding.get(id) as any;
-          if (!mem || mem.is_forgotten) continue;
-
-          const nodeId = `m${id}`;
-          nodes.set(nodeId, {
-            id: nodeId,
-            label: mem.content.substring(0, 60) + (mem.content.length > 60 ? "…" : ""),
-            type: "memory",
-            category: mem.category,
-            importance: mem.importance,
-            confidence: mem.confidence,
-            group: mem.category,
-            size: Math.max(3, mem.importance * 1.5),
-          });
-
-          // Get links
-          if (currentDepth < depth) {
-            const links = db.prepare(
-              `SELECT ml.source_id, ml.target_id, ml.similarity, ml.type,
-                m.id as linked_id, m.content, m.category, m.importance, m.confidence
-               FROM memory_links ml
-               JOIN memories m ON m.id = CASE WHEN ml.source_id = ? THEN ml.target_id ELSE ml.source_id END
-               WHERE (ml.source_id = ? OR ml.target_id = ?) AND m.is_forgotten = 0`
-            ).all(id, id, id) as any[];
-
-            for (const link of links) {
-              const linkedNodeId = `m${link.linked_id}`;
-              edges.push({
-                source: nodeId,
-                target: linkedNodeId,
-                type: link.type || "related",
-                weight: link.similarity,
-              });
-              if (!visited.has(link.linked_id)) {
-                queue.push({ id: link.linked_id, currentDepth: currentDepth + 1 });
+          // BFS from center using batch link queries per depth level
+          const visited = new Set<number>([Number(center)]);
+          let frontier = [Number(center)];
+          for (let d = 0; d < depth && frontier.length > 0 && visited.size < maxNodes; d++) {
+            const ph = frontier.map(() => "?").join(",");
+            const linked = db.prepare(
+              `SELECT DISTINCT CASE WHEN source_id IN (${ph}) THEN target_id ELSE source_id END as linked_id
+               FROM memory_links WHERE source_id IN (${ph}) OR target_id IN (${ph})`
+            ).all(...frontier, ...frontier, ...frontier) as any[];
+            frontier = [];
+            for (const r of linked) {
+              if (!visited.has(r.linked_id) && visited.size < maxNodes) {
+                visited.add(r.linked_id);
+                frontier.push(r.linked_id);
               }
             }
           }
+          memoryIds = [...visited];
+        } else if (context) {
+          const results = await hybridSearch(context, maxNodes, false, true, true);
+          memoryIds = results.map((r: any) => r.id);
+        } else {
+          const rows = db.prepare(
+            `SELECT id FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?
+             ORDER BY COALESCE(decay_score, importance) DESC LIMIT ?`
+          ).all(auth.user_id, maxNodes) as any[];
+          memoryIds = rows.map((r: any) => r.id);
+        }
 
-          // Entity connections
-          if (includeEntities) {
-            const memEntities = db.prepare(
-              `SELECT e.id, e.name, e.type FROM entities e
-               JOIN memory_entities me ON me.entity_id = e.id WHERE me.memory_id = ?`
-            ).all(id) as any[];
-            for (const ent of memEntities) {
+        if (memoryIds.length === 0) {
+          const empty = { nodes: [], edges: [], links: [], node_count: 0, edge_count: 0 };
+          graphCache = { key: cacheKey, data: empty, ts: Date.now() };
+          return json(empty);
+        }
+
+        // Phase 2: Batch fetch all memories (single query, chunked for safety)
+        const CHUNK = 900;
+        const allMems: any[] = [];
+        for (let i = 0; i < memoryIds.length; i += CHUNK) {
+          const chunk = memoryIds.slice(i, i + CHUNK);
+          const ph = chunk.map(() => "?").join(",");
+          const rows = db.prepare(
+            `SELECT id, content, category, source, importance, confidence, created_at,
+                    is_static, is_forgotten, is_archived, parent_memory_id, source_count,
+                    version, forget_after
+             FROM memories WHERE id IN (${ph}) AND is_forgotten = 0`
+          ).all(...chunk) as any[];
+          allMems.push(...rows);
+        }
+
+        for (const mem of allMems) {
+          nodes.set(`m${mem.id}`, {
+            id: `m${mem.id}`,
+            label: mem.content.substring(0, 60) + (mem.content.length > 60 ? "\u2026" : ""),
+            type: "memory", category: mem.category, importance: mem.importance,
+            confidence: mem.confidence, group: mem.category,
+            size: Math.max(3, (mem.importance || 5) * 1.5),
+            source: mem.source, created_at: mem.created_at, is_static: mem.is_static,
+            is_forgotten: mem.is_forgotten, is_archived: mem.is_archived,
+            parent_memory_id: mem.parent_memory_id, source_count: mem.source_count,
+            content: mem.content, version: mem.version,
+            forget_after: mem.forget_after,
+          });
+        }
+
+        // Phase 3: Batch fetch all links between graph nodes (single query per chunk)
+        const validIds = allMems.map((m: any) => m.id);
+        for (let i = 0; i < validIds.length; i += CHUNK) {
+          const chunk = validIds.slice(i, i + CHUNK);
+          const ph = chunk.map(() => "?").join(",");
+          // For links, both source and target must be in the full set
+          // Use subquery for the full set if chunked
+          const linkRows = db.prepare(
+            `SELECT source_id, target_id, similarity, type FROM memory_links
+             WHERE source_id IN (${ph}) OR target_id IN (${ph})`
+          ).all(...chunk, ...chunk) as any[];
+          const validSet = new Set(validIds);
+          for (const link of linkRows) {
+            if (validSet.has(link.source_id) && validSet.has(link.target_id)) {
+              edges.push({
+                source: `m${link.source_id}`, target: `m${link.target_id}`,
+                type: link.type || "related", weight: link.similarity,
+              });
+            }
+          }
+        }
+
+        // Phase 4: Entities (batch)
+        if (includeEntities && validIds.length > 0) {
+          for (let i = 0; i < validIds.length; i += CHUNK) {
+            const chunk = validIds.slice(i, i + CHUNK);
+            const ph = chunk.map(() => "?").join(",");
+            const meRows = db.prepare(
+              `SELECT me.memory_id, e.id, e.name, e.type FROM entities e
+               JOIN memory_entities me ON me.entity_id = e.id WHERE me.memory_id IN (${ph})`
+            ).all(...chunk) as any[];
+            for (const ent of meRows) {
               const entNodeId = `e${ent.id}`;
               if (!nodes.has(entNodeId)) {
-                nodes.set(entNodeId, {
-                  id: entNodeId,
-                  label: ent.name,
-                  type: "entity",
-                  group: ent.type,
-                  size: 8,
-                });
+                nodes.set(entNodeId, { id: entNodeId, label: ent.name, type: "entity", group: ent.type, size: 8 });
               }
-              edges.push({ source: nodeId, target: entNodeId, type: "about", weight: 1.0 });
+              edges.push({ source: `m${ent.memory_id}`, target: entNodeId, type: "about", weight: 1.0 });
             }
           }
-        }
-
-        // Add entity-to-entity relationships
-        if (includeEntities) {
           const entityIds = [...nodes.entries()].filter(([k]) => k.startsWith("e")).map(([k]) => Number(k.slice(1)));
           if (entityIds.length > 0) {
-            const placeholders = entityIds.map(() => "?").join(",");
+            const eph = entityIds.map(() => "?").join(",");
             const rels = db.prepare(
               `SELECT source_entity_id, target_entity_id, relationship FROM entity_relationships
-               WHERE source_entity_id IN (${placeholders}) OR target_entity_id IN (${placeholders})`
+               WHERE source_entity_id IN (${eph}) OR target_entity_id IN (${eph})`
             ).all(...entityIds, ...entityIds) as any[];
             for (const r of rels) {
-              edges.push({
-                source: `e${r.source_entity_id}`,
-                target: `e${r.target_entity_id}`,
-                type: r.relationship,
-                weight: 0.9,
-              });
+              edges.push({ source: `e${r.source_entity_id}`, target: `e${r.target_entity_id}`, type: r.relationship, weight: 0.9 });
             }
           }
         }
 
-        // Add project clusters
+        // Phase 5: Projects (already efficient — few projects)
         const projectNodes = db.prepare(
           `SELECT DISTINCT p.id, p.name, p.status FROM projects p
            JOIN memory_projects mp ON mp.project_id = p.id
@@ -5279,38 +5934,27 @@ If no meaningful inferences, return {"derived": []}`;
         ).all(auth.user_id) as any[];
         for (const proj of projectNodes) {
           const projNodeId = `p${proj.id}`;
-          nodes.set(projNodeId, {
-            id: projNodeId,
-            label: proj.name,
-            type: "project",
-            group: "project",
-            size: 10,
-          });
-          // Link project to its memories that are in the graph
-          const projMems = db.prepare(
-            "SELECT memory_id FROM memory_projects WHERE project_id = ?"
-          ).all(proj.id) as any[];
+          nodes.set(projNodeId, { id: projNodeId, label: proj.name, type: "project", group: "project", size: 10 });
+          const projMems = db.prepare("SELECT memory_id FROM memory_projects WHERE project_id = ?").all(proj.id) as any[];
           for (const pm of projMems) {
-            if (nodes.has(`m${pm.memory_id}`)) {
-              edges.push({ source: projNodeId, target: `m${pm.memory_id}`, type: "contains", weight: 0.8 });
+            if (nodes.has(`m${(pm as any).memory_id}`)) {
+              edges.push({ source: projNodeId, target: `m${(pm as any).memory_id}`, type: "contains", weight: 0.8 });
             }
           }
         }
 
-        return json({
-          nodes: [...nodes.values()],
-          edges: edges,
-          node_count: nodes.size,
-          edge_count: edges.length,
-        });
+        const result = { nodes: [...nodes.values()], edges, links: edges.slice(), node_count: nodes.size, edge_count: edges.length };
+        graphCache = { key: cacheKey, data: result, ts: Date.now() };
+        log.info({ msg: "graph_served", nodes: nodes.size, edges: edges.length, cached: false, rid: requestId });
+        return json(result);
       } catch (e: any) {
         return errorResponse(`Graph failed: ${e.message}`, 500);
       }
     }
 
-    // Graph visualization page
+        // Graph visualization page
     if (url.pathname === "/graph/view" && method === "GET") {
-      const graphHtml = await Bun.file(resolve(import.meta.dir, "engram-graph.html")).text().catch(() => null);
+      const graphHtml = await readFile(resolve(__dirname, "engram-graph.html"), "utf-8").catch(() => null);
       if (!graphHtml) return errorResponse("Graph view not found. Place engram-graph.html alongside server.ts", 404);
       return new Response(graphHtml, { headers: { "Content-Type": "text/html" } });
     }
@@ -5558,7 +6202,7 @@ If no meaningful inferences, return {"derived": []}`;
         // Run normal search then filter to project scope
         const allResults = await hybridSearch(query, limit * 3, false, true, true);
         const scoped = allResults.filter(r => projectMemIds.includes(r.id)).slice(0, limit);
-        for (const r of scoped) trackAccess.run(r.id);
+        for (const r of scoped) trackAccessWithFSRS(r.id);
         return json({ results: scoped, count: scoped.length, project_id: projectId });
       } catch (e: any) {
         return errorResponse(`Project search failed: ${e.message}`, 500);
@@ -5582,7 +6226,7 @@ If no meaningful inferences, return {"derived": []}`;
 
         const allResults = await hybridSearch(query, limit * 3, false, true, true);
         const scoped = allResults.filter(r => entityMemIds.includes(r.id)).slice(0, limit);
-        for (const r of scoped) trackAccess.run(r.id);
+        for (const r of scoped) trackAccessWithFSRS(r.id);
         return json({ results: scoped, count: scoped.length, entity_id: entityId });
       } catch (e: any) {
         return errorResponse(`Entity search failed: ${e.message}`, 500);
@@ -5604,6 +6248,8 @@ If no meaningful inferences, return {"derived": []}`;
       const dynamicCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_static = 0 AND is_forgotten = 0").get() as { count: number };
       const versionedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE version > 1").get() as { count: number };
       const archivedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_archived = 1 AND is_forgotten = 0").get() as { count: number };
+      const pendingCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE status = 'pending' AND is_forgotten = 0").get() as { count: number };
+      const rejectedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE status = 'rejected'").get() as { count: number };
       const inferenceCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_inference = 1").get() as { count: number };
 
       const linkTypes = db.prepare(
@@ -5620,13 +6266,15 @@ If no meaningful inferences, return {"derived": []}`;
          FROM conversations c GROUP BY agent ORDER BY total_messages DESC`
       ).all();
 
-      const dbSize = Bun.file(DB_PATH).size;
+      const dbSize = statSync(DB_PATH).size;
       return json({
         memories: {
           total: memCount.count,
           embedded: embCount.count,
           forgotten: forgottenCount.count,
           archived: archivedCount.count,
+          pending: pendingCount.count,
+          rejected: rejectedCount.count,
           static: staticCount.count,
           dynamic: dynamicCount.count,
           versioned: versionedCount.count,
@@ -5648,9 +6296,227 @@ If no meaningful inferences, return {"derived": []}`;
       });
     }
 
-    return errorResponse("Not found", 404);
-  },
+    // ========================================================================
+    // INBOX / REVIEW QUEUE — v5.1
+    // ========================================================================
+
+    // List pending memories
+    if (url.pathname === "/inbox" && method === "GET") {
+      const limit = Math.min(Number(url.searchParams.get("limit") || 50), 200);
+      const offset = Number(url.searchParams.get("offset") || 0);
+      const pending = listPending.all(auth.user_id, limit, offset) as any[];
+      const total = (countPending.get(auth.user_id) as { count: number }).count;
+      for (const p of pending) {
+        try { if (p.tags) p.tags = JSON.parse(p.tags); } catch { p.tags = []; }
+      }
+      return json({ pending, count: pending.length, total, offset, limit });
+    }
+
+    // Approve a pending memory
+    if (url.pathname.match(/^\/inbox\/\d+\/approve$/) && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      const id = Number(url.pathname.split("/")[2]);
+      const mem = getMemoryWithoutEmbedding.get(id) as any;
+      if (!mem) return errorResponse("Not found", 404);
+      if (mem.status !== "pending") return errorResponse(`Memory is already ${mem.status}`, 400);
+      approveMemory.run(id, auth.user_id);
+      audit(auth.user_id, "inbox.approve", "memory", id, null, clientIp, requestId);
+      emitWebhookEvent("memory.approved", { id }, auth.user_id);
+      return json({ approved: true, id });
+    }
+
+    // Reject a pending memory
+    if (url.pathname.match(/^\/inbox\/\d+\/reject$/) && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      const id = Number(url.pathname.split("/")[2]);
+      const mem = getMemoryWithoutEmbedding.get(id) as any;
+      if (!mem) return errorResponse("Not found", 404);
+      if (mem.status !== "pending") return errorResponse(`Memory is already ${mem.status}`, 400);
+      const body = await req.json().catch(() => ({})) as any;
+      rejectMemory.run(id, auth.user_id);
+      audit(auth.user_id, "inbox.reject", "memory", id, reason || null, clientIp, requestId);
+      if (body.reason) {
+        db.prepare("UPDATE memories SET forget_reason = ? WHERE id = ?").run(body.reason, id);
+      }
+      emitWebhookEvent("memory.rejected", { id, reason: body.reason || null }, auth.user_id);
+      return json({ rejected: true, id });
+    }
+
+    // Edit + approve in one shot
+    if (url.pathname.match(/^\/inbox\/\d+\/edit$/) && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const id = Number(url.pathname.split("/")[2]);
+        const mem = getMemoryWithoutEmbedding.get(id) as any;
+        if (!mem) return errorResponse("Not found", 404);
+        const body = await req.json() as any;
+
+        const sets: string[] = ["status = 'approved'", "updated_at = datetime('now')"];
+        const vals: any[] = [];
+        if (body.content?.trim()) { sets.push("content = ?"); vals.push(body.content.trim()); }
+        if (body.category) { sets.push("category = ?"); vals.push(body.category); }
+        if (body.importance) { sets.push("importance = ?"); vals.push(Math.max(1, Math.min(10, Number(body.importance)))); }
+        if (body.tags) {
+          const tags = Array.isArray(body.tags) ? body.tags : body.tags.split(",");
+          sets.push("tags = ?");
+          vals.push(JSON.stringify(tags.map((t: any) => String(t).trim().toLowerCase()).filter(Boolean)));
+        }
+        vals.push(id);
+        db.prepare(`UPDATE memories SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+
+        // Re-embed if content changed
+        if (body.content?.trim()) {
+          try {
+            const emb = await embed(body.content.trim());
+            updateMemoryEmbedding.run(embeddingToBuffer(emb), id);
+            try { updateMemoryVec.run(embeddingToVectorJSON(emb), id); } catch {}
+          } catch {}
+        }
+
+        emitWebhookEvent("memory.approved", { id, edited: true }, auth.user_id);
+        return json({ approved: true, edited: true, id });
+      } catch (e: any) {
+        return errorResponse(`Edit failed: ${e.message}`, 500);
+      }
+    }
+
+    // Bulk approve/reject
+    if (url.pathname === "/inbox/bulk" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const body = await req.json() as any;
+        const ids = body.ids;
+        const action = body.action; // "approve" or "reject"
+        if (!Array.isArray(ids) || !ids.length) return errorResponse("ids array required");
+        if (action !== "approve" && action !== "reject") return errorResponse("action must be 'approve' or 'reject'");
+
+        let count = 0;
+        const stmt = action === "approve" ? approveMemory : rejectMemory;
+        for (const id of ids) {
+          stmt.run(id, auth.user_id);
+          count++;
+        }
+        emitWebhookEvent(`memory.bulk_${action}`, { ids, count }, auth.user_id);
+        return json({ action, count, ids });
+      } catch (e: any) {
+        return errorResponse(`Bulk ${(await req.json().catch(() => ({}))).action || "action"} failed: ${e.message}`, 500);
+      }
+    }
+
+    // ========================================================================
+    // AUDIT LOG ENDPOINT
+    // ========================================================================
+    if (url.pathname === "/audit" && method === "GET") {
+      if (!auth.is_admin) return errorResponse("Admin required", 403, requestId);
+      const limit = Math.min(Number(url.searchParams.get("limit")) || 50, 500);
+      const offset = Number(url.searchParams.get("offset")) || 0;
+      const action = url.searchParams.get("action");
+      let sql = "SELECT * FROM audit_log WHERE 1=1";
+      const params: any[] = [];
+      if (action) { sql += " AND action = ?"; params.push(action); }
+      sql += " ORDER BY id DESC LIMIT ? OFFSET ?";
+      params.push(limit, offset);
+      const entries = db.prepare(sql).all(...params);
+      const total = (db.prepare("SELECT COUNT(*) as count FROM audit_log").get() as any).count;
+      return json({ entries, total, limit, offset }, 200, { "X-Request-Id": requestId });
+    }
+
+    // ========================================================================
+    // WAL CHECKPOINT ENDPOINT
+    // ========================================================================
+    if (url.pathname === "/checkpoint" && method === "POST") {
+      if (!auth.is_admin) return errorResponse("Admin required", 403, requestId);
+      const result = db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as any;
+      audit(auth.user_id, "checkpoint", null, null, JSON.stringify(result), clientIp, requestId);
+      log.info({ msg: "wal_checkpoint_manual", result, rid: requestId });
+      return json({ checkpointed: true, ...result }, 200, { "X-Request-Id": requestId });
+    }
+
+    // ========================================================================
+    // BACKUP ENDPOINT — download SQLite DB
+    // ========================================================================
+    if (url.pathname === "/backup" && method === "GET") {
+      if (!auth.is_admin) return errorResponse("Admin required", 403, requestId);
+      try {
+        db.prepare("PRAGMA wal_checkpoint(PASSIVE)").get();
+        const backupPath = resolve(DATA_DIR, `backup-${Date.now()}.db`);
+        copyFileSync(DB_PATH, backupPath);
+        const fileStat = statSync(backupPath);
+        const fileBuffer = readFileSync(backupPath);
+        audit(auth.user_id, "backup", null, null, `${fileStat.size} bytes`, clientIp, requestId);
+        log.info({ msg: "backup_created", size: fileStat.size, rid: requestId });
+        const resp = new Response(fileBuffer, {
+          headers: securityHeaders({
+            "Content-Type": "application/x-sqlite3",
+            "Content-Disposition": `attachment; filename="engram-${new Date().toISOString().slice(0,10)}.db"`,
+          }),
+        });
+        setTimeout(() => { try { const { unlinkSync } = require("fs"); unlinkSync(backupPath); } catch {} }, 30_000);
+        return resp;
+      } catch (e: any) {
+        return errorResponse(`Backup failed: ${e.message}`, 500, requestId);
+      }
+    }
+
+    // ========================================================================
+    // CATCH-ALL 404 with request log
+    // ========================================================================
+    {
+      const elapsed = (performance.now() - requestStart).toFixed(1);
+      log.info({ msg: "req", method, path: url.pathname, status: 404, ms: elapsed, ip: clientIp, user: auth.user_id, rid: requestId });
+    }
+        return errorResponse("Not found", 404, requestId);
+}
+
+const server = createServer(async (nodeReq, nodeRes) => {
+  try {
+    _currentClientIp = nodeReq.socket.remoteAddress?.replace(/^::ffff:/, "") || "unknown";
+    const webReq = await nodeToWebRequest(nodeReq);
+    const webRes = await fetchHandler(webReq);
+    await writeWebResponse(nodeRes, webRes);
+  } catch (err: any) {
+    log.error({ msg: "unhandled_request_error", error: err.message });
+    if (!nodeRes.headersSent) {
+      nodeRes.writeHead(500, { "Content-Type": "application/json" });
+    }
+    nodeRes.end(JSON.stringify({ error: "Internal server error" }));
+  }
 });
+
+server.listen(PORT, HOST, () => {
+  log.info({ msg: "node_http_server_listening", host: HOST, port: PORT });
+});
+
+// ============================================================================
+// WAL CHECKPOINT (every 5 minutes)
+// ============================================================================
+function walCheckpoint() {
+  try {
+    const result = db.prepare("PRAGMA wal_checkpoint(PASSIVE)").get() as any;
+    if (result && result.checkpointed > 0) log.debug({ msg: "wal_checkpoint", ...result });
+  } catch (e: any) {
+    log.error({ msg: "wal_checkpoint_failed", error: e.message });
+  }
+}
+setInterval(walCheckpoint, 5 * 60 * 1000);
+
+// ============================================================================
+// GRACEFUL SHUTDOWN
+// ============================================================================
+async function gracefulShutdown(signal: string) {
+  log.info({ msg: "shutdown_start", signal });
+  try {
+    db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+    log.info({ msg: "wal_final_checkpoint" });
+  } catch (e: any) {
+    log.error({ msg: "wal_checkpoint_failed", error: e.message });
+  }
+  try { db.close(); } catch {}
+  log.info({ msg: "shutdown_complete", signal });
+  process.exit(0);
+}
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
 // ============================================================================
 // STARTUP
@@ -5658,22 +6524,22 @@ If no meaningful inferences, return {"derived": []}`;
 
 const noEmb = (countNoEmbedding.get() as { count: number }).count;
 if (noEmb > 0) {
-  console.log(`Found ${noEmb} memories without embeddings, backfilling...`);
+  log.info({ msg: "backfill_start", count: noEmb });
   backfillEmbeddings(200).then((n) => {
-    console.log(`Backfilled ${n} memories. Remaining: ${noEmb - n}`);
-  }).catch(e => console.error("Backfill error:", e));
+    log.info({ msg: "backfill_done", backfilled: n, remaining: noEmb - n });
+  }).catch(e => log.error({ msg: "backfill_error", error: String(e) }));
 }
 
 // Auto-forget sweep timer
 setInterval(() => {
   const swept = sweepExpiredMemories();
-  if (swept > 0) console.log(`Auto-forget sweep: ${swept} memories forgotten`);
+  if (swept > 0) log.info({ msg: "auto_forget_sweep", swept });
 }, FORGET_SWEEP_INTERVAL);
 
 // Decay score refresh (every 15 minutes)
 setInterval(() => {
   const updated = updateDecayScores();
-  if (updated > 0) console.log(`Decay refresh: ${updated} scores updated`);
+  if (updated > 0) log.info({ msg: "decay_refresh", updated });
 }, 15 * 60 * 1000);
 
 // Auto-consolidation sweep (if LLM configured)
@@ -5681,9 +6547,9 @@ if (LLM_API_KEY) {
   setInterval(async () => {
     try {
       const consolidated = await runConsolidationSweep();
-      if (consolidated > 0) console.log(`Auto-consolidation: ${consolidated} memories consolidated`);
+      if (consolidated > 0) log.info({ msg: "auto_consolidation", consolidated });
     } catch (e: any) {
-      console.error("Auto-consolidation error:", e.message);
+      log.error({ msg: "auto_consolidation_error", error: e.message });
     }
   }, CONSOLIDATION_INTERVAL);
 }
@@ -5691,20 +6557,40 @@ if (LLM_API_KEY) {
 sweepExpiredMemories();
 updateDecayScores(); // Initial decay score calculation
 
+// Migrate BLOB embeddings → FLOAT32 vector column (one-time, idempotent)
+{
+  const unmigrated = db.prepare(
+    "SELECT id, embedding FROM memories WHERE embedding IS NOT NULL AND embedding_vec IS NULL"
+  ).all() as Array<{ id: number; embedding: ArrayBuffer | Buffer }>;
+  if (unmigrated.length > 0) {
+    let migrated = 0;
+    const batch = db.transaction(() => {
+      for (const m of unmigrated) {
+        try {
+          // .all() returns ArrayBuffer, .get() returns Buffer — handle both
+          const ab = m.embedding instanceof ArrayBuffer ? m.embedding
+            : m.embedding.buffer.slice(m.embedding.byteOffset, m.embedding.byteOffset + m.embedding.byteLength);
+          const emb = new Float32Array(ab);
+          const vecJson = embeddingToVectorJSON(emb);
+          updateMemoryVec.run(vecJson, m.id);
+          migrated++;
+        } catch {}
+      }
+    });
+    batch();
+    log.info({ msg: "vector_migration", migrated, total: unmigrated.length });
+  }
+}
+
 // Digest scheduler — check every 5 minutes for due digests
 setInterval(async () => {
   try {
     const sent = await processScheduledDigests();
-    if (sent > 0) console.log(`Digest scheduler: sent ${sent} digest(s)`);
+    if (sent > 0) log.info({ msg: "digest_sent", count: sent });
   } catch (e: any) {
-    console.error("Digest scheduler error:", e.message);
+    log.error({ msg: "digest_scheduler_error", error: e.message });
   }
 }, 5 * 60 * 1000);
 
-console.log(`Engram v4.5 listening on ${HOST}:${PORT}`);
-console.log(`Database: ${DB_PATH}`);
-console.log(`Embedding model: ${EMBEDDING_MODEL} (${EMBEDDING_DIM}d)`);
-console.log(`LLM: ${LLM_API_KEY ? `${LLM_MODEL} via ${LLM_URL}` : "not configured"}`);
-console.log(`Auto-link: threshold=${AUTO_LINK_THRESHOLD}, max=${AUTO_LINK_MAX}`);
-console.log(`Decay: half-life=${DECAY_HALF_LIFE_DAYS}d, consolidation=${LLM_API_KEY ? `threshold=${CONSOLIDATION_THRESHOLD}` : "disabled (no LLM)"}`);
-console.log(`Auto-forget sweep: every ${FORGET_SWEEP_INTERVAL / 1000}s`);
+log.info({ msg: "server_started", version: "5.3", host: HOST, port: PORT, open_access: OPEN_ACCESS, cors: CORS_ORIGIN, log_level: process.env.ENGRAM_LOG_LEVEL || "info", allowed_ips: ALLOWED_IPS.length || "any" });
+log.info({ msg: "config", db: DB_PATH, embedding: `${EMBEDDING_MODEL} (${EMBEDDING_DIM}d)`, llm: LLM_API_KEY ? `${LLM_MODEL} via ${LLM_URL}` : "not configured", auto_link: { threshold: AUTO_LINK_THRESHOLD, max: AUTO_LINK_MAX }, fsrs6: { w20: FSRS6_WEIGHTS[20], retention: FSRS_DEFAULT_RETENTION }, consolidation: LLM_API_KEY ? CONSOLIDATION_THRESHOLD : "disabled", sweep_interval_s: FORGET_SWEEP_INTERVAL / 1000 });
