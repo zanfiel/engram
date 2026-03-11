@@ -3,8 +3,46 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Engram — Persistent Memory for AI Agents</title>
-<meta name="description" content="Give your AI agents long-term memory. Store, search, recall, and link memories with automatic embeddings, versioning, and graph visualization.">
+<title>Engram — Open Source Persistent Memory for AI Agents</title>
+<meta name="description" content="Open source memory server for AI agents. FSRS-6 spaced repetition, native vector search, knowledge graph, local embeddings. Self-hosted, single libsql file, zero external dependencies.">
+<meta name="keywords" content="AI agent memory, persistent memory, spaced repetition, FSRS, vector search, knowledge graph, RAG, MCP server, open source, self-hosted, Bun, libsql, embeddings, LLM memory">
+<meta name="author" content="zanfiel">
+<meta name="theme-color" content="#0a0e17">
+<link rel="canonical" href="https://engram.lol/">
+
+<!-- Open Graph -->
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://engram.lol/">
+<meta property="og:title" content="Engram — Open Source Persistent Memory for AI Agents">
+<meta property="og:description" content="Give your AI agents long-term memory. FSRS-6 spaced repetition, native vector search, knowledge graphs. Self-hosted, zero external dependencies.">
+<meta property="og:site_name" content="Engram">
+
+<!-- Twitter Card -->
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Engram — Persistent Memory for AI Agents">
+<meta name="twitter:description" content="Open source memory server with FSRS-6 spaced repetition, native vector search, and automatic knowledge graphs. Self-hosted, zero dependencies.">
+
+<!-- JSON-LD -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Engram",
+  "description": "Open source persistent memory server for AI agents with FSRS-6 spaced repetition, native vector search via libsql, and automatic knowledge graphs.",
+  "url": "https://engram.lol",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Linux, macOS, Windows",
+  "license": "https://opensource.org/licenses/MIT",
+  "codeRepository": "https://github.com/zanfiel/engram",
+  "programmingLanguage": "TypeScript",
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  }
+}
+</script>
+
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -73,15 +111,6 @@ section{padding:6rem 2rem}
 .code-body .num{color:var(--pink)}
 .code-body .cm{color:var(--muted)}
 
-/* Compare */
-.compare-table{width:100%;border-collapse:collapse;font-size:13px}
-.compare-table th{text-align:left;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.08);color:var(--text);font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:1px}
-.compare-table td{padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.03);color:var(--dim)}
-.compare-table tr:hover td{background:rgba(255,255,255,0.02)}
-.compare-table .yes{color:var(--green)}
-.compare-table .no{color:var(--red);opacity:0.5}
-.compare-table td:first-child{color:var(--text);font-weight:500}
-
 /* CTA */
 .cta{text-align:center;padding:8rem 2rem;position:relative}
 .cta::before{content:'';position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 60% 50% at 50% 100%,rgba(129,140,248,0.08),transparent)}
@@ -119,14 +148,13 @@ nav .links a:hover{color:var(--text);text-decoration:none}
     <a href="#features">Features</a>
     <a href="#sdks">SDKs</a>
     <a href="https://demo.engram.lol/gui">Demo</a>
-    <a href="#compare">Compare</a>
     <a href="https://github.com/zanfiel/engram">GitHub</a>
   </div>
 </nav>
 
 <!-- Hero -->
 <section class="hero">
-  <div class="hero-badge"><span class="dot"></span> Open Source</div>
+  <div class="hero-badge"><span class="dot"></span> v5.2 · Open Source</div>
   <h1>Memory for<br><span>AI agents</span></h1>
   <p>Give your agents persistent, searchable, self-organizing memory. Store what they learn. Recall it when it matters. No external APIs required.</p>
   <div class="hero-actions">
@@ -149,18 +177,103 @@ nav .links a:hover{color:var(--text);text-decoration:none}
 </section>
 
 <!-- Features -->
+
+<!-- What's New in v5.2 -->
+<section style="background:var(--bg2);padding:4rem 2rem">
+  <div class="container">
+    <div class="section-label" style="color:var(--green)">New in v5.2</div>
+    <h2 class="section-title">Hardened, auditable, observable</h2>
+    <p class="section-desc">Production-grade security and operational tooling.</p>
+
+    <div class="features" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
+      <div class="feature" style="border-color:rgba(248,113,113,0.12)">
+        <div class="feature-icon" style="background:rgba(248,113,113,0.1);color:var(--red)">🔒</div>
+        <h3>Security Hardening</h3>
+        <p>Auth required by default. Body &amp; content size limits. GUI auth rate limiting with lockout. Timing-safe password comparison. CORS origin pinning. IP allowlists. Security headers on every response.</p>
+      </div>
+      <div class="feature" style="border-color:rgba(129,140,248,0.12)">
+        <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">📋</div>
+        <h3>Audit Trail</h3>
+        <p>Every mutation logged — who, what, when. Paginated audit endpoint with category filtering. Never wonder what changed or why.</p>
+      </div>
+      <div class="feature" style="border-color:rgba(34,211,238,0.12)">
+        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">📊</div>
+        <h3>Structured Logging</h3>
+        <p>JSON logs with request IDs, configurable log levels, and clean formatting. Built for <code>jq</code> pipelines and log aggregation.</p>
+      </div>
+      <div class="feature" style="border-color:rgba(52,211,153,0.12)">
+        <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">📥</div>
+        <h3>Review Queue</h3>
+        <p>Memories can land in an inbox for human review before going live. Approve, reject, or edit — individually or in bulk.</p>
+      </div>
+      <div class="feature" style="border-color:rgba(251,191,36,0.12)">
+        <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:#fbbf24">💾</div>
+        <h3>Backup &amp; Checkpoint</h3>
+        <p>API-triggered WAL checkpoints and full database downloads. Periodic auto-checkpoint. Graceful shutdown with data flush.</p>
+      </div>
+      <div class="feature" style="border-color:rgba(167,139,250,0.12)">
+        <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:#a78bfa">🔄</div>
+        <h3>GUI Hot-Reload</h3>
+        <p>Send SIGHUP or set <code>ENGRAM_HOT_RELOAD=1</code> — the GUI reloads from disk without restarting the server.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- What's New in v5.0 -->
+<section style="padding:4rem 2rem">
+  <div class="container">
+    <div class="section-label" style="color:var(--dim)">Also in v5.0</div>
+    <h2 class="section-title">Cognitive science meets vector search</h2>
+    <p class="section-desc">Two major upgrades that change how Engram thinks about memory.</p>
+
+    <div class="features" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr))">
+      <div class="feature" style="border-color:rgba(129,140,248,0.12)">
+        <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">🧠</div>
+        <h3>FSRS-6 Spaced Repetition</h3>
+        <p style="margin-bottom:12px">Replaces exponential decay with a <strong style="color:var(--text)">21-parameter power-law forgetting curve</strong> trained on millions of real reviews. Memory stability grows with each access — just like human memory.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <code style="font-size:11px;color:var(--accent)">R = (1 + t/S)^(-w₂₀)</code>
+          <span style="font-size:11px;color:var(--muted)">Power-law decay</span>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:16px;font-size:12px;color:var(--dim)">
+          <span>⚡ Storage strength — never decays</span>
+        </div>
+        <div style="display:flex;gap:16px;font-size:12px;color:var(--dim)">
+          <span>📉 Retrieval strength — power-law decay</span>
+        </div>
+      </div>
+      <div class="feature" style="border-color:rgba(34,211,238,0.12)">
+        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">🔍</div>
+        <h3>Native Vector Search</h3>
+        <p style="margin-bottom:12px">Migrated from bun:sqlite to <strong style="color:var(--text)">libsql with FLOAT32(384) vector columns</strong> and ANN indexing. Search is O(log n) via <code>vector_top_k()</code> instead of brute-force loops.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <code style="font-size:11px;color:var(--cyan)">vector_top_k(idx, vec, 25)</code>
+          <span style="font-size:11px;color:var(--muted)">ANN index</span>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:16px;font-size:12px;color:var(--dim)">
+          <span>📊 Embeddings still generated locally</span>
+        </div>
+        <div style="display:flex;gap:16px;font-size:12px;color:var(--dim)">
+          <span>🚀 No external API needed</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
 <section id="features">
   <div class="container">
     <div class="section-label">Features</div>
-    <h2 class="section-title">28 features. One SQLite file.</h2>
-    <p class="section-desc">Zero external dependencies. Runs anywhere Bun runs. Every feature below ships in a single 5,700-line TypeScript file.</p>
+    <h2 class="section-title">35+ features. One libsql file.</h2>
+    <p class="section-desc">Zero external dependencies. FSRS-6 spaced repetition, native vector search, dual-strength memory. Ships in a single TypeScript file.</p>
 
     <div style="margin-bottom:1rem;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--cyan)">Core Memory</div>
     <div class="features" style="margin-bottom:3rem">
       <div class="feature">
         <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">🧠</div>
         <h3>Semantic + Full-Text Search</h3>
-        <p>384-dim embeddings generated locally with MiniLM. Hybrid search combines vector similarity with SQLite FTS5 keyword matching. No OpenAI key required.</p>
+        <p>384-dim embeddings with native libsql vector indexing (FLOAT32 + ANN). O(log n) vector_top_k search combined with FTS5 keyword matching. No external API required.</p>
       </div>
       <div class="feature">
         <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">🔗</div>
@@ -174,8 +287,8 @@ nav .links a:hover{color:var(--text);text-decoration:none}
       </div>
       <div class="feature">
         <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">📊</div>
-        <h3>Decay Scoring</h3>
-        <p>Time-weighted importance with access reinforcement. Static memories never decay. Dynamic ones fade unless accessed. Configurable half-life.</p>
+        <h3>FSRS-6 Spaced Repetition</h3>
+        <p>21-parameter power-law forgetting curve (ported from open-spaced-repetition). Every access is an implicit review building stability. Dual-strength model tracks storage strength (never decays) + retrieval strength (power-law decay).</p>
       </div>
       <div class="feature">
         <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:var(--amber)">🏷️</div>
@@ -378,54 +491,7 @@ nav .links a:hover{color:var(--text);text-decoration:none}
           <span style="padding:4px 12px;border-radius:99px;font-size:11px;background:rgba(244,114,182,0.1);color:var(--pink)">Category Filters</span>
         </div>
         <a href="https://demo.engram.lol/gui" class="btn btn-primary" style="margin-top:1rem">Open Live Demo →</a>
-        <div style="font-size:12px;color:var(--muted)">Password: <code style="color:var(--accent)">demo</code></div>
       </div>
-    </div>
-  </div>
-</section>
-
-<!-- Compare -->
-<section id="compare" style="background:var(--bg2)">
-  <div class="container">
-    <div class="section-label">Comparison</div>
-    <h2 class="section-title">How Engram stacks up</h2>
-    <p class="section-desc">Built for developers who want to own their stack.</p>
-
-    <div style="overflow-x:auto">
-    <table class="compare-table">
-      <thead>
-        <tr><th>Feature</th><th>Engram</th><th>Mem0</th><th>Supermemory</th></tr>
-      </thead>
-      <tbody>
-        <tr><td>Semantic search</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
-        <tr><td>Local embeddings (no API)</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Full-text search (FTS5)</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Graph visualization</td><td class="yes">✓</td><td class="no">✗</td><td class="yes">✓</td></tr>
-        <tr><td>Memory versioning</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Auto-deduplication</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Auto-forget / TTL</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Decay scoring</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Contradiction detection</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Time-travel queries</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Smart context builder (RAG)</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Reflections / meta-analysis</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Derived memories (inference)</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Auto-consolidation</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>LLM reranker</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Fact extraction + auto-tagging</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td></tr>
-        <tr><td>Conversation extraction</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td></tr>
-        <tr><td>Multi-tenant + API keys</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td></tr>
-        <tr><td>Spaces / collections</td><td class="yes">✓</td><td class="no">✗</td><td class="yes">✓</td></tr>
-        <tr><td>Entities & projects</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Webhooks & digests</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Cross-instance sync</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>MCP server + CLI</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>URL ingest</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>No external API needed</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>SQLite (zero deps)</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Self-hosted</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
-      </tbody>
-    </table>
     </div>
   </div>
 </section>
