@@ -1,10 +1,10 @@
-FROM node:22-slim
+FROM node:22
 
 WORKDIR /app
 
 # Install deps first for layer caching
 COPY package.json package-lock.json* ./
-RUN npm install --include=optional
+RUN npm install --include=optional && npm install @libsql/linux-x64-gnu@0.5.22 sharp
 
 # Copy app files
 COPY server.ts engram-gui.html engram-login.html ./
