@@ -43,10 +43,6 @@ curl -X POST http://localhost:4200/recall \
 - 🧹 **Auto-deduplication** — detects and merges near-duplicate memories
 - ⏰ **Implicit spaced repetition** — every access is an FSRS review, building stability over time
 - 🔍 **Fact extraction & auto-tagging** — LLM extracts facts, classifies, tags (optional, requires LLM)
-- 🧮 **Structured fact extraction** — instant regex extraction of quantities, amounts, dates on every store (no LLM required)
-- ❤️ **User preference tracking** — auto-detects likes/dislikes/favorites from natural language
-- 📌 **Current state tracking** — key-value state changes extracted and kept current automatically
-- 🎯 **5-layer smart context** — State → Preferences → Facts → Semantic Matches → Recent Activity
 - 💬 **Conversation extraction** — feed chat logs, get structured memories
 - ⚡ **Contradiction detection** — find and resolve conflicting memories
 - ⏪ **Time-travel queries** — query what you knew at any point in time
@@ -69,64 +65,6 @@ curl -X POST http://localhost:4200/recall \
 - 📊 **Structured JSON logging** — configurable log levels, request IDs, zero raw console output
 - 💾 **Backup & checkpoint** — download SQLite DB via API, manual WAL checkpoint, graceful shutdown
 - 🐳 **One-command deploy** — `docker compose up`
-
----
-
-## What's New in v5.5
-
-### Intelligence Layer
-
-Every memory stored is now **instantly analyzed** at write time using fast regex extraction — no LLM required, zero latency.
-
-- **Structured facts** — Quantities, amounts, dates, and relationships extracted from natural language. "I bought 3 books and spent $45 on them" → `{subject: "user", verb: "bought", object: "books", quantity: 3}` + `{verb: "spent", quantity: 45, unit: "dollars"}`.
-- **User preferences** — Likes, dislikes, and favorites auto-detected. "I love cooking Italian food" → `{domain: "food", preference: "likes cooking Italian food"}`. Domain auto-inferred from keywords. Strength reinforced with repeated mentions.
-- **Current state** — Key-value state changes tracked. "I moved to Portland" → `{key: "current_location", value: "Portland"}`. Latest value always wins.
-- **5-layer /context** — The context builder now assembles: Current State → User Preferences → Extracted Facts → Relevant Memories → Recent Activity. LLMs see pre-structured data before raw text.
-- **New endpoints** — `GET /facts`, `GET /state`, `GET /preferences` to query the intelligence layer directly.
-
-```bash
-# Store a memory — facts, preferences, and state extracted instantly
-curl -X POST http://localhost:4200/store \
-  -H "Authorization: Bearer eg_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{"content": "I bought 3 albums and spent $45 on them. I love listening to music.", "category": "state"}'
-
-# Query extracted facts
-curl http://localhost:4200/facts -H "Authorization: Bearer eg_your_key"
-# → [{subject: "user", verb: "bought", object: "albums", quantity: 3},
-#    {subject: "user", verb: "spent", object: "them", quantity: 45, unit: "dollars"}]
-
-# Query preferences
-curl http://localhost:4200/preferences -H "Authorization: Bearer eg_your_key"
-# → [{domain: "music", preference: "likes listening to music", strength: 1}]
-
-# Context now includes all intelligence layers
-curl -X POST http://localhost:4200/context \
-  -H "Authorization: Bearer eg_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "How many albums?", "max_tokens": 4000}'
-# → ## User Preferences
-#   - [music] likes listening to music
-#   ## Extracted Facts
-#   - user bought albums (qty: 3)
-#   - user spent on them (qty: 45 dollars)
-#   ## Relevant Memories
-#   - [state] I bought 3 albums and spent $45 on them...
-```
-
-The fast extraction runs **synchronously** on `/store` with pure regex — no API calls, no queue, no latency. Optional LLM enrichment still runs async when configured.
-
----
-
-## What's New in v5.4
-
-### Node.js Native
-
-- **Migrated from Bun to Node.js 22** — uses `--experimental-strip-types` for native TypeScript execution. No transpiler, no bundler, no Bun-specific APIs.
-- **RBAC & Roles** — API keys carry `admin`, `writer`, or `reader` roles for fine-grained access control.
-- **Security hardening** — HSTS, Content-Security-Policy, SSRF protection on webhooks, per-IP rate limiting.
-- **Review queue** — memories can land in an inbox for human approval before going live.
-- **Backup & checkpoint** — API-triggered WAL checkpoints and full database downloads.
 
 ---
 
@@ -158,7 +96,7 @@ curl http://localhost:4200/audit?limit=5 \
 All output is JSON with configurable levels:
 
 ```json
-{"level":"info","ts":"2026-03-10T09:32:06Z","msg":"server_started","version":"5.5","port":4200}
+{"level":"info","ts":"2026-03-10T09:32:06Z","msg":"server_started","version":"5.3","port":4200}
 ```
 
 Levels: `debug`, `info`, `warn`, `error`, `none`. Set via `ENGRAM_LOG_LEVEL`.
@@ -190,15 +128,6 @@ docker compose up -d
 
 Engram is now running at `http://localhost:4200`.
 
-### From source (Node.js 22+)
-
-```bash
-git clone https://github.com/zanfiel/engram.git
-cd engram
-npm install
-ENGRAM_GUI_PASSWORD=your-password node --experimental-strip-types server.ts
-```
-
 ### From source (Bun)
 
 ```bash
@@ -206,6 +135,15 @@ git clone https://github.com/zanfiel/engram.git
 cd engram
 bun install
 ENGRAM_GUI_PASSWORD=your-password bun run server.ts
+```
+
+### From source (Node.js 22+)
+
+```bash
+git clone https://github.com/zanfiel/engram.git
+cd engram
+npm install
+ENGRAM_GUI_PASSWORD=your-password node --experimental-strip-types server.ts
 ```
 
 ### Create an API key
@@ -224,10 +162,10 @@ Save the returned `eg_...` key — it's shown only once.
 
 ### TypeScript / JavaScript
 
-The SDK lives in `sdk-ts/` within the repo. Zero dependencies — uses native `fetch`.
+The SDK lives in `sdk/` within the repo. Zero dependencies — uses native `fetch`.
 
 ```bash
-cd sdk-ts && npm install && npm run build
+cd sdk && npm install && npm run build
 ```
 
 ```ts
@@ -340,7 +278,7 @@ Add to `claude_desktop_config.json`:
   "mcpServers": {
     "engram": {
       "command": "node",
-      "args": ["--experimental-strip-types", "path/to/engram/mcp-server.ts"],
+      "args": ["path/to/engram/mcp-server.mjs"],
       "env": {
         "ENGRAM_URL": "http://localhost:4200",
         "ENGRAM_API_KEY": "eg_your_key"
@@ -375,14 +313,14 @@ Add to `claude_desktop_config.json`:
 
 ## CLI
 
-Full-featured command-line interface in `cli.ts`.
+Full-featured command-line interface in `sdk/cli.mjs`.
 
 ```bash
 # Symlink for global access
-ln -s $(pwd)/cli.ts ~/.local/bin/engram
+ln -s $(pwd)/sdk/cli.mjs ~/.local/bin/engram
 
 # Or run directly
-node --experimental-strip-types cli.ts <command>
+node sdk/cli.mjs <command>
 ```
 
 ### Commands
@@ -455,9 +393,6 @@ Use `X-Space: space-name` (or `X-Engram-Space`) header to scope operations to a 
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/facts` | Query extracted structured facts |
-| `GET` | `/state` | Query current state key-value pairs |
-| `GET` | `/preferences` | Query detected user preferences |
 | `POST` | `/add` | Extract memories from conversations |
 | `POST` | `/ingest` | Extract facts from URLs or text |
 | `POST` | `/derive` | Generate inferred memories |
@@ -560,7 +495,7 @@ Use `X-Space: space-name` (or `X-Engram-Space`) header to scope operations to a 
 
 4. **Fact extraction** — If an LLM is configured, Engram analyzes new memories, extracts static facts, auto-tags with keywords, classifies importance, and detects relationships to existing memories.
 
-5. **Recall** — Five retrieval layers combined: current state (always), user preferences (always), extracted facts (structured), semantic matches (cosine similarity weighted by FSRS retrievability), recent (temporal). Every recalled memory gets an implicit FSRS review, building stability.
+5. **Recall** — Four retrieval strategies combined: static facts (always), semantic matches (cosine similarity), high-importance (weighted by FSRS retrievability), recent (temporal). Every recalled memory gets an implicit FSRS review, building stability.
 
 6. **Spaced repetition** — Each access is an FSRS-6 review graded as "Good". Archived/forgotten memories receive an "Again" grade. Stability grows with successful recalls — frequently accessed memories can have stability measured in months or years.
 
@@ -595,7 +530,7 @@ Use `X-Space: space-name` (or `X-Engram-Space`) header to scope operations to a 
 └─────────────────────────────────────────────┘
 ```
 
-- **Runtime:** Node.js 22+ (primary, with `--experimental-strip-types`) or Bun
+- **Runtime:** Bun (primary) or Node.js 22+ (with `--experimental-strip-types`)
 - **Database:** libsql (SQLite fork with vector column support)
 - **Embeddings:** Xenova/all-MiniLM-L6-v2 (384-dim, runs locally via ONNX)
 - **Search:** In-memory cosine similarity + FTS5 full-text hybrid
@@ -663,12 +598,55 @@ server {
 
 ---
 
+## Comparison
+
+| Feature | Engram | Mem0 | Supermemory |
+|---------|--------|------|-------------|
+| **Spaced repetition (FSRS-6)** | ✅ | ❌ | ❌ |
+| **Dual-strength memory model** | ✅ | ❌ | ❌ |
+| Semantic search (hybrid) | ✅ | ✅ | ✅ |
+| Local embeddings (no API) | ✅ | ❌ | ❌ |
+| Full-text search (FTS5) | ✅ | ❌ | ❌ |
+| Graph visualization | ✅ | ❌ | ✅ |
+| Memory versioning | ✅ | ❌ | ❌ |
+| Auto-deduplication | ✅ | ❌ | ❌ |
+| Auto-forget / TTL | ✅ | ❌ | ❌ |
+| Contradiction detection | ✅ | ❌ | ❌ |
+| Time-travel queries | ✅ | ❌ | ❌ |
+| Smart context builder (RAG) | ✅ | ❌ | ❌ |
+| Reflections | ✅ | ❌ | ❌ |
+| Derived memories | ✅ | ❌ | ❌ |
+| Auto-consolidation | ✅ | ❌ | ❌ |
+| LLM reranker | ✅ | ❌ | ❌ |
+| Fact extraction + auto-tagging | ✅ | ✅ | ❌ |
+| Conversation extraction | ✅ | ✅ | ❌ |
+| MCP server (JSON-RPC stdio) | ✅ | ❌ | ❌ |
+| CLI | ✅ | ❌ | ❌ |
+| Multi-tenant + API keys | ✅ | ✅ | ❌ |
+| Spaces / collections | ✅ | ❌ | ✅ |
+| Entities & projects | ✅ | ❌ | ❌ |
+| Episodic memory | ✅ | ❌ | ❌ |
+| Conversation log + search | ✅ | ❌ | ❌ |
+| Webhooks & digests | ✅ | ❌ | ❌ |
+| Cross-instance sync | ✅ | ❌ | ❌ |
+| URL ingest | ✅ | ❌ | ❌ |
+| Import from Mem0 / Supermemory | ✅ | — | — |
+| Review queue / inbox | ✅ | ❌ | ❌ |
+| Audit trail | ✅ | ❌ | ❌ |
+| Structured JSON logging | ✅ | ❌ | ❌ |
+| API backup & WAL checkpoint | ✅ | ❌ | ❌ |
+| Self-hosted | ✅ | ✅ | ✅ |
+| Single-file DB (zero deps) | ✅ | ❌ | ❌ |
+
+---
+
 ## Test Suite
 
 ```bash
-# Start the server with ENGRAM_OPEN_ACCESS=1, then:
-ENGRAM_TEST_URL=http://localhost:4200 node --experimental-strip-types --test tests/api.test.ts
-# 76 tests, 32 suites, 0 failures
+# Start the server, then:
+cd engram
+node --test tests/api.test.mjs
+# 38 tests, 12 suites, 0 failures
 ```
 
 ---

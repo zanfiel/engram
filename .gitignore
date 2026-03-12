@@ -1,38 +1,13 @@
-# Dependencies
+data/
 node_modules/
-bun.lockb
-
-# Database
 *.db
-*.db-journal
 *.db-wal
 *.db-shm
-data/
-
-# Environment
 .env
-
-# Build output
-sdk-ts/dist/
-sdk-py/dist/
-sdk-py/*.egg-info/
-__pycache__/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Editor
-.vscode/
-.idea/
-
-# Embeddings cache
-.onnx/
-
-# Legacy
-engram-*.bak
-megamind-*.html
-megamind-*.ts
-
-# Logs
-*.log
+.hmac_secret
+dist/
+*.bak
+*.backup
+server.ts.pre-audit-backup
+server.ts.bun-backup
+sync.log

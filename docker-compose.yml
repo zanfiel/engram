@@ -4,30 +4,15 @@ services:
     container_name: engram
     restart: unless-stopped
     ports:
-      # Bind to 127.0.0.1 by default. Use 0.0.0.0:4200:4200 only behind a reverse proxy or firewall.
       - "127.0.0.1:4200:4200"
     volumes:
-      - engram-data:/app/data
+      - ./data:/app/data
     environment:
       - ENGRAM_PORT=4200
-      - ENGRAM_GUI_PASSWORD=${ENGRAM_GUI_PASSWORD:-changeme}
-      # SECURITY: Open access grants full admin to unauthenticated requests.
-      # Only enable behind a trusted network (VPN, firewall, etc.)
-      # - ENGRAM_OPEN_ACCESS=1
-      # Optional: restrict by IP (comma-separated)
-      # - ENGRAM_ALLOWED_IPS=127.0.0.1,192.168.1.0/24
-      # Optional: restrict CORS origin (default: *)
-      # - ENGRAM_CORS_ORIGIN=https://your-app.example.com
-      # Optional: LLM for fact extraction, auto-tagging, consolidation
-      # - LLM_URL=http://host.docker.internal:4100/v1/chat/completions
-      # - LLM_API_KEY=your-key
-      # - LLM_MODEL=claude-sonnet-4-20250514
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4200/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
-      interval: 30s
-      timeout: 5s
-      start_period: 60s
-      retries: 3
-
-volumes:
-  engram-data:
+      - ENGRAM_HOST=0.0.0.0
+      # - ENGRAM_OPEN_ACCESS=1         # Uncomment for no-auth mode
+      # - ENGRAM_HMAC_SECRET=changeme  # GUI session secret
+      # - ENGRAM_GUI_PASSWORD=changeme # GUI login password
+      # - LLM_URL=                     # Optional LLM for reranking
+      # - LLM_API_KEY=
+      # - LLM_MODEL=

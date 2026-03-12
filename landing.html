@@ -3,46 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Engram — Open Source Persistent Memory for AI Agents</title>
-<meta name="description" content="Open source memory server for AI agents. FSRS-6 spaced repetition, native vector search, knowledge graph, local embeddings. Self-hosted, single libsql file, zero external dependencies.">
-<meta name="keywords" content="AI agent memory, persistent memory, spaced repetition, FSRS, vector search, knowledge graph, RAG, MCP server, open source, self-hosted, Node.js, TypeScript, libsql, embeddings, LLM memory">
-<meta name="author" content="zanfiel">
-<meta name="theme-color" content="#0a0e17">
-<link rel="canonical" href="https://engram.lol/">
-
-<!-- Open Graph -->
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://engram.lol/">
-<meta property="og:title" content="Engram — Open Source Persistent Memory for AI Agents">
-<meta property="og:description" content="Give your AI agents long-term memory. FSRS-6 spaced repetition, native vector search, knowledge graphs. Self-hosted, zero external dependencies.">
-<meta property="og:site_name" content="Engram">
-
-<!-- Twitter Card -->
-<meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Engram — Persistent Memory for AI Agents">
-<meta name="twitter:description" content="Open source memory server with FSRS-6 spaced repetition, native vector search, and automatic knowledge graphs. Self-hosted, zero dependencies.">
-
-<!-- JSON-LD -->
-<script type="application/ld+json">
-{
-  "@context": "https://schema.org",
-  "@type": "SoftwareApplication",
-  "name": "Engram",
-  "description": "Open source persistent memory server for AI agents with FSRS-6 spaced repetition, native vector search via libsql, and automatic knowledge graphs.",
-  "url": "https://engram.lol",
-  "applicationCategory": "DeveloperApplication",
-  "operatingSystem": "Linux, macOS, Windows",
-  "license": "https://opensource.org/licenses/MIT",
-  "codeRepository": "https://github.com/zanfiel/engram",
-  "programmingLanguage": "TypeScript",
-  "offers": {
-    "@type": "Offer",
-    "price": "0",
-    "priceCurrency": "USD"
-  }
-}
-</script>
-
+<title>Engram — Persistent Memory for AI Agents</title>
+<meta name="description" content="Give your AI agents long-term memory. Store, search, recall, and link memories with automatic embeddings, versioning, and graph visualization.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -61,8 +23,8 @@ a:hover{text-decoration:underline}
 code{font-family:'JetBrains Mono',monospace;font-size:0.85em;background:var(--bg3);padding:2px 6px;border-radius:4px}
 
 /* Hero */
-.hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:5rem 2rem 2rem;position:relative;overflow:hidden}
-.hero::before{content:'';position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 80% 50% at 50% -20%,rgba(129,140,248,0.12),transparent),radial-gradient(ellipse 60% 40% at 80% 80%,rgba(167,139,250,0.06),transparent)}
+.hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:2rem;position:relative;overflow:hidden}
+.hero::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse 80% 50% at 50% -20%,rgba(129,140,248,0.12),transparent),radial-gradient(ellipse 60% 40% at 80% 80%,rgba(167,139,250,0.06),transparent)}
 .hero-badge{display:inline-flex;align-items:center;gap:8px;padding:6px 16px;border-radius:99px;border:1px solid rgba(129,140,248,0.2);background:rgba(129,140,248,0.06);color:var(--accent);font-size:12px;font-weight:600;letter-spacing:0.5px;margin-bottom:2rem;text-transform:uppercase}
 .hero-badge .dot{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
@@ -111,9 +73,18 @@ section{padding:6rem 2rem}
 .code-body .num{color:var(--pink)}
 .code-body .cm{color:var(--muted)}
 
+/* Compare */
+.compare-table{width:100%;border-collapse:collapse;font-size:13px}
+.compare-table th{text-align:left;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.08);color:var(--text);font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:1px}
+.compare-table td{padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.03);color:var(--dim)}
+.compare-table tr:hover td{background:rgba(255,255,255,0.02)}
+.compare-table .yes{color:var(--green)}
+.compare-table .no{color:var(--red);opacity:0.5}
+.compare-table td:first-child{color:var(--text);font-weight:500}
+
 /* CTA */
 .cta{text-align:center;padding:8rem 2rem;position:relative}
-.cta::before{content:'';position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 60% 50% at 50% 100%,rgba(129,140,248,0.08),transparent)}
+.cta::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse 60% 50% at 50% 100%,rgba(129,140,248,0.08),transparent)}
 .cta h2{font-size:clamp(2rem,5vw,3rem);font-weight:800;letter-spacing:-0.02em;margin-bottom:1rem}
 .cta p{color:var(--dim);margin-bottom:2rem;font-size:1.1rem}
 .cta-code{display:inline-block;background:var(--bg2);border:1px solid rgba(255,255,255,0.06);border-radius:var(--radius);padding:16px 32px;font-family:'JetBrains Mono',monospace;font-size:15px;color:var(--text);margin-bottom:2rem}
@@ -129,37 +100,28 @@ nav .logo{font-size:16px;font-weight:800;letter-spacing:-0.02em}
 nav .logo span{color:var(--accent)}
 nav .links{display:flex;gap:24px;font-size:13px;color:var(--dim)}
 nav .links a:hover{color:var(--text);text-decoration:none}
-.nav-toggle{display:none;background:none;border:none;color:var(--text);font-size:22px;cursor:pointer;padding:4px 8px;line-height:1}
-@media(max-width:640px){
-  .nav-toggle{display:block}
-  nav .links{display:none;position:absolute;top:100%;left:0;right:0;flex-direction:column;gap:0;background:rgba(10,14,23,0.95);backdrop-filter:blur(12px);border-bottom:1px solid rgba(255,255,255,0.06);padding:8px 0}
-  nav .links.open{display:flex}
-  nav .links a{padding:12px 2rem;border-bottom:1px solid rgba(255,255,255,0.03)}
-  nav .links a:hover{background:rgba(129,140,248,0.06)}
-}
 </style>
 </head>
 <body>
 
 <nav>
   <div class="logo">en<span>gram</span></div>
-  <button class="nav-toggle" onclick="this.nextElementSibling.classList.toggle('open')" aria-label="Menu">☰</button>
   <div class="links">
     <a href="#features">Features</a>
     <a href="#sdks">SDKs</a>
-    <a href="https://demo.engram.lol/gui">Demo</a>
+    <a href="#compare">Compare</a>
     <a href="https://github.com/zanfiel/engram">GitHub</a>
   </div>
 </nav>
 
 <!-- Hero -->
 <section class="hero">
-  <div class="hero-badge"><span class="dot"></span> v5.5 · Open Source</div>
+  <div class="hero-badge"><span class="dot"></span> Open Source</div>
   <h1>Memory for<br><span>AI agents</span></h1>
   <p>Give your agents persistent, searchable, self-organizing memory. Store what they learn. Recall it when it matters. No external APIs required.</p>
   <div class="hero-actions">
     <a href="https://github.com/zanfiel/engram" class="btn btn-primary">Get Started →</a>
-    <a href="https://demo.engram.lol/gui" class="btn btn-secondary">Try Live Demo</a>
+    <a href="#features" class="btn btn-secondary">See Features</a>
   </div>
   <div class="hero-code">
     <span class="tag">TypeScript</span>
@@ -177,257 +139,57 @@ nav .links a:hover{color:var(--text);text-decoration:none}
 </section>
 
 <!-- Features -->
-
-<!-- What's New in v5.5 -->
-<section style="background:var(--bg2);padding:4rem 2rem">
-  <div class="container">
-    <div class="section-label" style="color:var(--green)">New in v5.5</div>
-    <h2 class="section-title">Intelligence layer. Zero-latency extraction.</h2>
-    <p class="section-desc">Every memory is now instantly analyzed on write — no LLM needed. Structured facts, preferences, and state are extracted via fast regex and surfaced in context.</p>
-
-    <div class="features" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
-      <div class="feature" style="border-color:rgba(52,211,153,0.12)">
-        <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">🧮</div>
-        <h3>Structured Fact Extraction</h3>
-        <p>Quantities, amounts, dates, and relationships are extracted from every memory at write time using fast regex — no LLM call, zero latency. "I bought 3 books and spent $45 on them" → <code>{verb: "bought", object: "books", qty: 3}</code> + <code>{verb: "spent", qty: 45, unit: "dollars"}</code>.</p>
-      </div>
-      <div class="feature" style="border-color:rgba(129,140,248,0.12)">
-        <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">❤️</div>
-        <h3>User Preference Tracking</h3>
-        <p>Automatically detects likes, dislikes, favorites, and preferences from natural language. "I love cooking Italian food" → <code>{domain: "food", preference: "likes cooking Italian food"}</code>. Strength updates with reinforcement.</p>
-      </div>
-      <div class="feature" style="border-color:rgba(248,113,113,0.12)">
-        <div class="feature-icon" style="background:rgba(248,113,113,0.1);color:var(--red)">📌</div>
-        <h3>Current State Tracking</h3>
-        <p>Key-value state changes are detected and stored separately. "I moved to Portland" → <code>{key: "current_location", value: "Portland"}</code>. State is always current — later updates replace earlier ones.</p>
-      </div>
-      <div class="feature" style="border-color:rgba(34,211,238,0.12)">
-        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">🎯</div>
-        <h3>5-Layer Context Assembly</h3>
-        <p>The <code>/context</code> endpoint now returns five ranked layers: Current State → User Preferences → Extracted Facts → Relevant Memories → Recent Activity. LLMs see pre-structured data before raw text.</p>
-      </div>
-      <div class="feature" style="border-color:rgba(251,191,36,0.12)">
-        <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:#fbbf24">⚡</div>
-        <h3>Zero-LLM Fast Path</h3>
-        <p>All extraction runs synchronously on <code>/store</code> with pure regex — no API calls, no queuing, no latency. Optional LLM enrichment still runs async for deeper analysis when configured.</p>
-      </div>
-      <div class="feature" style="border-color:rgba(167,139,250,0.12)">
-        <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:#a78bfa">📊</div>
-        <h3>New API Endpoints</h3>
-        <p><code>GET /facts</code>, <code>GET /state</code>, <code>GET /preferences</code> — query the intelligence layer directly. Filter by user, domain, subject. Build dashboards on extracted structure.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- What's New in v5.4 -->
-<section style="padding:4rem 2rem">
-  <div class="container">
-    <div class="section-label" style="color:var(--dim)">Also in v5.4</div>
-    <h2 class="section-title">Node.js native. Hardened. Production-ready.</h2>
-    <p class="section-desc">Migrated from Bun to Node.js 22, with RBAC, CSP, and zero external runtime dependencies.</p>
-
-    <div class="features" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
-      <div class="feature" style="border-color:rgba(52,211,153,0.12)">
-        <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">⚡</div>
-        <h3>Node.js 22 Runtime</h3>
-        <p>Migrated from Bun to Node.js with <code>--experimental-strip-types</code>. Run TypeScript natively — no transpiler, no bundler, no Bun-specific APIs. Just <code>node server.ts</code>.</p>
-      </div>
-      <div class="feature" style="border-color:rgba(129,140,248,0.12)">
-        <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">🛡️</div>
-        <h3>RBAC &amp; Roles</h3>
-        <p>API keys now carry <code>admin</code>, <code>writer</code>, or <code>reader</code> roles. Fine-grained access control for multi-agent deployments.</p>
-      </div>
-      <div class="feature" style="border-color:rgba(248,113,113,0.12)">
-        <div class="feature-icon" style="background:rgba(248,113,113,0.1);color:var(--red)">🔒</div>
-        <h3>Security Hardening</h3>
-        <p>HSTS, Content-Security-Policy, SSRF protection on webhooks, per-IP rate limiting, timing-safe auth, CORS origin pinning. Auth required by default.</p>
-      </div>
-      <div class="feature" style="border-color:rgba(34,211,238,0.12)">
-        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">📋</div>
-        <h3>Audit Trail &amp; Logging</h3>
-        <p>Every mutation logged — who, what, when. Structured JSON logs with request IDs. Configurable log levels. Built for <code>jq</code> and log aggregation.</p>
-      </div>
-      <div class="feature" style="border-color:rgba(251,191,36,0.12)">
-        <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:#fbbf24">📥</div>
-        <h3>Review Queue</h3>
-        <p>Memories can land in an inbox for human review before going live. Approve, reject, or edit — individually or in bulk.</p>
-      </div>
-      <div class="feature" style="border-color:rgba(167,139,250,0.12)">
-        <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:#a78bfa">💾</div>
-        <h3>Backup &amp; Checkpoint</h3>
-        <p>API-triggered WAL checkpoints and full database downloads. Periodic auto-checkpoint. Graceful shutdown with data flush.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- What's New in v5.0 -->
-<section style="padding:4rem 2rem">
-  <div class="container">
-    <div class="section-label" style="color:var(--dim)">Also in v5.0</div>
-    <h2 class="section-title">Cognitive science meets vector search</h2>
-    <p class="section-desc">Two major upgrades that change how Engram thinks about memory.</p>
-
-    <div class="features" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr))">
-      <div class="feature" style="border-color:rgba(129,140,248,0.12)">
-        <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">🧠</div>
-        <h3>FSRS-6 Spaced Repetition</h3>
-        <p style="margin-bottom:12px">Replaces exponential decay with a <strong style="color:var(--text)">21-parameter power-law forgetting curve</strong> trained on millions of real reviews. Memory stability grows with each access — just like human memory.</p>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <code style="font-size:11px;color:var(--accent)">R = (1 + t/S)^(-w₂₀)</code>
-          <span style="font-size:11px;color:var(--muted)">Power-law decay</span>
-        </div>
-        <div style="margin-top:12px;display:flex;gap:16px;font-size:12px;color:var(--dim)">
-          <span>⚡ Storage strength — never decays</span>
-        </div>
-        <div style="display:flex;gap:16px;font-size:12px;color:var(--dim)">
-          <span>📉 Retrieval strength — power-law decay</span>
-        </div>
-      </div>
-      <div class="feature" style="border-color:rgba(34,211,238,0.12)">
-        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">🔍</div>
-        <h3>Native Vector Search</h3>
-        <p style="margin-bottom:12px">Built on <strong style="color:var(--text)">libsql with FLOAT32(384) vector columns</strong> and ANN indexing. Search is O(log n) via <code>vector_top_k()</code> instead of brute-force loops.</p>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <code style="font-size:11px;color:var(--cyan)">vector_top_k(idx, vec, 25)</code>
-          <span style="font-size:11px;color:var(--muted)">ANN index</span>
-        </div>
-        <div style="margin-top:12px;display:flex;gap:16px;font-size:12px;color:var(--dim)">
-          <span>📊 Embeddings still generated locally</span>
-        </div>
-        <div style="display:flex;gap:16px;font-size:12px;color:var(--dim)">
-          <span>🚀 No external API needed</span>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
 <section id="features">
   <div class="container">
     <div class="section-label">Features</div>
-    <h2 class="section-title">40+ features. One libsql file.</h2>
-    <p class="section-desc">Zero external dependencies. FSRS-6 spaced repetition, native vector search, dual-strength memory, intelligence layer. Ships in a single TypeScript file.</p>
+    <h2 class="section-title">Everything agents need to remember</h2>
+    <p class="section-desc">One server. One SQLite file. Zero external dependencies. Runs anywhere Bun runs.</p>
 
-    <div style="margin-bottom:1rem;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--cyan)">Core Memory</div>
-    <div class="features" style="margin-bottom:3rem">
+    <div class="features">
       <div class="feature">
         <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">🧠</div>
-        <h3>Semantic + Full-Text Search</h3>
-        <p>384-dim embeddings with native libsql vector indexing (FLOAT32 + ANN). O(log n) vector_top_k search combined with FTS5 keyword matching. No external API required.</p>
+        <h3>Semantic Search</h3>
+        <p>384-dim embeddings generated locally with MiniLM. Find memories by meaning, not keywords. No OpenAI key required.</p>
       </div>
       <div class="feature">
         <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">🔗</div>
-        <h3>Auto-Linking & Knowledge Graph</h3>
-        <p>New memories automatically connect to related ones via embedding similarity. Typed relationships: updates, extends, contradicts, caused_by, prerequisite_for.</p>
+        <h3>Auto-Linking</h3>
+        <p>New memories automatically connect to related ones above 0.75 similarity, forming a knowledge graph you can visualize and traverse.</p>
       </div>
       <div class="feature">
         <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:var(--accent2)">🔄</div>
-        <h3>Versioning & Dedup</h3>
-        <p>Update memories without losing history. Full version chain preserved. Near-duplicates detected and merged automatically. Source count tracks confirmation frequency.</p>
+        <h3>Versioning</h3>
+        <p>Update memories without losing history. Full version chain preserved. Only the latest version surfaces in search and recall.</p>
       </div>
       <div class="feature">
-        <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">📊</div>
-        <h3>FSRS-6 Spaced Repetition</h3>
-        <p>21-parameter power-law forgetting curve (ported from open-spaced-repetition). Every access is an implicit review building stability. Dual-strength model tracks storage strength (never decays) + retrieval strength (power-law decay).</p>
+        <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">🧹</div>
+        <h3>Auto-Deduplication</h3>
+        <p>Detects near-identical memories and merges them. Source count tracks how often something was mentioned — signal, not noise.</p>
       </div>
       <div class="feature">
-        <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:var(--amber)">🏷️</div>
-        <h3>Tags, Episodes & Spaces</h3>
-        <p>Organize memories with tags, group into episodic sessions, and isolate by named spaces. Filter and scope all queries.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(244,114,182,0.1);color:var(--pink)">⏰</div>
+        <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:var(--amber)">⏰</div>
         <h3>Auto-Forget</h3>
-        <p>Set memories to expire with TTL. Background sweep every 5 minutes. Low-importance memories fade. Critical ones persist forever.</p>
+        <p>Set memories to expire. A background sweep runs every 5 minutes. Low-importance memories fade. Critical ones persist forever.</p>
       </div>
-    </div>
-
-    <div style="margin-bottom:1rem;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--accent2)">Intelligence Layer</div>
-    <div class="features" style="margin-bottom:3rem">
       <div class="feature">
         <div class="feature-icon" style="background:rgba(244,114,182,0.1);color:var(--pink)">🔍</div>
-        <h3>Fact Extraction & Auto-Tagging</h3>
-        <p>LLM-powered extraction of atomic facts from conversations and text. Automatic category classification, importance rating, static/dynamic detection, and keyword tagging.</p>
+        <h3>Fact Extraction</h3>
+        <p>Optional LLM-powered extraction of static facts from conversations. Supports any OpenAI-compatible API. Facts become high-priority recall candidates.</p>
       </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(248,113,113,0.1);color:var(--red)">⚡</div>
-        <h3>Contradiction Detection</h3>
-        <p>Scans for conflicting memories. Optional LLM verification eliminates false positives. Resolve by keeping one, both, or LLM-powered merge into a single truth.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:var(--accent2)">💭</div>
-        <h3>Reflections</h3>
-        <p>Periodic meta-analysis over day, week, or month. Identifies themes, progress, patterns, and unresolved items. Reflections become searchable memories themselves.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">🧬</div>
-        <h3>Derived Memories</h3>
-        <p>Inference engine finds patterns across memories and generates new facts that aren't explicitly stated. Each inference cites its sources with confidence scores.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">🗜️</div>
-        <h3>Auto-Consolidation</h3>
-        <p>Large clusters of related memories get summarized into a single dense memory. Originals archived, links preserved. Keeps the memory space clean.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">🏆</div>
-        <h3>LLM Reranker</h3>
-        <p>Search results reranked by an LLM for semantic precision. Candidates retrieved by embedding similarity, then filtered by a language model that understands nuance.</p>
-      </div>
-    </div>
-
-    <div style="margin-bottom:1rem;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--green)">Retrieval</div>
-    <div class="features" style="margin-bottom:3rem">
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">🎯</div>
-        <h3>Smart Context Builder</h3>
-        <p>Token-budget-aware RAG assembly. Four-phase pipeline: static facts → semantic search → linked expansion → recent. Three strategies: balanced, precision, breadth.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:var(--amber)">⏪</div>
-        <h3>Time-Travel Queries</h3>
-        <p>Query what the agent knew at any point in time. Version-chain-aware — finds the correct memory state as of any timestamp, with optional semantic search.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(244,114,182,0.1);color:var(--pink)">📋</div>
-        <h3>Prompt Templates & Packing</h3>
-        <p>Generate ready-to-use prompt context blocks. Pack memories into token-budgeted strings optimized for any LLM context window.</p>
-      </div>
-    </div>
-
-    <div style="margin-bottom:1rem;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--amber)">Platform</div>
-    <div class="features" style="margin-bottom:3rem">
       <div class="feature">
         <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">👥</div>
         <h3>Multi-Tenant</h3>
-        <p>Isolated memory per user with scoped API keys, rate limiting, and per-key permissions. Each user sees only their own memories.</p>
+        <p>Isolated memory per user with API keys, rate limiting, and scoped queries. Each user sees only their own memories.</p>
       </div>
       <div class="feature">
-        <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">📬</div>
-        <h3>Webhooks & Digests</h3>
-        <p>Event webhooks on memory changes. Scheduled digest delivery (hourly/daily/weekly) via HMAC-signed webhooks with stats, new memories, and reflections.</p>
+        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">📦</div>
+        <h3>Spaces</h3>
+        <p>Organize memories into named collections. Switch between projects, domains, or contexts with a single header.</p>
       </div>
       <div class="feature">
-        <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:var(--accent2)">🔄</div>
-        <h3>Sync, Import & Ingest</h3>
-        <p>Cross-instance sync via change feeds. Import from Mem0 and Supermemory. Ingest URLs or text blobs — Engram extracts facts and stores them as linked memories.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">📊</div>
+        <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">📊</div>
         <h3>Graph Visualization</h3>
-        <p>Built-in WebGL galaxy graph. Explore connections, search, create, edit, archive — all from the browser. Category filters, keyboard shortcuts, auto-refresh.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(244,114,182,0.1);color:var(--pink)">🧩</div>
-        <h3>Entities & Projects</h3>
-        <p>Track named entities (people, servers, tools) and projects. Link memories to entities and projects. Scoped search within any entity or project.</p>
-      </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:var(--amber)">🛠️</div>
-        <h3>MCP Server & CLI</h3>
-        <p>Model Context Protocol server for IDE integrations. CLI for terminal workflows. Both ship with the same binary — no extra install.</p>
+        <p>WebGL galaxy-style graph of your memory space. Explore connections, search, create, edit — all from the browser.</p>
       </div>
     </div>
   </div>
@@ -481,29 +243,24 @@ nav .links a:hover{color:var(--text);text-decoration:none}
 <section>
   <div class="container">
     <div class="section-label">How It Works</div>
-    <h2 class="section-title">Five-layer contextual recall</h2>
-    <p class="section-desc">Recall doesn't just search — it assembles the optimal context window from five ranked strategies.</p>
+    <h2 class="section-title">Four-layer contextual recall</h2>
+    <p class="section-desc">Recall doesn't just search — it assembles the optimal context window from multiple strategies.</p>
 
-    <div class="features" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
+    <div class="features" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
       <div class="feature" style="text-align:center">
-        <div style="font-size:2rem;margin-bottom:12px">📌</div>
-        <h3>Current State</h3>
-        <p>Always first. Location, job, active projects — the latest value wins. Extracted automatically on every store.</p>
-      </div>
-      <div class="feature" style="text-align:center">
-        <div style="font-size:2rem;margin-bottom:12px">❤️</div>
-        <h3>Preferences</h3>
-        <p>Likes, dislikes, favorites. Detected from natural language, reinforced over time. The agent knows what you care about.</p>
-      </div>
-      <div class="feature" style="text-align:center">
-        <div style="font-size:2rem;margin-bottom:12px">🧮</div>
-        <h3>Extracted Facts</h3>
-        <p>Structured quantities, amounts, dates. "How many X?" questions answered from pre-extracted data, not raw text search.</p>
+        <div style="font-size:2rem;margin-bottom:12px">🏗️</div>
+        <h3>Static Facts</h3>
+        <p>Always included. Things that are persistently true about the user. Extracted automatically from conversations.</p>
       </div>
       <div class="feature" style="text-align:center">
         <div style="font-size:2rem;margin-bottom:12px">🎯</div>
         <h3>Semantic Match</h3>
         <p>Embedding similarity to the current query. The most relevant memories float to the top.</p>
+      </div>
+      <div class="feature" style="text-align:center">
+        <div style="font-size:2rem;margin-bottom:12px">⭐</div>
+        <h3>High Importance</h3>
+        <p>Critical memories (importance ≥ 7) surface regardless of query similarity. The agent never forgets what matters.</p>
       </div>
       <div class="feature" style="text-align:center">
         <div style="font-size:2rem;margin-bottom:12px">🕐</div>
@@ -514,31 +271,32 @@ nav .links a:hover{color:var(--text);text-decoration:none}
   </div>
 </section>
 
-<!-- GUI Demo -->
-<section style="background:var(--bg2)">
-  <div class="container" style="text-align:center">
-    <div class="section-label">Visualization</div>
-    <h2 class="section-title">See your memory space</h2>
-    <p class="section-desc" style="margin-left:auto;margin-right:auto">Engram includes a built-in WebGL graph visualization. Explore connections between memories, search, create, edit — all from the browser.</p>
-    <div style="margin:2rem auto;max-width:800px;background:var(--bg);border:1px solid rgba(255,255,255,0.06);border-radius:var(--radius);overflow:hidden">
-      <div style="padding:10px 16px;border-bottom:1px solid rgba(255,255,255,0.06);display:flex;align-items:center;gap:8px">
-        <span style="width:12px;height:12px;border-radius:50%;background:#ff5f57"></span>
-        <span style="width:12px;height:12px;border-radius:50%;background:#febc2e"></span>
-        <span style="width:12px;height:12px;border-radius:50%;background:#28c840"></span>
-        <span style="flex:1;text-align:center;font-size:12px;color:var(--muted)">demo.engram.lol/gui</span>
-      </div>
-      <div style="padding:3rem 2rem;display:flex;flex-direction:column;align-items:center;gap:1.5rem">
-        <div style="font-size:3rem">🧠</div>
-        <div style="color:var(--text);font-size:18px;font-weight:700">Interactive Memory Galaxy</div>
-        <div style="color:var(--dim);font-size:14px;max-width:500px;line-height:1.6">30 demo memories with auto-generated links. Click nodes to inspect. Search, filter by category, create new memories. Keyboard shortcuts for power users.</div>
-        <div style="display:flex;gap:12px;flex-wrap:wrap;justify-content:center;margin-top:0.5rem">
-          <span style="padding:4px 12px;border-radius:99px;font-size:11px;background:rgba(34,211,238,0.1);color:var(--cyan)">WebGL Rendering</span>
-          <span style="padding:4px 12px;border-radius:99px;font-size:11px;background:rgba(167,139,250,0.1);color:var(--accent2)">Force-Directed Layout</span>
-          <span style="padding:4px 12px;border-radius:99px;font-size:11px;background:rgba(52,211,153,0.1);color:var(--green)">Real-time Search</span>
-          <span style="padding:4px 12px;border-radius:99px;font-size:11px;background:rgba(244,114,182,0.1);color:var(--pink)">Category Filters</span>
-        </div>
-        <a href="https://demo.engram.lol/gui" class="btn btn-primary" style="margin-top:1rem">Open Live Demo →</a>
-      </div>
+<!-- Compare -->
+<section id="compare" style="background:var(--bg2)">
+  <div class="container">
+    <div class="section-label">Comparison</div>
+    <h2 class="section-title">How Engram stacks up</h2>
+    <p class="section-desc">Built for developers who want to own their stack.</p>
+
+    <div style="overflow-x:auto">
+    <table class="compare-table">
+      <thead>
+        <tr><th>Feature</th><th>Engram</th><th>Mem0</th><th>Supermemory</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Semantic search</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
+        <tr><td>Local embeddings</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Graph visualization</td><td class="yes">✓</td><td class="no">✗</td><td class="yes">✓</td></tr>
+        <tr><td>Memory versioning</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Auto-deduplication</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Auto-forget</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Fact extraction</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td></tr>
+        <tr><td>Multi-tenant</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td></tr>
+        <tr><td>No external API needed</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>SQLite (zero deps)</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Self-hosted</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
+      </tbody>
+    </table>
     </div>
   </div>
 </section>
