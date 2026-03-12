@@ -549,7 +549,7 @@ Use `X-Space: space-name` (or `X-Engram-Space`) header to scope operations to a 
 └─────────────────────────────────────────────┘
 ```
 
-- **Runtime:** Bun (primary) or Node.js 22+ (with `--experimental-strip-types`)
+- **Runtime:** Node.js 22+ (primary, `--experimental-strip-types`) or Bun (legacy)
 - **Database:** libsql (SQLite fork with vector column support)
 - **Embeddings:** Xenova/all-MiniLM-L6-v2 (384-dim, runs locally via ONNX)
 - **Search:** In-memory cosine similarity + FTS5 full-text hybrid
@@ -614,48 +614,6 @@ server {
     }
 }
 ```
-
----
-
-## Comparison
-
-| Feature | Engram | Mem0 | Supermemory |
-|---------|--------|------|-------------|
-| **Spaced repetition (FSRS-6)** | ✅ | ❌ | ❌ |
-| **Dual-strength memory model** | ✅ | ❌ | ❌ |
-| Semantic search (hybrid) | ✅ | ✅ | ✅ |
-| Local embeddings (no API) | ✅ | ❌ | ❌ |
-| Full-text search (FTS5) | ✅ | ❌ | ❌ |
-| Graph visualization | ✅ | ❌ | ✅ |
-| Memory versioning | ✅ | ❌ | ❌ |
-| Auto-deduplication | ✅ | ❌ | ❌ |
-| Auto-forget / TTL | ✅ | ❌ | ❌ |
-| Contradiction detection | ✅ | ❌ | ❌ |
-| Time-travel queries | ✅ | ❌ | ❌ |
-| Smart context builder (RAG) | ✅ | ❌ | ❌ |
-| Reflections | ✅ | ❌ | ❌ |
-| Derived memories | ✅ | ❌ | ❌ |
-| Auto-consolidation | ✅ | ❌ | ❌ |
-| LLM reranker | ✅ | ❌ | ❌ |
-| Fact extraction + auto-tagging | ✅ | ✅ | ❌ |
-| Conversation extraction | ✅ | ✅ | ❌ |
-| MCP server (JSON-RPC stdio) | ✅ | ❌ | ❌ |
-| CLI | ✅ | ❌ | ❌ |
-| Multi-tenant + API keys | ✅ | ✅ | ❌ |
-| Spaces / collections | ✅ | ❌ | ✅ |
-| Entities & projects | ✅ | ❌ | ❌ |
-| Episodic memory | ✅ | ❌ | ❌ |
-| Conversation log + search | ✅ | ❌ | ❌ |
-| Webhooks & digests | ✅ | ❌ | ❌ |
-| Cross-instance sync | ✅ | ❌ | ❌ |
-| URL ingest | ✅ | ❌ | ❌ |
-| Import from Mem0 / Supermemory | ✅ | — | — |
-| Review queue / inbox | ✅ | ❌ | ❌ |
-| Audit trail | ✅ | ❌ | ❌ |
-| Structured JSON logging | ✅ | ❌ | ❌ |
-| API backup & WAL checkpoint | ✅ | ❌ | ❌ |
-| Self-hosted | ✅ | ✅ | ✅ |
-| Single-file DB (zero deps) | ✅ | ❌ | ❌ |
 
 ---
 

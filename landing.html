@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Engram — Persistent Memory for AI Agents</title>
-<meta name="description" content="Give your AI agents long-term memory. Store, search, recall, and link memories with automatic embeddings, versioning, and graph visualization.">
+<meta name="description" content="Give your AI agents long-term memory with FSRS-6 spaced repetition, hybrid semantic search, knowledge graphs, and a full developer platform. Self-hosted, zero external APIs.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -37,7 +37,7 @@ code{font-family:'JetBrains Mono',monospace;font-size:0.85em;background:var(--bg
 .btn-primary:hover{background:#6366f1;transform:translateY(-1px);box-shadow:0 8px 30px rgba(129,140,248,0.3)}
 .btn-secondary{background:rgba(255,255,255,0.04);color:var(--text);border:1px solid rgba(255,255,255,0.08)}
 .btn-secondary:hover{background:rgba(255,255,255,0.08);transform:translateY(-1px)}
-.hero-code{margin-top:3rem;text-align:left;background:var(--bg2);border:1px solid rgba(255,255,255,0.06);border-radius:var(--radius);padding:24px 28px;max-width:580px;width:100%;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.8;color:var(--dim);position:relative;overflow-x:auto}
+.hero-code{margin-top:3rem;text-align:left;background:var(--bg2);border:1px solid rgba(255,255,255,0.06);border-radius:var(--radius);padding:24px 28px;max-width:600px;width:100%;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.8;color:var(--dim);position:relative;overflow-x:auto}
 .hero-code .kw{color:var(--accent2)}
 .hero-code .fn{color:var(--cyan)}
 .hero-code .str{color:var(--green)}
@@ -52,12 +52,16 @@ section{padding:6rem 2rem}
 .section-title{font-size:clamp(1.75rem,4vw,2.5rem);font-weight:800;letter-spacing:-0.02em;margin-bottom:1rem}
 .section-desc{color:var(--dim);font-size:1.05rem;max-width:600px;margin-bottom:3rem}
 
-/* Features grid */
-.features{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1.5rem}
-.feature{background:var(--bg2);border:1px solid rgba(255,255,255,0.04);border-radius:var(--radius);padding:28px;transition:all 0.3s}
+/* Feature groups */
+.feature-group{margin-bottom:3.5rem}
+.feature-group:last-child{margin-bottom:0}
+.group-label{font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--dim);margin-bottom:1.25rem;padding-bottom:0.75rem;border-bottom:1px solid rgba(255,255,255,0.04)}
+.features{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem}
+.feature{background:var(--bg2);border:1px solid rgba(255,255,255,0.04);border-radius:var(--radius);padding:24px;transition:all 0.3s}
 .feature:hover{border-color:rgba(129,140,248,0.15);transform:translateY(-2px)}
-.feature-icon{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;margin-bottom:16px}
-.feature h3{font-size:15px;font-weight:700;margin-bottom:8px}
+.feature.highlight{border-color:rgba(129,140,248,0.18);background:linear-gradient(135deg,rgba(129,140,248,0.05),rgba(167,139,250,0.02))}
+.feature-icon{width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;margin-bottom:14px}
+.feature h3{font-size:14px;font-weight:700;margin-bottom:6px}
 .feature p{font-size:13px;color:var(--dim);line-height:1.6}
 
 /* Code blocks */
@@ -73,14 +77,21 @@ section{padding:6rem 2rem}
 .code-body .num{color:var(--pink)}
 .code-body .cm{color:var(--muted)}
 
-/* Compare */
-.compare-table{width:100%;border-collapse:collapse;font-size:13px}
-.compare-table th{text-align:left;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.08);color:var(--text);font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:1px}
-.compare-table td{padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.03);color:var(--dim)}
-.compare-table tr:hover td{background:rgba(255,255,255,0.02)}
-.compare-table .yes{color:var(--green)}
-.compare-table .no{color:var(--red);opacity:0.5}
-.compare-table td:first-child{color:var(--text);font-weight:500}
+/* Steps grid */
+.steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1.25rem}
+.step{background:var(--bg2);border:1px solid rgba(255,255,255,0.04);border-radius:var(--radius);padding:22px;text-align:center}
+.step-num{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+.step-icon{font-size:1.6rem;margin-bottom:8px}
+.step h3{font-size:13px;font-weight:700;margin-bottom:5px}
+.step p{font-size:12px;color:var(--dim);line-height:1.55}
+
+/* MCP table */
+.mcp-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;align-items:start}
+@media(max-width:768px){.mcp-grid{grid-template-columns:1fr}}
+.mcp-list{display:flex;flex-direction:column;gap:8px}
+.mcp-item{display:flex;gap:10px;align-items:center}
+.mcp-item code{font-size:11px;padding:2px 8px;border-radius:4px}
+.mcp-item span{font-size:12px;color:var(--dim)}
 
 /* CTA */
 .cta{text-align:center;padding:8rem 2rem;position:relative}
@@ -100,25 +111,34 @@ nav .logo{font-size:16px;font-weight:800;letter-spacing:-0.02em}
 nav .logo span{color:var(--accent)}
 nav .links{display:flex;gap:24px;font-size:13px;color:var(--dim)}
 nav .links a:hover{color:var(--text);text-decoration:none}
+.nav-toggle{display:none;background:none;border:none;color:var(--dim);font-size:20px;cursor:pointer;padding:4px}
+@media(max-width:640px){
+  .nav-toggle{display:block}
+  nav .links{display:none;position:absolute;top:100%;left:0;right:0;flex-direction:column;gap:0;background:rgba(10,14,23,0.98);border-bottom:1px solid rgba(255,255,255,0.06);padding:1rem 2rem}
+  nav .links.open{display:flex}
+  nav .links a{padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
+}
 </style>
 </head>
 <body>
 
 <nav>
   <div class="logo">en<span>gram</span></div>
+  <button class="nav-toggle" onclick="this.nextElementSibling.classList.toggle('open')">☰</button>
   <div class="links">
     <a href="#features">Features</a>
+    <a href="#how-it-works">How It Works</a>
     <a href="#sdks">SDKs</a>
-    <a href="#compare">Compare</a>
+    <a href="#mcp">MCP</a>
     <a href="https://github.com/zanfiel/engram">GitHub</a>
   </div>
 </nav>
 
 <!-- Hero -->
 <section class="hero">
-  <div class="hero-badge"><span class="dot"></span> Open Source</div>
+  <div class="hero-badge"><span class="dot"></span> v5.6 — Open Source</div>
   <h1>Memory for<br><span>AI agents</span></h1>
-  <p>Give your agents persistent, searchable, self-organizing memory. Store what they learn. Recall it when it matters. No external APIs required.</p>
+  <p>Persistent, searchable, self-organizing memory with FSRS-6 spaced repetition. Store what agents learn. Recall it when it matters. No external APIs.</p>
   <div class="hero-actions">
     <a href="https://github.com/zanfiel/engram" class="btn btn-primary">Get Started →</a>
     <a href="#features" class="btn btn-secondary">See Features</a>
@@ -126,15 +146,14 @@ nav .links a:hover{color:var(--text);text-decoration:none}
   <div class="hero-code">
     <span class="tag">TypeScript</span>
     <span class="kw">import</span> { <span class="fn">Engram</span> } <span class="kw">from</span> <span class="str">"@engram/sdk"</span>;<br><br>
-    <span class="kw">const</span> engram = <span class="kw">new</span> <span class="fn">Engram</span>({ url: <span class="str">"http://localhost:4200"</span> });<br><br>
-    <span class="cm">// Store what the agent learns</span><br>
-    <span class="kw">await</span> engram.<span class="fn">store</span>(<span class="str">"User prefers dark mode"</span>, {<br>
-    &nbsp;&nbsp;category: <span class="str">"decision"</span>,<br>
-    &nbsp;&nbsp;importance: <span class="num">8</span>,<br>
+    <span class="kw">const</span> mem = <span class="kw">new</span> <span class="fn">Engram</span>({ url: <span class="str">"http://localhost:4200"</span> });<br><br>
+    <span class="cm">// Store — embeddings generated locally, no API key needed</span><br>
+    <span class="kw">await</span> mem.<span class="fn">store</span>(<span class="str">"Deployed auth migration to production"</span>, {<br>
+    &nbsp;&nbsp;category: <span class="str">"state"</span>, importance: <span class="num">9</span>,<br>
     });<br><br>
-    <span class="cm">// In a new session — recall relevant context</span><br>
-    <span class="kw">const</span> ctx = <span class="kw">await</span> engram.<span class="fn">recall</span>(<span class="str">"setting up editor"</span>);<br>
-    <span class="cm">// → Returns the dark mode preference automatically</span>
+    <span class="cm">// In a new session — four-layer contextual recall</span><br>
+    <span class="kw">const</span> ctx = <span class="kw">await</span> mem.<span class="fn">recall</span>(<span class="str">"current production state"</span>);<br>
+    <span class="cm">// → Weighted by FSRS-6 retrievability, assembled into context</span>
   </div>
 </section>
 
@@ -143,70 +162,228 @@ nav .links a:hover{color:var(--text);text-decoration:none}
   <div class="container">
     <div class="section-label">Features</div>
     <h2 class="section-title">Everything agents need to remember</h2>
-    <p class="section-desc">One server. One SQLite file. Zero external dependencies. Runs on Node.js 22+ or Bun.</p>
+    <p class="section-desc">One server. One SQLite file. Runs on Node.js 22+ or Bun. No external services required.</p>
 
-    <div class="features">
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">🧠</div>
-        <h3>Semantic Search</h3>
-        <p>384-dim embeddings generated locally with MiniLM. Find memories by meaning, not keywords. No OpenAI key required.</p>
+    <div class="feature-group">
+      <div class="group-label">Smart Memory</div>
+      <div class="features">
+        <div class="feature highlight">
+          <div class="feature-icon" style="background:rgba(129,140,248,0.15);color:var(--accent)">⏱️</div>
+          <h3>FSRS-6 Spaced Repetition</h3>
+          <p>21-parameter algorithm trained on millions of Anki reviews. Power-law forgetting curves. Every access is an implicit review — stability grows over time.</p>
+        </div>
+        <div class="feature highlight">
+          <div class="feature-icon" style="background:rgba(167,139,250,0.15);color:var(--accent2)">💪</div>
+          <h3>Dual-Strength Model</h3>
+          <p>Bjork & Bjork (1992): storage strength never decays, retrieval strength resets on access. Combined retention score: 0.7 × retrieval + 0.3 × storage.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">🔄</div>
+          <h3>Versioning</h3>
+          <p>Update memories without losing history. Full version chain preserved. Only the latest version surfaces in search and recall.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">🧹</div>
+          <h3>Auto-Deduplication</h3>
+          <p>Detects near-identical memories and merges them. Source count tracks how often something was mentioned — signal, not noise.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:var(--amber)">⏰</div>
+          <h3>Auto-Forget / TTL</h3>
+          <p>Set memories to expire with <code>forget_after</code>. Background sweep every 5 minutes. Critical memories persist forever.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(248,113,113,0.1);color:var(--red)">⚡</div>
+          <h3>Contradiction Detection</h3>
+          <p>LLM-verified conflict scanning eliminates false positives. Resolve by keeping one side, both, or merging into a single memory.</p>
+        </div>
       </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">🔗</div>
-        <h3>Auto-Linking</h3>
-        <p>New memories automatically connect to related ones above 0.75 similarity, forming a knowledge graph you can visualize and traverse.</p>
+    </div>
+
+    <div class="feature-group">
+      <div class="group-label">Intelligence Layer</div>
+      <div class="features">
+        <div class="feature highlight">
+          <div class="feature-icon" style="background:rgba(34,211,238,0.15);color:var(--cyan)">🧠</div>
+          <h3>Hybrid Semantic + FTS5</h3>
+          <p>MiniLM 384-dim embeddings (runs locally via ONNX) combined with SQLite FTS5 full-text search. Meaning and keywords — no OpenAI key required.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(244,114,182,0.1);color:var(--pink)">🔍</div>
+          <h3>Fact Extraction & Auto-Tagging</h3>
+          <p>LLM extracts static facts from conversations. Auto-tags with keywords, classifies importance, detects relationship types (updates, extends, contradicts, caused_by).</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">💬</div>
+          <h3>Conversation Extraction</h3>
+          <p>Feed raw chat logs to <code>/add</code>. Get structured memories out. Works with any agent framework or raw message arrays.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">🌐</div>
+          <h3>URL Ingest</h3>
+          <p>Point <code>/ingest</code> at a URL or paste raw text. Facts extracted and stored automatically with source tracking.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:var(--accent2)">💭</div>
+          <h3>Reflections</h3>
+          <p>On-demand meta-analysis detects themes, patterns, and progress across your memory space. Reflections become searchable memories.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:var(--amber)">🧬</div>
+          <h3>Derived Memories & Consolidation</h3>
+          <p>LLM inference finds patterns across clusters and generates new knowledge. Auto-consolidation compresses large clusters into dense memories.</p>
+        </div>
       </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:var(--accent2)">🔄</div>
-        <h3>Versioning</h3>
-        <p>Update memories without losing history. Full version chain preserved. Only the latest version surfaces in search and recall.</p>
+    </div>
+
+    <div class="feature-group">
+      <div class="group-label">Developer Platform</div>
+      <div class="features">
+        <div class="feature highlight">
+          <div class="feature-icon" style="background:rgba(34,211,238,0.15);color:var(--cyan)">🔧</div>
+          <h3>MCP Server</h3>
+          <p>Native Model Context Protocol — JSON-RPC 2.0 stdio. Works with Claude Desktop, Cursor, and Windsurf out of the box. 8 tools, 3 resources.</p>
+        </div>
+        <div class="feature highlight">
+          <div class="feature-icon" style="background:rgba(52,211,153,0.15);color:var(--green)">⌨️</div>
+          <h3>CLI</h3>
+          <p><code>engram store</code>, <code>engram recall</code>, <code>engram search</code> and more. Full access to every feature from your terminal. Stdin piping supported.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">👥</div>
+          <h3>Multi-Tenant + RBAC</h3>
+          <p>Isolated memory per user. Role-based access: admin, writer, reader. Per-key rate limiting, scoped permissions, API key management.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(244,114,182,0.1);color:var(--pink)">📬</div>
+          <h3>Webhooks & Digests</h3>
+          <p>Event hooks on every mutation with HMAC signing. Scheduled memory digest delivery. Built-in SSRF protection on webhook URLs.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:var(--accent2)">🔄</div>
+          <h3>Cross-Instance Sync</h3>
+          <p>Pull changes since a timestamp, push to another instance. Keep multiple Engram deployments in sync across environments.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(248,113,113,0.1);color:var(--red)">📋</div>
+          <h3>Audit Trail & Structured Logging</h3>
+          <p>Every mutation logged — who, what, when, from where, with request IDs. Queryable via <code>/audit</code>. JSON logs throughout.</p>
+        </div>
       </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">🧹</div>
-        <h3>Auto-Deduplication</h3>
-        <p>Detects near-identical memories and merges them. Source count tracks how often something was mentioned — signal, not noise.</p>
+    </div>
+
+    <div class="feature-group">
+      <div class="group-label">Visualization & Organization</div>
+      <div class="features">
+        <div class="feature highlight">
+          <div class="feature-icon" style="background:rgba(52,211,153,0.15);color:var(--green)">🌌</div>
+          <h3>WebGL Galaxy Graph</h3>
+          <p>Explore your entire memory space as an interactive galaxy at <code>/gui</code>. Click memories, trace connections, search, create, and edit in the browser.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">🕸️</div>
+          <h3>Knowledge Graph</h3>
+          <p>Auto-linking via cosine similarity with typed edges. Graphology-powered centrality, community detection, and shortest path traversal.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">📦</div>
+          <h3>Spaces, Tags & Episodes</h3>
+          <p>Named memory spaces scoped via header. Tag anything. Group interactions into episode sessions for temporal context.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:var(--amber)">🧩</div>
+          <h3>Entities & Projects</h3>
+          <p>Track people, servers, tools, and projects as first-class objects with scoped search and relationship tracking.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:var(--accent2)">📥</div>
+          <h3>Review Queue / Inbox</h3>
+          <p>Auto-detected memories land in inbox for review. Approve, reject, or edit before they enter recall. Bulk operations supported.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(244,114,182,0.1);color:var(--pink)">⏪</div>
+          <h3>Time-Travel Queries</h3>
+          <p>Query what you knew at any past moment. Debug decisions, audit context drift, understand how your agent's worldview evolved.</p>
+        </div>
       </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:var(--amber)">⏰</div>
-        <h3>Auto-Forget</h3>
-        <p>Set memories to expire. A background sweep runs every 5 minutes. Low-importance memories fade. Critical ones persist forever.</p>
+    </div>
+
+  </div>
+</section>
+
+<!-- How It Works -->
+<section id="how-it-works" style="background:var(--bg2)">
+  <div class="container">
+    <div class="section-label">How It Works</div>
+    <h2 class="section-title">The memory lifecycle</h2>
+    <p class="section-desc">From store to recall — what happens to every memory.</p>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">01</div>
+        <div class="step-icon">💾</div>
+        <h3>Store</h3>
+        <p>Content embedded via local MiniLM ONNX (384-dim), stored in libsql with FTS5 full-text indexing.</p>
       </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(244,114,182,0.1);color:var(--pink)">🔍</div>
-        <h3>Fact Extraction</h3>
-        <p>Optional LLM-powered extraction of static facts from conversations. Supports any OpenAI-compatible API. Facts become high-priority recall candidates.</p>
+      <div class="step">
+        <div class="step-num">02</div>
+        <div class="step-icon">🔗</div>
+        <h3>Auto-Link</h3>
+        <p>Compared to existing memories. Above 0.7 cosine similarity, typed relationship edges are created automatically.</p>
       </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">👥</div>
-        <h3>Multi-Tenant</h3>
-        <p>Isolated memory per user with API keys, rate limiting, and scoped queries. Each user sees only their own memories.</p>
+      <div class="step">
+        <div class="step-num">03</div>
+        <div class="step-icon">⏱️</div>
+        <h3>FSRS-6 Init</h3>
+        <p>Stability, difficulty, storage + retrieval strength initialized. Power-law forgetting curve begins tracking retrievability.</p>
       </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">📦</div>
-        <h3>Spaces</h3>
-        <p>Organize memories into named collections. Switch between projects, domains, or contexts with a single header.</p>
+      <div class="step">
+        <div class="step-num">04</div>
+        <div class="step-icon">🔍</div>
+        <h3>Fact Extract</h3>
+        <p>If LLM configured: static facts extracted, keywords tagged, importance scored, relationships to existing memories detected.</p>
       </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(52,211,153,0.1);color:var(--green)">📊</div>
-        <h3>Graph Visualization</h3>
-        <p>WebGL galaxy-style graph of your memory space. Explore connections, search, create, edit — all from the browser.</p>
+      <div class="step">
+        <div class="step-num">05</div>
+        <div class="step-icon">🎯</div>
+        <h3>Recall</h3>
+        <p>Four strategies combined: static facts (always), semantic matches, high-importance (FSRS-weighted), recent activity.</p>
       </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">🕸️</div>
-        <h3>Graph Intelligence</h3>
-        <p>Memories form a knowledge graph with relationship inference. Auto-compute centrality, shortest paths, and community detection. Understand what matters.</p>
+      <div class="step">
+        <div class="step-num">06</div>
+        <div class="step-icon">📈</div>
+        <h3>Review</h3>
+        <p>Every recall is an implicit FSRS-6 "Good" review. Stability builds. Frequently recalled memories can reach months of retention.</p>
       </div>
-      <div class="feature">
-        <div class="feature-icon" style="background:rgba(34,211,238,0.1);color:var(--cyan)">🔧</div>
-        <h3>MCP Server</h3>
-        <p>Native Model Context Protocol integration for Claude Desktop, Cursor, and Windsurf. Expose Engram as AI-native tools with type-safe interfaces.</p>
+      <div class="step">
+        <div class="step-num">07</div>
+        <div class="step-icon">💪</div>
+        <h3>Dual Decay</h3>
+        <p>Storage strength accumulates. Retrieval strength decays via power law. Combined: 0.7 × retrieval + 0.3 × (storage/10).</p>
+      </div>
+      <div class="step">
+        <div class="step-num">08</div>
+        <div class="step-icon">⚡</div>
+        <h3>Contradiction</h3>
+        <p>Conflicts detected and LLM-verified. Resolved by keeping one, both, or merging. False positives eliminated automatically.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">09</div>
+        <div class="step-icon">🗜️</div>
+        <h3>Consolidate</h3>
+        <p>Large related clusters summarized into a single dense memory. Originals archived, graph links preserved.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">10</div>
+        <div class="step-icon">💭</div>
+        <h3>Reflect</h3>
+        <p>Periodic meta-analysis generates insights about themes, progress, and patterns. Reflections become searchable memories.</p>
       </div>
     </div>
   </div>
 </section>
 
 <!-- SDKs -->
-<section id="sdks" style="background:var(--bg2)">
+<section id="sdks">
   <div class="container">
     <div class="section-label">SDKs</div>
     <h2 class="section-title">Three lines to persistent memory</h2>
@@ -216,17 +393,17 @@ nav .links a:hover{color:var(--text);text-decoration:none}
       <div class="code-block">
         <div class="code-header"><span class="lang">TypeScript</span> npm install @engram/sdk</div>
         <div class="code-body">
-          <span class="kw">const</span> engram = <span class="kw">new</span> <span class="fn">Engram</span>({<br>
+          <span class="kw">const</span> mem = <span class="kw">new</span> <span class="fn">Engram</span>({<br>
           &nbsp;&nbsp;url: <span class="str">"http://localhost:4200"</span>,<br>
           &nbsp;&nbsp;apiKey: <span class="str">"eg_..."</span>,<br>
           });<br><br>
-          <span class="kw">await</span> engram.<span class="fn">store</span>(<br>
-          &nbsp;&nbsp;<span class="str">"Deployed v2.3 to prod"</span>,<br>
-          &nbsp;&nbsp;{ category: <span class="str">"task"</span> }<br>
-          );<br><br>
-          <span class="kw">const</span> results = <span class="kw">await</span> engram.<span class="fn">search</span>(<br>
-          &nbsp;&nbsp;<span class="str">"deployment history"</span><br>
-          );
+          <span class="kw">await</span> mem.<span class="fn">store</span>(<span class="str">"Auth migrated to JWT"</span>, {<br>
+          &nbsp;&nbsp;category: <span class="str">"decision"</span>, importance: <span class="num">9</span>,<br>
+          });<br><br>
+          <span class="kw">const</span> ctx = <span class="kw">await</span> mem.<span class="fn">recall</span>(<span class="str">"authentication setup"</span>);<br><br>
+          <span class="cm">// Check FSRS memory health</span><br>
+          <span class="kw">const</span> fsrs = <span class="kw">await</span> mem.<span class="fn">fsrsState</span>(id);<br>
+          <span class="cm">// { retrievability: 0.94, stability: 6.2 }</span>
         </div>
       </div>
       <div class="code-block">
@@ -236,77 +413,64 @@ nav .links a:hover{color:var(--text);text-decoration:none}
           &nbsp;&nbsp;<span class="str">"http://localhost:4200"</span>,<br>
           &nbsp;&nbsp;api_key=<span class="str">"eg_..."</span>,<br>
           )<br><br>
-          client.<span class="fn">store</span>(<br>
-          &nbsp;&nbsp;<span class="str">"Deployed v2.3 to prod"</span>,<br>
-          &nbsp;&nbsp;category=<span class="str">"task"</span>,<br>
-          )<br><br>
-          results = client.<span class="fn">search</span>(<br>
-          &nbsp;&nbsp;<span class="str">"deployment history"</span><br>
-          )
+          client.<span class="fn">store</span>(<span class="str">"Auth migrated to JWT"</span>,<br>
+          &nbsp;&nbsp;category=<span class="str">"decision"</span>, importance=<span class="num">9</span>)<br><br>
+          ctx = client.<span class="fn">recall</span>(<span class="str">"authentication setup"</span>)<br><br>
+          <span class="cm"># Works with LangChain, CrewAI,</span><br>
+          <span class="cm"># OpenAI Agents SDK out of the box</span>
         </div>
       </div>
     </div>
   </div>
 </section>
 
-<!-- How Recall Works -->
-<section>
+<!-- MCP -->
+<section id="mcp" style="background:var(--bg2)">
   <div class="container">
-    <div class="section-label">How It Works</div>
-    <h2 class="section-title">Four-layer contextual recall</h2>
-    <p class="section-desc">Recall doesn't just search — it assembles the optimal context window from multiple strategies.</p>
+    <div class="section-label">MCP Server</div>
+    <h2 class="section-title">Works with your AI tools</h2>
+    <p class="section-desc">Native Model Context Protocol — drop Engram into Claude Desktop, Cursor, or Windsurf in under a minute.</p>
 
-    <div class="features" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
-      <div class="feature" style="text-align:center">
-        <div style="font-size:2rem;margin-bottom:12px">🏗️</div>
-        <h3>Static Facts</h3>
-        <p>Always included. Things that are persistently true about the user. Extracted automatically from conversations.</p>
+    <div class="mcp-grid">
+      <div class="code-block">
+        <div class="code-header"><span class="lang">JSON</span> claude_desktop_config.json</div>
+        <div class="code-body">
+          {<br>
+          &nbsp;&nbsp;<span class="str">"mcpServers"</span>: {<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;<span class="str">"engram"</span>: {<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="str">"command"</span>: <span class="str">"node"</span>,<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="str">"args"</span>: [<span class="str">"path/to/engram/mcp-server.mjs"</span>],<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="str">"env"</span>: {<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="str">"ENGRAM_URL"</span>: <span class="str">"http://localhost:4200"</span>,<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="str">"ENGRAM_API_KEY"</span>: <span class="str">"eg_your_key"</span><br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;}<br>
+          &nbsp;&nbsp;}<br>
+          }
+        </div>
       </div>
-      <div class="feature" style="text-align:center">
-        <div style="font-size:2rem;margin-bottom:12px">🎯</div>
-        <h3>Semantic Match</h3>
-        <p>Embedding similarity to the current query. The most relevant memories float to the top.</p>
+      <div style="display:flex;flex-direction:column;gap:1.25rem">
+        <div class="feature" style="margin:0">
+          <h3 style="font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--dim);margin-bottom:14px">Tools</h3>
+          <div class="mcp-list">
+            <div class="mcp-item"><code style="color:var(--cyan);background:rgba(34,211,238,0.06)">memory_store</code><span>Store a memory</span></div>
+            <div class="mcp-item"><code style="color:var(--cyan);background:rgba(34,211,238,0.06)">memory_recall</code><span>Agent-optimized contextual recall</span></div>
+            <div class="mcp-item"><code style="color:var(--cyan);background:rgba(34,211,238,0.06)">memory_search</code><span>Semantic + full-text search</span></div>
+            <div class="mcp-item"><code style="color:var(--cyan);background:rgba(34,211,238,0.06)">memory_pack</code><span>Token-budget context packing</span></div>
+            <div class="mcp-item"><code style="color:var(--cyan);background:rgba(34,211,238,0.06)">memory_update</code><span>Create a new version</span></div>
+            <div class="mcp-item"><code style="color:var(--cyan);background:rgba(34,211,238,0.06)">memory_forget</code><span>Soft-delete a memory</span></div>
+            <div class="mcp-item"><code style="color:var(--cyan);background:rgba(34,211,238,0.06)">memory_list</code><span>List recent memories</span></div>
+          </div>
+        </div>
+        <div class="feature" style="margin:0">
+          <h3 style="font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--dim);margin-bottom:14px">Resources</h3>
+          <div class="mcp-list">
+            <div class="mcp-item"><code style="color:var(--accent2);background:rgba(167,139,250,0.06)">engram://health</code><span>Server health + feature flags</span></div>
+            <div class="mcp-item"><code style="color:var(--accent2);background:rgba(167,139,250,0.06)">engram://profile</code><span>User profile + static facts</span></div>
+            <div class="mcp-item"><code style="color:var(--accent2);background:rgba(167,139,250,0.06)">engram://stats</code><span>Detailed statistics</span></div>
+          </div>
+        </div>
       </div>
-      <div class="feature" style="text-align:center">
-        <div style="font-size:2rem;margin-bottom:12px">⭐</div>
-        <h3>High Importance</h3>
-        <p>Critical memories (importance ≥ 7) surface regardless of query similarity. The agent never forgets what matters.</p>
-      </div>
-      <div class="feature" style="text-align:center">
-        <div style="font-size:2rem;margin-bottom:12px">🕐</div>
-        <h3>Recent Activity</h3>
-        <p>Latest memories provide temporal context. The agent knows what just happened.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- Compare -->
-<section id="compare" style="background:var(--bg2)">
-  <div class="container">
-    <div class="section-label">Comparison</div>
-    <h2 class="section-title">How Engram stacks up</h2>
-    <p class="section-desc">Built for developers who want to own their stack.</p>
-
-    <div style="overflow-x:auto">
-    <table class="compare-table">
-      <thead>
-        <tr><th>Feature</th><th>Engram</th><th>Mem0</th><th>Supermemory</th></tr>
-      </thead>
-      <tbody>
-        <tr><td>Semantic search</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
-        <tr><td>Local embeddings</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Graph visualization</td><td class="yes">✓</td><td class="no">✗</td><td class="yes">✓</td></tr>
-        <tr><td>Memory versioning</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Auto-deduplication</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Auto-forget</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Fact extraction</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td></tr>
-        <tr><td>Multi-tenant</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td></tr>
-        <tr><td>No external API needed</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>SQLite (zero deps)</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Self-hosted</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
-      </tbody>
-    </table>
     </div>
   </div>
 </section>
@@ -324,7 +488,7 @@ nav .links a:hover{color:var(--text);text-decoration:none}
 </section>
 
 <footer>
-  <p>Engram is open source software under the MIT License.</p>
+  <p>Engram is open source software under the MIT License. &nbsp;·&nbsp; <a href="https://github.com/zanfiel/engram">GitHub</a></p>
 </footer>
 
 </body>
