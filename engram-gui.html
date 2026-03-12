@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Engram</title>
-<script src="https://d3js.org/d3.v7.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/7.3.2/pixi.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pixi.js@7.3.2/dist/pixi.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/pixi-filters@4.2.0/dist/pixi-filters.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
@@ -813,9 +813,9 @@ var NODE_SPARK_CHANCE = 0.003;
 var MAX_NODE_SPARKS = 60;
 
 // Orbital motion
-var NUCLEUS_ORBIT_SPEED = 0.01;
-var ROOT_ORBIT_SPEED = 0.02;
-var CHILD_ORBIT_SPEED = 0.028;
+var NUCLEUS_ORBIT_SPEED = 0.003;
+var ROOT_ORBIT_SPEED = 0.005;
+var CHILD_ORBIT_SPEED = 0.007;
 var HUB_WOBBLE = 3;
 
 // Energy pulses
@@ -868,6 +868,7 @@ var nodeSparks = [];
 
 // Orbital motion state
 var orbitData = {};
+var _forceSim = null, _forceNodes = [], _fnMap = {};
 var nucleiOrbitData = {};
 var nodeProcessOrder = [];
 var nodeAnimPos = {};
@@ -1557,7 +1558,7 @@ function computeLayout() {
 
   var activeCats = catList.filter(function(c) { return catGroups[c] && catGroups[c].length > 0; });
 
-  // Scale nucleus radius based on total memory count — more memories = wider spread
+  // Scale nucleus radius based on total memory count
   var totalMems = memories.length;
   var dynamicR = Math.max(400, 250 + Math.sqrt(totalMems) * 18);
   NUCLEUS_R = dynamicR;
@@ -1583,7 +1584,7 @@ function computeLayout() {
     trunkSegs.push({ _isTrunk: true, _curveOff: curvature, col: COLORS[cat], cat: cat });
   }
 
-  // ===== Cluster Detection =====
+  // ===== d3-force positioning =====
   clusters = {};
   clusterPositions = {};
   clusterOrbitData = {};
@@ -1594,6 +1595,71 @@ function computeLayout() {
   nodeProcessOrder = [];
   branchSegs = [];
 
+  // Build force simulation nodes — one per memory
+  var forceNodes = [];
+  var fnMap = {};
+  for (var i = 0; i < memories.length; i++) {
+    var m = memories[i];
+    var cat = m.category || 'general';
+    var nuc = nuclei[cat];
+    // Seed position near category nucleus with jitter
+    var fn = {
+      id: m.id,
+      category: cat,
+      importance: m.importance || 5,
+      radius: nodeRadius(m),
+      x: (nuc ? nuc.x : cx) + (Math.random() - 0.5) * 160,
+      y: (nuc ? nuc.y : cy) + (Math.random() - 0.5) * 160
+    };
+    forceNodes.push(fn);
+    fnMap[m.id] = fn;
+  }
+
+  // Build force links from actual similarity links
+  var nodeIdSet = {};
+  for (var i = 0; i < forceNodes.length; i++) nodeIdSet[forceNodes[i].id] = true;
+  var forceLinks = [];
+  for (var i = 0; i < links.length; i++) {
+    var l = links[i];
+    if (nodeIdSet[l.source] && nodeIdSet[l.target]) {
+      forceLinks.push({ source: l.source, target: l.target, similarity: l.similarity || 0.5 });
+    }
+  }
+
+  // Run d3-force simulation
+  var sim = d3.forceSimulation(forceNodes)
+    .force('charge', d3.forceManyBody()
+      .strength(function(d) { return -20 - d.radius * 4; })
+      .distanceMax(500))
+    .force('link', d3.forceLink(forceLinks)
+      .id(function(d) { return d.id; })
+      .distance(function(d) { return 35 + (1 - d.similarity) * 80; })
+      .strength(function(d) { return 0.1 + d.similarity * 0.4; }))
+    .force('collision', d3.forceCollide()
+      .radius(function(d) { return d.radius * 2 + 2; })
+      .strength(0.6))
+    .force('categoryX', d3.forceX()
+      .x(function(d) { var n = nuclei[d.category]; return n ? n.x : cx; })
+      .strength(0.06))
+    .force('categoryY', d3.forceY()
+      .y(function(d) { var n = nuclei[d.category]; return n ? n.y : cy; })
+      .strength(0.06))
+    .force('center', d3.forceCenter(cx, cy).strength(0.008))
+    .alphaDecay(0.02)
+    .velocityDecay(0.35);
+
+  // Warm up: run 200 ticks for stable initial layout
+  sim.alpha(1);
+  for (var t = 0; t < 200; t++) sim.tick();
+  sim.stop();
+
+  // Store simulation reference for live ticking
+  if (typeof _forceSim !== 'undefined' && _forceSim) _forceSim.stop();
+  _forceSim = sim;
+  _forceNodes = forceNodes;
+  _fnMap = fnMap;
+
+  // ===== Cluster Detection (same as original) =====
   var clusterIdCounter = 1;
 
   activeCats.forEach(function(cat) {
@@ -1602,18 +1668,15 @@ function computeLayout() {
     var nuc = nuclei[cat];
     var col = COLORS[cat] || COLORS.general;
 
-    // Build adjacency from links within this category
     var catIdSet = {};
     mems.forEach(function(m) { catIdSet[m.id] = true; });
     var catLinks = links.filter(function(l) {
       return catIdSet[l.source] && catIdSet[l.target] && (l.similarity || 0) >= CLUSTER_SIM_THRESHOLD;
     });
 
-    // Detect communities
     var memIds = mems.map(function(m) { return m.id; });
     var groups = detectClusters(memIds, catLinks);
 
-    // Split into clusters (>= threshold) and individuals
     var clusterGroups = [];
     var individualMems = [];
     groups.forEach(function(group) {
@@ -1624,80 +1687,84 @@ function computeLayout() {
       }
     });
 
-    // Position clusters around nucleus using golden angle spiral
-    var outwardAngle = nuc.angle;
-    var allItems = []; // unified list of { type: 'cluster'|'individual', ... } for spiral placement
-
-    // Sort clusters by size descending (biggest closest)
+    // Clusters: use centroid of force positions
     clusterGroups.sort(function(a, b) { return b.length - a.length; });
     clusterGroups.forEach(function(group) {
-      var avgImp = 0;
-      group.forEach(function(id) { avgImp += (nodeMap[id].importance || 5); });
+      var cid = 'c' + (clusterIdCounter++);
+      var avgImp = 0, sumX = 0, sumY = 0;
+      group.forEach(function(id) {
+        avgImp += (nodeMap[id].importance || 5);
+        var fn = fnMap[id];
+        if (fn) { sumX += fn.x; sumY += fn.y; }
+      });
       avgImp /= group.length;
-      allItems.push({ type: 'cluster', memIds: group, importance: avgImp, cat: cat });
-    });
+      var clx = sumX / group.length;
+      var cly = sumY / group.length;
 
-    // Sort individuals by importance
-    individualMems.sort(function(a, b) { return (b.importance || 0) - (a.importance || 0); });
-    individualMems.forEach(function(m) {
-      allItems.push({ type: 'individual', mem: m, cat: cat });
-    });
+      var label = autoLabel(group);
+      clusters[cid] = {
+        id: cid, cat: cat, label: label,
+        memIds: group, importance: avgImp,
+        expanded: !!expandedClusters[cid]
+      };
+      group.forEach(function(mid) { memToCluster[mid] = cid; });
+      clusterPositions[cid] = { x: clx, y: cly };
 
-    for (var ri = 0; ri < allItems.length; ri++) {
-      var item = allItems[ri];
-      var spiralAngle = outwardAngle + GOLDEN_ANGLE * ri;
-      var baseR = 80 + Math.sqrt(ri) * 30;
-      var noise = Math.sin((item.type === 'cluster' ? item.memIds[0] : item.mem.id) * 3.7) * 8;
-      var dist = baseR + noise;
+      // Orbital data for gentle drift
+      var cAngle = Math.atan2(cly - nuc.y, clx - nuc.x);
+      var cDist = Math.sqrt((clx - nuc.x) * (clx - nuc.x) + (cly - nuc.y) * (cly - nuc.y));
+      var cDir = Math.sin(group[0] * 3.1) > 0 ? 1 : -1;
+      clusterOrbitData[cid] = {
+        parentType: 'nucleus', parentKey: cat,
+        baseAngle: cAngle, baseDist: cDist,
+        angSpeed: ROOT_ORBIT_SPEED * 0.3 * cDir
+      };
+      clusterProcessOrder.push(cid);
 
-      if (item.type === 'cluster') {
-        var cid = 'c' + (clusterIdCounter++);
-        var label = autoLabel(item.memIds);
-        clusters[cid] = {
-          id: cid, cat: cat, label: label,
-          memIds: item.memIds, importance: item.importance,
-          expanded: !!expandedClusters[cid]
-        };
-        item.memIds.forEach(function(mid) { memToCluster[mid] = cid; });
+      var bCurve = cDist * 0.2 * (Math.sin(group[0] * 2.1) > 0 ? 1 : -1);
+      branchSegs.push({ _isTrunk: false, _curveOff: bCurve, col: col, depth: 0, fromId: null, toId: cid, cat: cat, isCluster: true });
 
-        var clx = nuc.x + Math.cos(spiralAngle) * dist;
-        var cly = nuc.y + Math.sin(spiralAngle) * dist;
-        clusterPositions[cid] = { x: clx, y: cly };
-
-        var cDir = Math.sin(item.memIds[0] * 3.1) > 0 ? 1 : -1;
-        clusterOrbitData[cid] = {
-          parentType: 'nucleus', parentKey: cat,
-          baseAngle: spiralAngle, baseDist: dist,
-          angSpeed: ROOT_ORBIT_SPEED * 0.7 * (0.6 + Math.sin(item.memIds[0] * 1.3) * 0.4) * cDir
-        };
-        clusterProcessOrder.push(cid);
-
-        var bCurve = dist * 0.2 * (Math.sin(item.memIds[0] * 2.1) > 0 ? 1 : -1);
-        branchSegs.push({ _isTrunk: false, _curveOff: bCurve, col: col, depth: 0, fromId: null, toId: cid, cat: cat, isCluster: true });
-
-        // If expanded, place children around cluster center
-        if (clusters[cid].expanded) {
-          placeClusterChildren(cid, clx, cly, spiralAngle, col, cat);
-        }
-      } else {
-        // Individual memory (not in a cluster)
-        var m = item.mem;
-        var rx = nuc.x + Math.cos(spiralAngle) * dist;
-        var ry = nuc.y + Math.sin(spiralAngle) * dist;
-        nodePositions[m.id] = { x: rx, y: ry, depth: 0 };
-
-        var rDir = Math.sin(m.id * 3.1) > 0 ? 1 : -1;
-        orbitData[m.id] = {
-          parentType: 'nucleus', parentKey: cat,
-          baseAngle: spiralAngle, baseDist: dist,
-          angSpeed: ROOT_ORBIT_SPEED * (0.6 + Math.sin(m.id * 1.3) * 0.5) * rDir
-        };
-        nodeProcessOrder.push(m.id);
-
-        var bCurve2 = dist * 0.2 * (Math.sin(m.id * 2.1) > 0 ? 1 : -1);
-        branchSegs.push({ _isTrunk: false, _curveOff: bCurve2, col: col, depth: 0, fromId: null, toId: m.id, cat: cat });
+      // Place children if expanded
+      if (clusters[cid].expanded) {
+        group.forEach(function(mid) {
+          var fn = fnMap[mid];
+          if (fn) {
+            nodePositions[mid] = { x: fn.x, y: fn.y, depth: 1 };
+            var mAngle = Math.atan2(fn.y - cly, fn.x - clx);
+            var mDist = Math.sqrt((fn.x - clx) * (fn.x - clx) + (fn.y - cly) * (fn.y - cly));
+            var mDir = Math.sin(mid * 2.7) > 0 ? 1 : -1;
+            orbitData[mid] = {
+              parentType: 'cluster', parentKey: cid,
+              baseAngle: mAngle, baseDist: mDist,
+              angSpeed: CHILD_ORBIT_SPEED * 0.2 * mDir
+            };
+            nodeProcessOrder.push(mid);
+            branchSegs.push({ _isTrunk: false, _curveOff: mDist * 0.15 * (Math.sin(mid * 1.9) > 0 ? 1 : -1), col: col, depth: 1, fromId: cid, toId: mid, cat: cat, fromCluster: true });
+          }
+        });
       }
-    }
+    });
+
+    // Individual nodes: use force positions directly
+    individualMems.forEach(function(m) {
+      var fn = fnMap[m.id];
+      if (!fn) return;
+      nodePositions[m.id] = { x: fn.x, y: fn.y, depth: 0 };
+
+      // Compute angle/dist from nucleus for gentle orbital drift
+      var mAngle = Math.atan2(fn.y - nuc.y, fn.x - nuc.x);
+      var mDist = Math.sqrt((fn.x - nuc.x) * (fn.x - nuc.x) + (fn.y - nuc.y) * (fn.y - nuc.y));
+      var rDir = Math.sin(m.id * 3.1) > 0 ? 1 : -1;
+      orbitData[m.id] = {
+        parentType: 'nucleus', parentKey: cat,
+        baseAngle: mAngle, baseDist: mDist,
+        angSpeed: ROOT_ORBIT_SPEED * 0.4 * (0.6 + Math.sin(m.id * 1.3) * 0.4) * rDir
+      };
+      nodeProcessOrder.push(m.id);
+
+      var bCurve2 = mDist * 0.2 * (Math.sin(m.id * 2.1) > 0 ? 1 : -1);
+      branchSegs.push({ _isTrunk: false, _curveOff: bCurve2, col: col, depth: 0, fromId: null, toId: m.id, cat: cat });
+    });
   });
 
   initParticles();
@@ -2301,7 +2368,7 @@ function updateCurves(phaseTrunk, phaseBranch, dimEased) {
   for (var ti = 0; ti < trunkSegs.length; ti++) {
     var ts = trunkSegs[ti];
     if (currentFilter !== 'all' && ts.cat !== currentFilter) continue;
-    var tA = trunkAlpha * 0.7;
+    var tA = trunkAlpha * 0.35;
     if (selectedNode && ts.cat !== selectedNode.category) tA *= (1 - dimEased * 0.85);
     if (tA < 0.005) continue;
     var pts = getSegPts(ts);
@@ -2310,7 +2377,7 @@ function updateCurves(phaseTrunk, phaseBranch, dimEased) {
     curvesGfx.moveTo(pts.x1, pts.y1);
     curvesGfx.quadraticCurveTo(pts.cx, pts.cy, pts.x2, pts.y2);
     // Trunk core
-    curvesGfx.lineStyle(1.0 / transform.k, ts.col.hex, tA * 1.5);
+    curvesGfx.lineStyle(0.8 / transform.k, ts.col.hex, tA * 0.9);
     curvesGfx.moveTo(pts.x1, pts.y1);
     curvesGfx.quadraticCurveTo(pts.cx, pts.cy, pts.x2, pts.y2);
   }
@@ -2324,7 +2391,7 @@ function updateCurves(phaseTrunk, phaseBranch, dimEased) {
     // Hide curves to collapsed cluster orbs if cluster is expanded (children show individual curves)
     if (bs.isCluster && clusters[bs.toId] && clusters[bs.toId].expanded) continue;
     var isHL = hlIndexSet[bi] || false;
-    var bA = branchAlpha * 0.5 / (1 + bs.depth * 0.12);
+    var bA = branchAlpha * 0.28 / (1 + bs.depth * 0.18);
     if (selectedNode) {
       if (isHL) bA = 0.7;
       else bA *= (1 - dimEased * 0.88);
@@ -2340,7 +2407,7 @@ function updateCurves(phaseTrunk, phaseBranch, dimEased) {
       curvesGfx.moveTo(pts.x1, pts.y1);
       curvesGfx.quadraticCurveTo(pts.cx, pts.cy, pts.x2, pts.y2);
     } else {
-      curvesGfx.lineStyle(Math.max(0.4, 0.8 - bs.depth * 0.06) / transform.k, bs.col.hex, Math.min(bA * 1.4, 0.5));
+      curvesGfx.lineStyle(Math.max(0.3, 0.6 - bs.depth * 0.06) / transform.k, bs.col.hex, Math.min(bA * 1.2, 0.3));
       curvesGfx.moveTo(pts.x1, pts.y1);
       curvesGfx.quadraticCurveTo(pts.cx, pts.cy, pts.x2, pts.y2);
     }
@@ -3608,7 +3675,7 @@ function fitView() {
       if (p.y > maxY) maxY = p.y;
     }
   });
-  var padding = 80;
+  var padding = 120;
   var dx = maxX - minX + padding * 2;
   var dy = maxY - minY + padding * 2;
   var cx = (minX + maxX) / 2;
@@ -3781,6 +3848,8 @@ async function loadData() {
     buildLegend();
     if (listPanelOpen) renderListPanel();
     updateZoomLevel();
+    // Auto-fit view on initial load
+    setTimeout(fitView, 100);
     scheduleRefresh();
   } catch(e) {
     document.getElementById('loading').innerHTML = '<div class="text" style="color:#f87171">Failed: ' + e.message + '</div>';

@@ -1,27 +1,32 @@
 {
   "name": "engram",
   "version": "5.4.0",
-  "description": "Persistent memory for AI agents — FSRS-powered decay, semantic search, graph relationships",
   "type": "module",
   "private": true,
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "start": "node --experimental-strip-types server.ts",
-    "test": "node --experimental-strip-types --test tests/api.test.ts",
-    "mcp": "node --experimental-strip-types mcp-server.ts",
-    "cli": "node --experimental-strip-types cli.ts"
-  },
-  "devDependencies": {
-    "@types/node": "^22"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
+    "dev": "node --experimental-strip-types --watch server.ts"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "graphology": "^0.26.0",
+    "graphology-communities-louvain": "^2.0.2",
+    "graphology-metrics": "^2.4.0",
+    "graphology-shortest-path": "^2.1.0",
     "libsql": "^0.5.22"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5",
+    "vitest": "^4.0.18"
   },
   "trustedDependencies": [
     "onnxruntime-node",
-    "protobufjs"
+    "protobufjs",
+    "sharp"
   ]
 }
