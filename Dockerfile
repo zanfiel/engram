@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Install deps first for layer caching
 COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev 2>/dev/null || npm install --omit=dev
+RUN npm install --include=optional
 
 # Copy app files
 COPY server.ts engram-gui.html engram-login.html ./
