@@ -68,9 +68,28 @@ curl -X POST http://localhost:4200/recall \
 
 ---
 
-## What's New in v5.3
+## What's New in v5.6
 
-### Security Hardening
+### Node.js 22 Runtime (Primary)
+
+- **Node.js 22+ as primary runtime** — `node --experimental-strip-types` for native TypeScript support. Bun support maintained for compatibility.
+- **Optimized MCP server** — rewritten for Node.js, reduced from 529 to 168 lines. Faster startup, lower memory footprint.
+- **vitest test framework** — 76+ test cases covering API, FSRS, indexing, and CLI.
+
+### Graph Intelligence Layer
+
+- **Graphology integration** — store memories as knowledge graph nodes with relationship edges.
+- **Auto-linking metrics** — compute centrality, shortest paths, community detection.
+- **Relationship inference** — LLM extracts "mentions", "depends_on", "causes", "related_to" edges from memory content.
+- **Graph visualization** — updated galaxy view shows relationship strength.
+
+### MCP Server Improvements
+
+- **Better error handling** — detailed error context propagated to Claude Desktop.
+- **Streaming responses** — large memory exports use progress streams.
+- **Tool introspection** — dynamic tool discovery for client apps.
+
+### Security Hardening (v5.3+)
 
 - **Auth required by default** — unauthenticated requests are rejected. Set `ENGRAM_OPEN_ACCESS=1` for single-user mode.
 - **Rate limit fix** — rate-limited requests no longer escalate to admin privileges.
@@ -128,22 +147,22 @@ docker compose up -d
 
 Engram is now running at `http://localhost:4200`.
 
-### From source (Bun)
-
-```bash
-git clone https://github.com/zanfiel/engram.git
-cd engram
-bun install
-ENGRAM_GUI_PASSWORD=your-password bun run server.ts
-```
-
-### From source (Node.js 22+)
+### From source (Node.js 22+ — recommended)
 
 ```bash
 git clone https://github.com/zanfiel/engram.git
 cd engram
 npm install
 ENGRAM_GUI_PASSWORD=your-password node --experimental-strip-types server.ts
+```
+
+### From source (Bun — legacy)
+
+```bash
+git clone https://github.com/zanfiel/engram.git
+cd engram
+bun install
+ENGRAM_GUI_PASSWORD=your-password bun run server.ts
 ```
 
 ### Create an API key
