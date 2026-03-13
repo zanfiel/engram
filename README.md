@@ -7,7 +7,7 @@
 Store, search, recall, and link memories with automatic embeddings,
 fact extraction, versioning, deduplication, and graph visualization.
 
-[Quick Start](#quick-start) · [API Reference](#api-reference) · [SDKs](#sdks) · [MCP Server](#mcp-server) · [CLI](#cli) · [Self-Host](#self-hosting) · [GUI](#gui)
+[Quick Start](#quick-start) · [API Reference](#api-reference) · [SDKs](#sdks) · [MCP Server](#mcp-server) · [CLI](#cli) · [Self-Host](#self-hosting) · [GUI](#gui) · [Live Demo](https://demo.engram.lol/gui)
 
 </div>
 
@@ -561,6 +561,8 @@ Use `X-Space: space-name` (or `X-Engram-Space`) header to scope operations to a 
 ## GUI
 
 Engram includes a WebGL graph visualization at `/gui`. Login with your `ENGRAM_GUI_PASSWORD`.
+
+> **Try it now** — explore a live demo instance at **[demo.engram.lol/gui](https://demo.engram.lol/gui)** (password: `demo`)
 
 **Features:**
 - Interactive galaxy-style memory graph
