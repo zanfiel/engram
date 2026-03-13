@@ -6,6 +6,16 @@ import { db } from "../db/index.ts";
 import { log } from "../config/logger.ts";
 import { createHmac } from "crypto";
 
+const getActiveWebhooks = db.prepare(
+  "SELECT id, url, events, secret FROM webhooks WHERE user_id = ? AND active = 1"
+);
+const webhookTriggered = db.prepare(
+  "UPDATE webhooks SET last_triggered_at = datetime('now'), failure_count = 0 WHERE id = ?"
+);
+const webhookFailed = db.prepare(
+  "UPDATE webhooks SET failure_count = failure_count + 1 WHERE id = ?"
+);
+
 export async function emitWebhookEvent(
   event: string,
   payload: Record<string, unknown>,
