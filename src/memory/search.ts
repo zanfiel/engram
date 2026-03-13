@@ -26,6 +26,8 @@ interface SearchResult {
   tags?: string[];
   access_count?: number;
   episode_id?: number;
+  combined_score?: number;
+  semantic_score?: number;
   linked?: Array<{ id: number; content: string; category: string; similarity: number; type: string }>;
   version_chain?: Array<{ id: number; content: string; version: number; is_latest: boolean }>;
 }

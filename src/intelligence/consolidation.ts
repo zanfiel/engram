@@ -2,8 +2,12 @@
 // CONSOLIDATION — Auto-summarize memory clusters
 // ============================================================================
 
-import { db } from "../db/index.ts";
+import { db, insertMemory, markArchived, insertLink, writeVec, getClusterMembers, getClusterCandidates } from "../db/index.ts";
 import { log } from "../config/logger.ts";
+import { LLM_API_KEY, CONSOLIDATION_THRESHOLD } from "../config/index.ts";
+import { callLLM } from "../llm/index.ts";
+import { embed, embeddingToBuffer } from "../embeddings/index.ts";
+import { autoLink } from "../memory/search.ts";
 
 // ============================================================================
 // MEMORY CONSOLIDATION — Auto-summarize large clusters

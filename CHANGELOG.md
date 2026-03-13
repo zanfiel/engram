@@ -5,6 +5,32 @@ All notable changes to Engram will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.5.0] - 2026-03-13
+
+### Changed
+- **Modular architecture**: Monolith `server.ts` split into focused modules under `src/`
+  - `src/config/` — environment config and logger
+  - `src/db/` — schema, migrations, prepared statements
+  - `src/embeddings/` — model init, in-memory cache, similarity
+  - `src/fsrs/` — FSRS-6 spaced repetition engine
+  - `src/intelligence/` — fact extraction, consolidation
+  - `src/llm/` — LLM client, reranking
+  - `src/memory/` — hybrid search, auto-linking, profile
+  - `src/platform/` — webhooks, digests
+  - `src/auth/` — authentication middleware
+  - `src/tier4/` — causal chains, predictive recall, emotional valence, reconsolidation
+  - `src/routes/` — all HTTP handlers
+- Entry point is now `server-split.ts` (imports from `src/`)
+
+### Fixed
+- `FSRSRating` is now both a const value and a type (declaration merging) — fixes TypeScript errors across FSRS consumers
+- Exported `FSRSMemoryState` interface from `src/fsrs/`
+- Aliased `calculateDecayScore` import to resolve shadowing by local route wrapper
+- Exported `graphCache` + `setGraphCache` from `src/embeddings/` to break module boundary
+- Added `"corrects"` to `FactExtractionResult` relation type union — was in the LLM prompt but missing from the TypeScript type
+- Fixed `trackAccessWithFSRS` local wrapper to accept optional `grade` parameter
+- Fixed `addToEmbeddingCache` calls missing `user_id` field
+
 ## [5.4.0] - 2026-03-10
 
 ### Security

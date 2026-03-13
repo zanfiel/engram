@@ -13,7 +13,7 @@ import {
   PORT, HOST, OPEN_ACCESS, CORS_ORIGIN, MAX_BODY_SIZE, MAX_CONTENT_SIZE,
   ALLOWED_IPS, LLM_URL, LLM_API_KEY, LLM_MODEL, AUTO_LINK_THRESHOLD, AUTO_LINK_MAX,
   DEFAULT_IMPORTANCE, RERANKER_ENABLED, RERANKER_TOP_K, DATA_DIR, DB_PATH, EMBEDDING_MODEL,
-  CONSOLIDATION_THRESHOLD, RATE_WINDOW_MS, OPEN_ACCESS_RATE_LIMIT,
+  CONSOLIDATION_THRESHOLD, RATE_WINDOW_MS, OPEN_ACCESS_RATE_LIMIT, DEFAULT_RATE_LIMIT,
   GUI_AUTH_MAX_ATTEMPTS, GUI_AUTH_WINDOW_MS, GUI_AUTH_LOCKOUT_MS,
   ENABLE_CAUSAL_CHAINS, ENABLE_PREDICTIVE_RECALL, ENABLE_EMOTIONAL_VALENCE,
   ENABLE_RECONSOLIDATION,
@@ -50,6 +50,7 @@ import {
 import {
   embed, cosineSimilarity, getCachedEmbeddings, addToEmbeddingCache,
   invalidateEmbeddingCache, embeddingToBuffer, bufferToEmbedding, embeddingToVectorJSON,
+  graphCache, setGraphCache,
 } from "../embeddings/index.ts";
 
 // Search + linking
@@ -57,7 +58,7 @@ import { hybridSearch, autoLink } from "../memory/search.ts";
 import { generateProfile } from "../memory/profile.ts";
 
 // FSRS
-import { fsrsProcessReview, fsrsRetrievability, fsrsNextInterval, FSRSRating } from "../fsrs/index.ts";
+import { fsrsProcessReview, fsrsRetrievability, fsrsNextInterval, FSRSRating, calculateDecayScore as fsrsCalculateDecayScore } from "../fsrs/index.ts";
 
 // LLM + extraction
 import { callLLM, extractFacts, processExtractionResult, rerank, isLLMAvailable } from "../llm/index.ts";
@@ -156,7 +157,7 @@ function updateDecayScores(): number {
 }
 
 // Track access with FSRS review
-function trackAccessWithFSRS(memoryId: number): void {
+function trackAccessWithFSRS(memoryId: number, grade: typeof FSRSRating[keyof typeof FSRSRating] = FSRSRating.Good): void {
   try {
     const state = getFSRS.get(memoryId) as any;
     if (state) {
@@ -167,7 +168,7 @@ function trackAccessWithFSRS(memoryId: number): void {
         const refTime = new Date(lastReview + (lastReview.includes("Z") ? "" : "Z")).getTime();
         if (!isNaN(refTime)) elapsedDays = Math.max(0, (now - refTime) / (1000 * 60 * 60 * 24));
       }
-      const newState = fsrsProcessReview(state, FSRSRating.Good, elapsedDays);
+      const newState = fsrsProcessReview(state, grade, elapsedDays);
       updateFSRS.run(
         newState.difficulty, newState.stability,
         newState.storage_strength, newState.retrieval_strength,
@@ -1464,6 +1465,7 @@ Only include pairs that are actual contradictions.`;
           score: number;
           source: string; // "static" | "semantic" | "recent" | "linked"
           tokens: number;
+          created_at?: string;
         }
 
         const blocks: ContextBlock[] = [];
@@ -1884,7 +1886,7 @@ Return JSON:
     if ((url.pathname === "/store" || url.pathname === "/memory" || url.pathname === "/memories") && method === "POST") {
       if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
-        const body = await req.json();
+        const body = await req.json() as any;
         const { content, category, source, session_id, importance, tags, episode } = body;
         if (!content || typeof content !== "string" || content.trim().length === 0) {
           return errorResponse("content is required and must be a non-empty string");
@@ -1969,7 +1971,7 @@ Return JSON:
 
         // Calculate initial decay score + FSRS state
         const initFSRS = fsrsProcessReview(null, FSRSRating.Good, 0);
-        const decayScore = calculateDecayScore(imp, result.created_at, 0, null, !!isStatic, 1, initFSRS.stability);
+        const decayScore = fsrsCalculateDecayScore(imp, result.created_at, 0, null, !!isStatic, 1, initFSRS.stability);
         db.prepare("UPDATE memories SET decay_score = ?, fsrs_stability = ?, fsrs_difficulty = ?, fsrs_storage_strength = ?, fsrs_retrieval_strength = ?, fsrs_learning_state = ?, fsrs_reps = ?, fsrs_lapses = ?, fsrs_last_review_at = ? WHERE id = ?").run(
           Math.round(decayScore * 1000) / 1000,
           initFSRS.stability, initFSRS.difficulty, initFSRS.storage_strength,
@@ -2018,7 +2020,7 @@ Return JSON:
               const _t1 = Date.now();
               writeVec(capturedMemId, capturedEmbArray);
               addToEmbeddingCache({
-                id: capturedMemId, content: capturedContent, category: capturedCategory,
+                id: capturedMemId, user_id: auth.user_id, content: capturedContent, category: capturedCategory,
                 importance: imp, embedding: capturedEmbArray,
                 is_static: false, source_count: 1, is_latest: true, is_forgotten: false,
               });
@@ -2161,7 +2163,7 @@ Return JSON:
 
         // FSRS init
         const initFSRS = fsrsProcessReview(null, FSRSRating.Good, 0);
-        const decayScore = calculateDecayScore(imp, result.created_at, 0, null, true, 1, initFSRS.stability);
+        const decayScore = fsrsCalculateDecayScore(imp, result.created_at, 0, null, true, 1, initFSRS.stability);
         db.prepare("UPDATE memories SET decay_score = ?, fsrs_stability = ?, fsrs_difficulty = ?, fsrs_storage_strength = ?, fsrs_retrieval_strength = ?, fsrs_learning_state = ?, fsrs_reps = ?, fsrs_lapses = ?, fsrs_last_review_at = ? WHERE id = ?").run(
           Math.round(decayScore * 1000) / 1000,
           initFSRS.stability, initFSRS.difficulty, initFSRS.storage_strength,
@@ -2193,7 +2195,7 @@ Return JSON:
             try {
               writeVec(capturedId, capturedEmb);
               addToEmbeddingCache({
-                id: capturedId, content: storedContent, category,
+                id: capturedId, user_id: auth.user_id, content: storedContent, category,
                 importance: imp, embedding: capturedEmb,
                 is_static: true, source_count: 1, is_latest: true, is_forgotten: false,
               });
@@ -2234,7 +2236,7 @@ Return JSON:
     if ((url.pathname === "/search" || url.pathname === "/memories/search") && method === "POST") {
       try {
         const _searchT0 = performance.now();
-        const body = await req.json();
+        const body = await req.json() as any;
         const { query, limit, include_links, expand_relationships, latest_only, tag, episode_id: filterEpisode } = body;
         if (!query || typeof query !== "string") return errorResponse("query is required");
         const _searchT1 = performance.now();
@@ -2270,7 +2272,7 @@ Return JSON:
         // Rerank results for better precision
         const doRerank = body.rerank === true; // opt-in: pass rerank: true to enable LLM reranking
         if (doRerank && results.length > 3) {
-          results = await rerank(query, results);
+          results = await rerank(query, results) as typeof results;
           // Re-trim to requested limit after reranking
           results = results.slice(0, Math.min(limit || 10, 50));
         }
@@ -2744,7 +2746,7 @@ Return JSON:
         ...memory,
         tags,
         episode: episode ? { id: episode.id, title: episode.title, session_id: episode.session_id } : null,
-        decay_score: calculateDecayScore(
+        decay_score: fsrsCalculateDecayScore(
           memory.importance, memory.created_at, memory.access_count || 0,
           memory.last_accessed_at, !!memory.is_static, memory.source_count || 1
         ),
@@ -2846,7 +2848,7 @@ Return JSON:
 
     if (url.pathname === "/conversations" && method === "POST") {
       try {
-        const body = await req.json();
+        const body = await req.json() as any;
         const { agent, session_id, title, metadata } = body;
         if (!agent || typeof agent !== "string") return errorResponse("agent is required");
         const result = insertConversation.get(
@@ -2882,7 +2884,7 @@ Return JSON:
     if (/^\/conversations\/\d+$/.test(url.pathname) && method === "PATCH") {
       try {
         const id = Number(url.pathname.split("/")[2]);
-        const body = await req.json();
+        const body = await req.json() as any;
         updateConversation.run(
           body.title || null,
           body.metadata ? JSON.stringify(body.metadata) : null,
@@ -2909,7 +2911,7 @@ Return JSON:
         const convId = Number(url.pathname.split("/")[2]);
         const conv = getConversation.get(convId);
         if (!conv) return errorResponse("Conversation not found", 404);
-        const body = await req.json();
+        const body = await req.json() as any;
         const msgs = Array.isArray(body) ? body : [body];
         const results: Array<{ id: number; created_at: string }> = [];
         for (const msg of msgs) {
@@ -2932,7 +2934,7 @@ Return JSON:
 
     if (url.pathname === "/conversations/bulk" && method === "POST") {
       try {
-        const body = await req.json();
+        const body = await req.json() as any;
         const { agent, session_id, title, metadata, messages: msgs } = body;
         if (!agent) return errorResponse("agent is required");
         if (!msgs || !Array.isArray(msgs) || msgs.length === 0) {
@@ -2955,7 +2957,7 @@ Return JSON:
 
     if (url.pathname === "/conversations/upsert" && method === "POST") {
       try {
-        const body = await req.json();
+        const body = await req.json() as any;
         const { agent, session_id, title, metadata, messages: msgs } = body;
         if (!agent) return errorResponse("agent is required");
         if (!session_id) return errorResponse("session_id is required for upsert");
@@ -3001,7 +3003,7 @@ Return JSON:
 
     if (url.pathname === "/messages/search" && method === "POST") {
       try {
-        const body = await req.json();
+        const body = await req.json() as any;
         const { query, limit } = body;
         if (!query || typeof query !== "string") return errorResponse("query is required");
         const sanitized = sanitizeFTS(query);
@@ -3038,7 +3040,7 @@ Return JSON:
           ) as { id: number; created_at: string };
           db.prepare("UPDATE memories SET user_id = ?, tags = ? WHERE id = ?").run(1, tagsJson, result.id);
           const initFSRS2 = fsrsProcessReview(null, FSRSRating.Good, 0);
-          const decayScore = calculateDecayScore(imp, result.created_at, 0, null, !!body.is_static, 1, initFSRS2.stability);
+          const decayScore = fsrsCalculateDecayScore(imp, result.created_at, 0, null, !!(body as any).is_static, 1, initFSRS2.stability);
           db.prepare("UPDATE memories SET decay_score = ?, fsrs_stability = ?, fsrs_difficulty = ?, fsrs_storage_strength = ?, fsrs_retrieval_strength = ?, fsrs_learning_state = ?, fsrs_reps = ?, fsrs_lapses = ?, fsrs_last_review_at = ? WHERE id = ?").run(
             Math.round(decayScore * 1000) / 1000,
             initFSRS2.stability, initFSRS2.difficulty, initFSRS2.storage_strength,
@@ -3936,7 +3938,7 @@ If no meaningful inferences, return {"derived": []}`;
 
         if (memoryIds.length === 0) {
           const empty = { nodes: [], edges: [], links: [], node_count: 0, edge_count: 0 };
-          graphCache = { key: cacheKey, data: empty, ts: Date.now() };
+          setGraphCache({ key: cacheKey, data: empty, ts: Date.now() });
           return json(empty);
         }
 
@@ -4041,7 +4043,7 @@ If no meaningful inferences, return {"derived": []}`;
         }
 
         const result = { nodes: [...nodes.values()], edges, links: edges.slice(), node_count: nodes.size, edge_count: edges.length };
-        graphCache = { key: cacheKey, data: result, ts: Date.now() };
+        setGraphCache({ key: cacheKey, data: result, ts: Date.now() });
         log.info({ msg: "graph_served", nodes: nodes.size, edges: edges.length, cached: false, rid: requestId });
         return json(result);
       } catch (e: any) {
