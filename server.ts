@@ -160,8 +160,9 @@ function refreshEmbeddingCache(): void {
   log.info({ msg: "embedding_cache_refreshed", total: embeddingCache.length, latest: embeddingCacheLatest.length, ms: Date.now() - t0 });
 }
 
-function getCachedEmbeddings(latestOnly: boolean): CachedMem[] {
-  return latestOnly ? embeddingCacheLatest : embeddingCache;
+function getCachedEmbeddings(latestOnly: boolean, userId?: number): CachedMem[] {
+  const cache = latestOnly ? embeddingCacheLatest : embeddingCache;
+  return userId != null ? cache.filter(m => m.user_id === userId) : cache;
 }
 
 function addToEmbeddingCache(mem: CachedMem): void {
@@ -1336,26 +1337,26 @@ const getAllLinksForGraph = db.prepare(
 // ============================================================================
 
 const insertConversation = db.prepare(
-  `INSERT INTO conversations (agent, session_id, title, metadata) VALUES (?, ?, ?, ?) RETURNING id, started_at`
+  `INSERT INTO conversations (agent, session_id, title, metadata, user_id) VALUES (?, ?, ?, ?, ?) RETURNING id, started_at`
 );
 const updateConversation = db.prepare(
   `UPDATE conversations SET title = COALESCE(?, title), metadata = COALESCE(?, metadata), updated_at = datetime('now') WHERE id = ?`
 );
 const getConversation = db.prepare(`SELECT * FROM conversations WHERE id = ?`);
 const getConversationBySession = db.prepare(
-  `SELECT * FROM conversations WHERE agent = ? AND session_id = ? ORDER BY started_at DESC LIMIT 1`
+  `SELECT * FROM conversations WHERE agent = ? AND session_id = ? AND user_id = ? ORDER BY started_at DESC LIMIT 1`
 );
 const listConversations = db.prepare(
   `SELECT c.id, c.agent, c.session_id, c.title, c.metadata, c.started_at, c.updated_at,
      (SELECT COUNT(*) FROM messages WHERE conversation_id = c.id) as message_count
-   FROM conversations c ORDER BY c.updated_at DESC LIMIT ?`
+   FROM conversations c WHERE c.user_id = ? ORDER BY c.updated_at DESC LIMIT ?`
 );
 const listConversationsByAgent = db.prepare(
   `SELECT c.id, c.agent, c.session_id, c.title, c.metadata, c.started_at, c.updated_at,
      (SELECT COUNT(*) FROM messages WHERE conversation_id = c.id) as message_count
-   FROM conversations c WHERE c.agent = ? ORDER BY c.updated_at DESC LIMIT ?`
+   FROM conversations c WHERE c.agent = ? AND c.user_id = ? ORDER BY c.updated_at DESC LIMIT ?`
 );
-const deleteConversation = db.prepare(`DELETE FROM conversations WHERE id = ?`);
+const deleteConversation = db.prepare(`DELETE FROM conversations WHERE id = ? AND user_id = ?`);
 const insertMessage = db.prepare(
   `INSERT INTO messages (conversation_id, role, content, metadata) VALUES (?, ?, ?, ?) RETURNING id, created_at`
 );
@@ -1369,7 +1370,7 @@ const searchMessages = db.prepare(
    FROM messages_fts f
    JOIN messages m ON f.rowid = m.id
    JOIN conversations c ON m.conversation_id = c.id
-   WHERE messages_fts MATCH ?
+   WHERE messages_fts MATCH ? AND c.user_id = ?
    ORDER BY m.created_at DESC
    LIMIT ?`
 );
@@ -1379,7 +1380,7 @@ const touchConversation = db.prepare(
 
 // Transaction-safe inserts (no RETURNING — avoids libsql "statements in progress" bug)
 const insertConversationTx = db.prepare(
-  `INSERT INTO conversations (agent, session_id, title, metadata) VALUES (?, ?, ?, ?)`
+  `INSERT INTO conversations (agent, session_id, title, metadata, user_id) VALUES (?, ?, ?, ?, ?)`
 );
 const insertMessageTx = db.prepare(
   `INSERT INTO messages (conversation_id, role, content, metadata) VALUES (?, ?, ?, ?)`
@@ -1388,8 +1389,8 @@ const getLastRowId = db.prepare(`SELECT last_insert_rowid() as id`);
 
 const bulkInsertConvo = db.transaction(
   (agent: string, sessionId: string | null, title: string | null, metadata: string | null,
-   msgs: Array<{ role: string; content: string; metadata?: string | null }>) => {
-    insertConversationTx.run(agent, sessionId, title, metadata);
+   msgs: Array<{ role: string; content: string; metadata?: string | null }>, userId: number = 1) => {
+    insertConversationTx.run(agent, sessionId, title, metadata, userId);
     const { id } = getLastRowId.get() as { id: number };
     for (const msg of msgs) {
       insertMessageTx.run(id, msg.role, msg.content, msg.metadata || null);
@@ -2360,10 +2361,10 @@ async function hybridSearch(
 // AUTO-LINKING
 // ============================================================================
 
-async function autoLink(memoryId: number, embedding: Float32Array): Promise<number> {
+async function autoLink(memoryId: number, embedding: Float32Array, userId?: number): Promise<number> {
   // In-memory cosine scan — <1ms for 800 memories
   const similarities: Array<{ id: number; similarity: number }> = [];
-  const cached = getCachedEmbeddings(true);
+  const cached = getCachedEmbeddings(true, userId);
   for (const mem of cached) {
     if (mem.id === memoryId) continue;
     const sim = cosineSimilarity(embedding, mem.embedding);
@@ -3454,14 +3455,14 @@ If no meaningful facts, return {"facts": []}`;
           if (projectIds) for (const pid of projectIds) linkMemoryProject.run(result.id, pid);
 
           // Auto-link
-          if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray); }
+          if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray, auth.user_id); }
 
           // Queue async fact extraction (for relationship detection)
           if (LLM_API_KEY) {
             (async () => {
               try {
                 // S4 FIX: extractFacts takes (content, category, similarMemories), not (id, content, embedding)
-                const allMems = getCachedEmbeddings(true);
+                const allMems = getCachedEmbeddings(true, auth.user_id);
                 const sims: Array<{ id: number; content: string; category: string; score: number }> = [];
                 if (embArray) {
                   for (const mem of allMems) {
@@ -3711,13 +3712,13 @@ Return JSON:
             if (entity_ids) for (const eid of entity_ids) linkMemoryEntity.run(result.id, eid);
             if (project_ids) for (const pid of project_ids) linkMemoryProject.run(result.id, pid);
 
-            if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray); }
+            if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray, auth.user_id); }
 
             if (LLM_API_KEY) {
               (async () => {
                 try {
                   // S4 FIX: extractFacts takes (content, category, similarMemories)
-                  const allMems = getCachedEmbeddings(true);
+                  const allMems = getCachedEmbeddings(true, auth.user_id);
                   const sims: Array<{ id: number; content: string; category: string; score: number }> = [];
                   if (embArray) {
                     for (const mem of allMems) {
@@ -3760,6 +3761,7 @@ Return JSON:
     // ========================================================================
 
     if (url.pathname === "/contradictions" && method === "GET") {
+      if (!hasScope(auth, "read")) return errorResponse("Read scope required", 403);
       try {
         const threshold = Number(url.searchParams.get("threshold") || 0.6);
         const limitParam = Math.min(Number(url.searchParams.get("limit") || 30), 100);
@@ -3774,8 +3776,9 @@ Return JSON:
            JOIN memories ms ON ml.source_id = ms.id
            JOIN memories mt ON ml.target_id = mt.id
            WHERE ml.type = 'contradicts' AND ms.is_forgotten = 0 AND mt.is_forgotten = 0
+             AND ms.user_id = ? AND mt.user_id = ?
            ORDER BY ml.created_at DESC LIMIT ?`
-        ).all(limitParam) as any[];
+        ).all(auth.user_id, auth.user_id, limitParam) as any[];
 
         const contradictions: Array<{
           memory_a: { id: number; content: string; category: string; created_at: string };
@@ -3799,7 +3802,7 @@ Return JSON:
         // Scan for potential contradictions: high similarity but different content patterns
         // Same category memories with high embedding similarity often contain updates/contradictions
         if (contradictions.length < limitParam) {
-          const allMems = getCachedEmbeddings(true);
+          const allMems = getCachedEmbeddings(true, auth.user_id);
 
           const seenPairs = new Set(contradictions.map(c =>
             `${Math.min(c.memory_a.id, c.memory_b.id)}-${Math.max(c.memory_a.id, c.memory_b.id)}`
@@ -3920,6 +3923,9 @@ Only include pairs that are actual contradictions.`;
         const memA = getMemory.get(memory_a_id) as any;
         const memB = getMemory.get(memory_b_id) as any;
         if (!memA || !memB) return errorResponse("One or both memories not found", 404);
+        if ((memA.user_id !== auth.user_id || memB.user_id !== auth.user_id) && !auth.is_admin) {
+          return errorResponse("Forbidden", 403);
+        }
 
         if (resolution === "keep_a") {
           markArchived.run(memory_b_id);
@@ -4684,7 +4690,7 @@ Return JSON:
               const _t1 = Date.now();
               writeVec(capturedMemId, capturedEmbArray);
               addToEmbeddingCache({
-                id: capturedMemId, content: capturedContent, category: capturedCategory,
+                id: capturedMemId, user_id: auth.user_id, content: capturedContent, category: capturedCategory,
                 importance: imp, embedding: capturedEmbArray,
                 is_static: false, source_count: 1, is_latest: true, is_forgotten: false,
               });
@@ -4692,13 +4698,13 @@ Return JSON:
 
               // 2. Auto-link to similar memories (in-memory cosine, <1ms)
               const _t2 = Date.now();
-              const linked = await autoLink(capturedMemId, capturedEmbArray);
+              const linked = await autoLink(capturedMemId, capturedEmbArray, auth.user_id);
               log.debug({ msg: "store_autoLink", id: capturedMemId, ms: Date.now() - _t2, linked });
 
               // 3. Fact extraction via LLM (slowest — external API call)
               if (LLM_API_KEY) {
                 try {
-                  const allMems = getCachedEmbeddings(true);
+                  const allMems = getCachedEmbeddings(true, auth.user_id);
                   const similarities: Array<{ id: number; content: string; category: string; score: number }> = [];
                   for (const mem of allMems) {
                     if (mem.id === capturedMemId) continue;
@@ -4782,7 +4788,7 @@ Return JSON:
 
         // If still no memory found via search, try semantic search on the correction itself
         if (!correctedMemory && embArray) {
-          const allMems = getCachedEmbeddings(true);
+          const allMems = getCachedEmbeddings(true, auth.user_id);
           let bestSim = 0;
           let bestMem: any = null;
           for (const mem of allMems) {
@@ -4794,11 +4800,7 @@ Return JSON:
           }
           if (bestMem) {
             correctedMemory = getMemoryWithoutEmbedding.get(bestMem.id) as any;
-            if (correctedMemory?.user_id === auth.user_id) {
-              memoryId = bestMem.id;
-            } else {
-              correctedMemory = null;
-            }
+            memoryId = bestMem.id;
           }
         }
 
@@ -4859,11 +4861,11 @@ Return JSON:
             try {
               writeVec(capturedId, capturedEmb);
               addToEmbeddingCache({
-                id: capturedId, content: storedContent, category,
+                id: capturedId, user_id: auth.user_id, content: storedContent, category,
                 importance: imp, embedding: capturedEmb,
                 is_static: true, source_count: 1, is_latest: true, is_forgotten: false,
               });
-              autoLink(capturedId, capturedEmb).catch(() => {});
+              autoLink(capturedId, capturedEmb, auth.user_id).catch(() => {});
             } catch (e: any) {
               log.error({ msg: "correction_pipeline_failed", id: capturedId, error: e.message });
             }
@@ -5045,11 +5047,13 @@ Return JSON:
     // ========================================================================
 
     if (url.pathname.match(/^\/memory\/\d+\/update$/) && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const id = Number(url.pathname.split("/")[2]);
         if (isNaN(id)) return errorResponse("Invalid id");
         const existing = getMemoryWithoutEmbedding.get(id) as any;
         if (!existing) return errorResponse("Not found", 404);
+        if (existing.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Forbidden", 403);
         if (existing.is_forgotten) return errorResponse("Cannot update a forgotten memory", 400);
 
         const body = await req.json() as any;
@@ -5133,7 +5137,7 @@ Return JSON:
         const threshold = Number(url.searchParams.get("threshold") || 0.85);
         const limitParam = Math.min(Number(url.searchParams.get("limit") || 50), 200);
 
-        const allMems = getCachedEmbeddings(true);
+        const allMems = getCachedEmbeddings(true, auth.user_id);
 
         // Find clusters of similar memories
         const clusters: Array<{
@@ -5187,13 +5191,14 @@ Return JSON:
     // ========================================================================
 
     if (url.pathname === "/deduplicate" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const body = await req.json() as any;
         const threshold = Number(body.threshold || 0.85);
         const dryRun = body.dry_run !== false; // default to dry run for safety
         const maxMerge = Math.min(Number(body.max_merge || 50), 500);
 
-        const allMems = getCachedEmbeddings(true);
+        const allMems = getCachedEmbeddings(true, auth.user_id);
 
         const merged: Array<{ kept: number; archived: number[]; similarity: number }> = [];
         const seen = new Set<number>();
@@ -5437,6 +5442,7 @@ Return JSON:
     // ========================================================================
 
     if (url.pathname === "/backfill" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const body = await req.json().catch(() => ({}));
         const batch = Math.min(Number((body as any).batch) || 50, 200);
@@ -5455,6 +5461,9 @@ Return JSON:
     if (url.pathname.startsWith("/links/") && method === "GET") {
       const id = Number(url.pathname.split("/")[2]);
       if (isNaN(id)) return errorResponse("Invalid id");
+      const mem = getMemoryWithoutEmbedding.get(id) as any;
+      if (!mem) return errorResponse("Not found", 404);
+      if (mem.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Forbidden", 403);
       const links = getLinksFor.all(id, id);
       return json({ memory_id: id, links });
     }
@@ -5492,6 +5501,7 @@ Return JSON:
       if (isNaN(id)) return errorResponse("Invalid id");
       const mem = getMemoryWithoutEmbedding.get(id) as any;
       if (!mem) return errorResponse("Not found", 404);
+      if (mem.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Forbidden", 403);
       const rootId = mem.root_memory_id || mem.id;
       const chain = getVersionChain.all(rootId, rootId);
       return json({ root_id: rootId, chain });
@@ -5502,6 +5512,7 @@ Return JSON:
     // ========================================================================
 
     if (url.pathname === "/sweep" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       const count = sweepExpiredMemories();
       return json({ swept: count });
     }
@@ -5517,9 +5528,8 @@ Return JSON:
         if (!agent || typeof agent !== "string") return errorResponse("agent is required");
         const result = insertConversation.get(
           agent.trim(), session_id || null, title || null,
-          metadata ? JSON.stringify(metadata) : null
+          metadata ? JSON.stringify(metadata) : null, auth.user_id
         ) as { id: number; started_at: string };
-        db.prepare("UPDATE conversations SET user_id = ? WHERE id = ?").run(auth.user_id, result.id);
         return json({ id: result.id, started_at: result.started_at });
       } catch (e: any) {
         return safeError("create conversation", e);
@@ -5530,15 +5540,16 @@ Return JSON:
       const limit = Math.min(Number(url.searchParams.get("limit") || 50), 500);
       const agent = url.searchParams.get("agent");
       const results = agent
-        ? listConversationsByAgent.all(agent, limit)
-        : listConversations.all(limit);
+        ? listConversationsByAgent.all(agent, auth.user_id, limit)
+        : listConversations.all(auth.user_id, limit);
       return json({ results });
     }
 
     if (/^\/conversations\/\d+$/.test(url.pathname) && method === "GET") {
       const id = Number(url.pathname.split("/")[2]);
-      const conv = getConversation.get(id);
+      const conv = getConversation.get(id) as any;
       if (!conv) return errorResponse("Not found", 404);
+      if (conv.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Forbidden", 403);
       const limit = Math.min(Number(url.searchParams.get("limit") || 10000), 100000);
       const offset = Number(url.searchParams.get("offset") || 0);
       const msgs = getMessages.all(id, limit, offset);
@@ -5546,8 +5557,12 @@ Return JSON:
     }
 
     if (/^\/conversations\/\d+$/.test(url.pathname) && method === "PATCH") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const id = Number(url.pathname.split("/")[2]);
+        const conv = getConversation.get(id) as any;
+        if (!conv) return errorResponse("Not found", 404);
+        if (conv.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Forbidden", 403);
         const body = await req.json();
         updateConversation.run(
           body.title || null,
@@ -5561,8 +5576,12 @@ Return JSON:
     }
 
     if (/^\/conversations\/\d+$/.test(url.pathname) && method === "DELETE") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       const id = Number(url.pathname.split("/")[2]);
-      deleteConversation.run(id);
+      const conv = getConversation.get(id) as any;
+      if (!conv) return errorResponse("Not found", 404);
+      if (conv.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Forbidden", 403);
+      deleteConversation.run(id, auth.user_id);
       return json({ deleted: true, id });
     }
 
@@ -5571,10 +5590,12 @@ Return JSON:
     // ========================================================================
 
     if (/^\/conversations\/\d+\/messages$/.test(url.pathname) && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const convId = Number(url.pathname.split("/")[2]);
-        const conv = getConversation.get(convId);
+        const conv = getConversation.get(convId) as any;
         if (!conv) return errorResponse("Conversation not found", 404);
+        if (conv.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Forbidden", 403);
         const body = await req.json();
         const msgs = Array.isArray(body) ? body : [body];
         const results: Array<{ id: number; created_at: string }> = [];
@@ -5597,6 +5618,7 @@ Return JSON:
     // ========================================================================
 
     if (url.pathname === "/conversations/bulk" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const body = await req.json();
         const { agent, session_id, title, metadata, messages: msgs } = body;
@@ -5611,7 +5633,8 @@ Return JSON:
             role: m.role || "user",
             content: m.content || "",
             metadata: m.metadata ? JSON.stringify(m.metadata) : null,
-          }))
+          })),
+          auth.user_id
         );
         return json({ id: conv.id, started_at: conv.started_at, messages: msgs.length });
       } catch (e: any) {
@@ -5620,18 +5643,19 @@ Return JSON:
     }
 
     if (url.pathname === "/conversations/upsert" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const body = await req.json();
         const { agent, session_id, title, metadata, messages: msgs } = body;
         if (!agent) return errorResponse("agent is required");
         if (!session_id) return errorResponse("session_id is required for upsert");
 
-        let conv = getConversationBySession.get(agent, session_id) as any;
+        let conv = getConversationBySession.get(agent, session_id, auth.user_id) as any;
         let created = false;
         if (!conv) {
           const result = insertConversation.get(
             agent, session_id, title || null,
-            metadata ? JSON.stringify(metadata) : null
+            metadata ? JSON.stringify(metadata) : null, auth.user_id
           ) as { id: number; started_at: string };
           conv = { id: result.id };
           created = true;
@@ -5672,7 +5696,7 @@ Return JSON:
         if (!query || typeof query !== "string") return errorResponse("query is required");
         const sanitized = sanitizeFTS(query);
         if (!sanitized) return json({ results: [] });
-        const results = searchMessages.all(sanitized, Math.min(limit || 30, 200));
+        const results = searchMessages.all(sanitized, auth.user_id, Math.min(limit || 30, 200));
         return json({ results });
       } catch (e: any) {
         return safeError("Search", e);
@@ -5849,6 +5873,7 @@ Return JSON:
       const id = Number(url.pathname.split("/")[2]);
       const episode = getEpisode.get(id) as any;
       if (!episode) return errorResponse("Episode not found", 404);
+      if (episode.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Forbidden", 403);
       const memories = getEpisodeMemories.all(id) as any[];
       for (const m of memories) {
         try { m.tags = JSON.parse(m.tags); } catch { m.tags = []; }
@@ -5860,6 +5885,9 @@ Return JSON:
       if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const id = Number(url.pathname.split("/")[2]);
+        const episode = getEpisode.get(id) as any;
+        if (!episode) return errorResponse("Episode not found", 404);
+        if (episode.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Forbidden", 403);
         const body = await req.json() as any;
         updateEpisode.run(body.title || null, body.summary || null, body.ended_at || null, id);
         return json({ updated: true, id });
@@ -5915,8 +5943,9 @@ Return JSON:
         `SELECT c.id, c.summary_memory_id, c.source_memory_ids, c.cluster_label, c.created_at,
           m.content as summary_content
          FROM consolidations c JOIN memories m ON c.summary_memory_id = m.id
+         WHERE m.user_id = ?
          ORDER BY c.created_at DESC LIMIT 50`
-      ).all() as any[];
+      ).all(auth.user_id) as any[];
       for (const r of rows) {
         try { r.source_memory_ids = JSON.parse(r.source_memory_ids); } catch {}
       }
@@ -5940,9 +5969,9 @@ Return JSON:
            created_at, is_static, source_count, confidence,
            fsrs_stability, fsrs_difficulty, fsrs_storage_strength, fsrs_retrieval_strength,
            fsrs_learning_state, fsrs_reps, fsrs_lapses, fsrs_last_review_at
-         FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1
+         FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?
          ORDER BY COALESCE(decay_score, importance) ${order} LIMIT ?`
-      ).all(limit) as any[];
+      ).all(auth.user_id, limit) as any[];
       return json({ memories: rows });
     }
 
@@ -5977,10 +6006,11 @@ Return JSON:
     }
 
     if (url.pathname === "/fsrs/init" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       // Backfill FSRS state for all memories that don't have it
       const uninitialized = db.prepare(
-        `SELECT id, created_at FROM memories WHERE fsrs_stability IS NULL AND is_forgotten = 0 AND is_latest = 1`
-      ).all() as any[];
+        `SELECT id, created_at FROM memories WHERE fsrs_stability IS NULL AND is_forgotten = 0 AND is_latest = 1 AND user_id = ?`
+      ).all(auth.user_id) as any[];
       let count = 0;
       const batch = db.transaction(() => {
         for (const m of uninitialized) {
@@ -6578,8 +6608,10 @@ If no meaningful inferences, return {"derived": []}`;
             const ph = frontier.map(() => "?").join(",");
             const linked = db.prepare(
               `SELECT DISTINCT CASE WHEN source_id IN (${ph}) THEN target_id ELSE source_id END as linked_id
-               FROM memory_links WHERE source_id IN (${ph}) OR target_id IN (${ph})`
-            ).all(...frontier, ...frontier, ...frontier) as any[];
+               FROM memory_links ml
+               JOIN memories m ON m.id = (CASE WHEN ml.source_id IN (${ph}) THEN ml.target_id ELSE ml.source_id END)
+               WHERE (ml.source_id IN (${ph}) OR ml.target_id IN (${ph})) AND m.user_id = ?`
+            ).all(...frontier, ...frontier, ...frontier, ...frontier, auth.user_id) as any[];
             frontier = [];
             for (const r of linked) {
               if (!visited.has(r.linked_id) && visited.size < maxNodes) {
@@ -6769,6 +6801,7 @@ If no meaningful inferences, return {"derived": []}`;
       const id = Number(url.pathname.split("/")[2]);
       const entity = getEntity.get(id) as any;
       if (!entity) return errorResponse("Entity not found", 404);
+      if (entity.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Forbidden", 403);
       try { if (entity.metadata) entity.metadata = JSON.parse(entity.metadata); } catch {}
       entity.memory_ids = entity.memory_ids ? entity.memory_ids.split(",").map(Number) : [];
       entity.relationships = getEntityRelationships.all(id, id, id, id, id) as any[];
@@ -6811,6 +6844,10 @@ If no meaningful inferences, return {"derived": []}`;
       const parts = url.pathname.split("/");
       const entityId = Number(parts[2]);
       const memoryId = Number(parts[4]);
+      const entity = getEntity.get(entityId) as any;
+      const mem = getMemoryWithoutEmbedding.get(memoryId) as any;
+      if (!entity || !mem) return errorResponse("Not found", 404);
+      if ((entity.user_id !== auth.user_id || mem.user_id !== auth.user_id) && !auth.is_admin) return errorResponse("Forbidden", 403);
       linkMemoryEntity.run(memoryId, entityId);
       return json({ linked: true, entity_id: entityId, memory_id: memoryId });
     }
@@ -6821,6 +6858,9 @@ If no meaningful inferences, return {"derived": []}`;
       const parts = url.pathname.split("/");
       const entityId = Number(parts[2]);
       const memoryId = Number(parts[4]);
+      const entity = getEntity.get(entityId) as any;
+      if (!entity) return errorResponse("Not found", 404);
+      if (entity.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Forbidden", 403);
       unlinkMemoryEntity.run(memoryId, entityId);
       return json({ unlinked: true, entity_id: entityId, memory_id: memoryId });
     }
@@ -6891,6 +6931,7 @@ If no meaningful inferences, return {"derived": []}`;
       const id = Number(url.pathname.split("/")[2]);
       const project = getProject.get(id) as any;
       if (!project) return errorResponse("Project not found", 404);
+      if (project.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Forbidden", 403);
       try { if (project.metadata) project.metadata = JSON.parse(project.metadata); } catch {}
       project.memory_ids = project.memory_ids ? project.memory_ids.split(",").map(Number) : [];
       const limit = Math.min(Number(url.searchParams.get("limit") || 50), 200);
@@ -6932,6 +6973,10 @@ If no meaningful inferences, return {"derived": []}`;
       const parts = url.pathname.split("/");
       const projectId = Number(parts[2]);
       const memoryId = Number(parts[4]);
+      const project = getProject.get(projectId) as any;
+      const mem = getMemoryWithoutEmbedding.get(memoryId) as any;
+      if (!project || !mem) return errorResponse("Not found", 404);
+      if ((project.user_id !== auth.user_id || mem.user_id !== auth.user_id) && !auth.is_admin) return errorResponse("Forbidden", 403);
       linkMemoryProject.run(memoryId, projectId);
       return json({ linked: true, project_id: projectId, memory_id: memoryId });
     }
@@ -6942,6 +6987,9 @@ If no meaningful inferences, return {"derived": []}`;
       const parts = url.pathname.split("/");
       const projectId = Number(parts[2]);
       const memoryId = Number(parts[4]);
+      const project = getProject.get(projectId) as any;
+      if (!project) return errorResponse("Not found", 404);
+      if (project.user_id !== auth.user_id && !auth.is_admin) return errorResponse("Forbidden", 403);
       unlinkMemoryProject.run(memoryId, projectId);
       return json({ unlinked: true, project_id: projectId, memory_id: memoryId });
     }
@@ -7068,47 +7116,55 @@ If no meaningful inferences, return {"derived": []}`;
     }
 
         if (url.pathname === "/stats" && method === "GET") {
-      const memCount = db.prepare("SELECT COUNT(*) as count FROM memories").get() as { count: number };
-      const embCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE embedding IS NOT NULL").get() as { count: number };
-      const linkCount = db.prepare("SELECT COUNT(*) as count FROM memory_links").get() as { count: number };
-      const convCount = db.prepare("SELECT COUNT(*) as count FROM conversations").get() as { count: number };
-      const msgCount = db.prepare("SELECT COUNT(*) as count FROM messages").get() as { count: number };
-      const forgottenCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_forgotten = 1").get() as { count: number };
-      const staticCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_static = 1 AND is_forgotten = 0").get() as { count: number };
-      const dynamicCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_static = 0 AND is_forgotten = 0").get() as { count: number };
-      const versionedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE version > 1").get() as { count: number };
-      const archivedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_archived = 1 AND is_forgotten = 0").get() as { count: number };
-      const pendingCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE status = 'pending' AND is_forgotten = 0").get() as { count: number };
-      const rejectedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE status = 'rejected'").get() as { count: number };
-      const inferenceCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_inference = 1").get() as { count: number };
+      const uid = auth.user_id;
+      const memStats = db.prepare(
+        `SELECT COUNT(*) as total,
+          SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END) as embedded,
+          SUM(CASE WHEN is_forgotten = 1 THEN 1 ELSE 0 END) as forgotten,
+          SUM(CASE WHEN is_archived = 1 AND is_forgotten = 0 THEN 1 ELSE 0 END) as archived,
+          SUM(CASE WHEN status = 'pending' AND is_forgotten = 0 THEN 1 ELSE 0 END) as pending,
+          SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected,
+          SUM(CASE WHEN is_static = 1 AND is_forgotten = 0 THEN 1 ELSE 0 END) as static_count,
+          SUM(CASE WHEN is_static = 0 AND is_forgotten = 0 THEN 1 ELSE 0 END) as dynamic_count,
+          SUM(CASE WHEN version > 1 THEN 1 ELSE 0 END) as versioned,
+          SUM(CASE WHEN is_inference = 1 THEN 1 ELSE 0 END) as inferences
+         FROM memories WHERE user_id = ?`
+      ).get(uid) as any;
+      const linkCount = db.prepare(
+        `SELECT COUNT(*) as count FROM memory_links ml JOIN memories m ON ml.source_id = m.id WHERE m.user_id = ?`
+      ).get(uid) as { count: number };
+      const convCount = db.prepare("SELECT COUNT(*) as count FROM conversations WHERE user_id = ?").get(uid) as { count: number };
+      const msgCount = db.prepare(
+        `SELECT COUNT(*) as count FROM messages m JOIN conversations c ON m.conversation_id = c.id WHERE c.user_id = ?`
+      ).get(uid) as { count: number };
 
       const linkTypes = db.prepare(
-        `SELECT type, COUNT(*) as count FROM memory_links GROUP BY type ORDER BY count DESC`
-      ).all();
+        `SELECT ml.type, COUNT(*) as count FROM memory_links ml JOIN memories m ON ml.source_id = m.id WHERE m.user_id = ? GROUP BY ml.type ORDER BY count DESC`
+      ).all(uid);
 
       const categories = db.prepare(
-        `SELECT category, COUNT(*) as count FROM memories WHERE is_forgotten = 0 GROUP BY category ORDER BY count DESC`
-      ).all();
+        `SELECT category, COUNT(*) as count FROM memories WHERE is_forgotten = 0 AND user_id = ? GROUP BY category ORDER BY count DESC`
+      ).all(uid);
 
       const agents = db.prepare(
         `SELECT agent, COUNT(*) as conversations,
-          (SELECT COUNT(*) FROM messages m JOIN conversations c2 ON m.conversation_id = c2.id WHERE c2.agent = c.agent) as total_messages
-         FROM conversations c GROUP BY agent ORDER BY total_messages DESC`
-      ).all();
+          (SELECT COUNT(*) FROM messages m JOIN conversations c2 ON m.conversation_id = c2.id WHERE c2.agent = c.agent AND c2.user_id = ?) as total_messages
+         FROM conversations c WHERE c.user_id = ? GROUP BY agent ORDER BY total_messages DESC`
+      ).all(uid, uid);
 
       const dbSize = statSync(DB_PATH).size;
       return json({
         memories: {
-          total: memCount.count,
-          embedded: embCount.count,
-          forgotten: forgottenCount.count,
-          archived: archivedCount.count,
-          pending: pendingCount.count,
-          rejected: rejectedCount.count,
-          static: staticCount.count,
-          dynamic: dynamicCount.count,
-          versioned: versionedCount.count,
-          inferences: inferenceCount.count,
+          total: memStats.total || 0,
+          embedded: memStats.embedded || 0,
+          forgotten: memStats.forgotten || 0,
+          archived: memStats.archived || 0,
+          pending: memStats.pending || 0,
+          rejected: memStats.rejected || 0,
+          static: memStats.static_count || 0,
+          dynamic: memStats.dynamic_count || 0,
+          versioned: memStats.versioned || 0,
+          inferences: memStats.inferences || 0,
           categories,
         },
         links: {
@@ -7121,8 +7177,7 @@ If no meaningful inferences, return {"derived": []}`;
         embedding_model: EMBEDDING_MODEL,
         llm_model: LLM_MODEL,
         llm_configured: !!LLM_API_KEY,
-        db_size_mb: Math.round(dbSize / 1048576 * 100) / 100,
-        db_path: DB_PATH,
+        db_size_mb: auth.is_admin ? Math.round(dbSize / 1048576 * 100) / 100 : undefined,
       });
     }
 

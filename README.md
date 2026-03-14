@@ -68,9 +68,21 @@ curl -X POST http://localhost:4200/recall \
 
 ---
 
-## What's New in v5.6
+## What's New in v5.7
 
-### Node.js 22 Runtime (Primary)
+### Multi-Tenant Data Isolation (v5.7)
+
+Complete security audit and fix of all cross-tenant data boundaries:
+
+- **User-scoped embedding cache** — `getCachedEmbeddings` now filters by `user_id`, preventing cross-user data leakage in search, auto-linking, contradiction detection, deduplication, and fact extraction.
+- **Ownership checks on all endpoints** — every GET/POST/PATCH/DELETE that operates on a specific resource (memory, conversation, entity, project, episode, link, version chain) now verifies the authenticated user owns it.
+- **Conversation isolation** — all conversation queries filter by `user_id`. Message search is scoped to the authenticated user's conversations.
+- **Write scope enforcement** — mutating endpoints (`/memory/:id/update`, `/deduplicate`, `/sweep`, `/backfill`, `/fsrs/init`, conversation CRUD) now require write scope.
+- **Stats scoped to user** — `/stats` consolidated from 13 unfiltered queries to 4 user-scoped queries. `db_path` no longer leaked to non-admins.
+- **Graph BFS user-filtered** — graph traversal now joins against `memories` to prevent cross-user node discovery.
+- **Confidence propagation** — `propagateConfidence` fully implemented in modular split (was a no-op stub).
+
+### Node.js 22 Runtime (Primary) (v5.6)
 
 - **Node.js 22+ as primary runtime** — `node --experimental-strip-types` for native TypeScript support. Bun support maintained for compatibility.
 - **Optimized MCP server** — rewritten for Node.js, reduced from 529 to 168 lines. Faster startup, lower memory footprint.
@@ -549,7 +561,7 @@ Use `X-Space: space-name` (or `X-Engram-Space`) header to scope operations to a 
 └─────────────────────────────────────────────┘
 ```
 
-- **Runtime:** Bun (primary) or Node.js 22+ (with `--experimental-strip-types`)
+- **Runtime:** Node.js 22+ (primary, with `--experimental-strip-types`) or Bun
 - **Database:** libsql (SQLite fork with vector column support)
 - **Embeddings:** Xenova/all-MiniLM-L6-v2 (384-dim, runs locally via ONNX)
 - **Search:** In-memory cosine similarity + FTS5 full-text hybrid
@@ -665,7 +677,7 @@ server {
 # Start the server, then:
 cd engram
 node --test tests/api.test.mjs
-# 38 tests, 12 suites, 0 failures
+# 33 tests, 14 suites, 0 failures
 ```
 
 ---

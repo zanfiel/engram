@@ -75,15 +75,22 @@ landing.html       — Marketing landing page
 
 ## Testing
 
-Uses [vitest](https://vitest.dev/). Run with:
+API tests use Node.js built-in test runner. Start the server, then:
 
 ```bash
-npx vitest run
+# Run against localhost:4200 (default)
+node --test tests/api.test.mjs
+
+# Or specify a different URL
+ENGRAM_URL=http://localhost:4201 node --test tests/api.test.mjs
 ```
+
+33 tests across 14 suites covering core API, multi-tenant isolation, CRUD, FSRS, and more.
 
 We always need more coverage:
 - [ ] Benchmark suite for search latency vs competitors
 - [ ] Stress tests for large memory sets (10k+ memories)
+- [ ] Multi-user isolation tests (two API keys, verify data separation)
 
 ## Pull Request Process
 

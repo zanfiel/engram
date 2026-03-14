@@ -5,6 +5,39 @@ All notable changes to Engram will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.7.0] - 2026-03-14
+
+### Security
+- **Multi-tenant data isolation**: Complete audit and fix of 30+ cross-tenant data boundaries
+  - `getCachedEmbeddings` now accepts optional `userId` filter — all callers in search, auto-link, contradiction detection, deduplication, and fact extraction pass the authenticated user's ID
+  - `autoLink` scoped to same-user memories — prevents cross-user link creation
+  - `addToEmbeddingCache` now includes `user_id` — fixes cache filtering for newly added memories
+  - Conversation prepared statements (`listConversations`, `listConversationsByAgent`, `searchMessages`, `getConversationBySession`, `deleteConversation`) all filter by `user_id`
+  - Conversation CRUD endpoints (`GET/PATCH/DELETE /conversations/:id`, `POST /conversations/:id/messages`, `POST /conversations/bulk`, `POST /conversations/upsert`, `POST /messages/search`) have ownership checks and write scope guards
+  - `/contradictions` and `/contradictions/resolve` scoped to authenticated user with ownership verification
+  - `/duplicates` and `/deduplicate` scoped to authenticated user
+  - `/memory/:id/update` now requires write scope and verifies memory ownership
+  - Entity and project `GET /:id` endpoints verify ownership
+  - Entity/project link and unlink endpoints verify ownership of both the entity/project and the memory
+  - `/links/:id` and `/versions/:id` verify memory ownership before returning data
+  - `/episodes/:id` GET and PATCH verify episode ownership
+  - `/decay/scores` filtered by `user_id`
+  - `/consolidations` filtered by `user_id`
+  - `/fsrs/init` scoped to user's memories with write scope guard
+  - `/graph` BFS traversal joins against `memories` table for user_id filtering
+  - `/stats` consolidated from 13 unfiltered `COUNT(*)` queries to 4 user-scoped queries; `db_path` removed from non-admin response
+- Write scope guards added to `/sweep`, `/backfill`, `/deduplicate`
+
+### Fixed
+- `propagateConfidence` in `src/llm/index.ts` fully implemented (was a no-op stub in the modular split)
+  - "updates" relation: sets superseded memory confidence to 0.3
+  - "contradicts" relation: reduces both memories' confidence, fires `contradiction.detected` webhook
+  - "extends" relation: boosts corroborated memory confidence by 5%
+- `insertConversation` and `insertConversationTx` now include `user_id` column — conversations are attributed to the authenticated user at insert time instead of via follow-up UPDATE
+
+### Added
+- API test suite: `tests/api.test.mjs` — 33 tests across 14 suites covering health, store, search, recall, memory CRUD, conversations, stats, contradictions, duplicates, graph, episodes, entities, projects, FSRS, and cleanup
+
 ## [5.5.0] - 2026-03-13
 
 ### Changed
