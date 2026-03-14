@@ -203,7 +203,7 @@ Engram is now running at `http://localhost:4200`.
 git clone https://github.com/zanfiel/engram.git
 cd engram
 npm install
-ENGRAM_GUI_PASSWORD=your-password node --experimental-strip-types server.ts
+ENGRAM_GUI_PASSWORD=your-password node --experimental-strip-types server-split.ts
 ```
 
 ### From source (Bun — legacy)
@@ -212,7 +212,7 @@ ENGRAM_GUI_PASSWORD=your-password node --experimental-strip-types server.ts
 git clone https://github.com/zanfiel/engram.git
 cd engram
 bun install
-ENGRAM_GUI_PASSWORD=your-password bun run server.ts
+ENGRAM_GUI_PASSWORD=your-password bun run server-split.ts
 ```
 
 ### Create an API key
@@ -464,6 +464,7 @@ Use `X-Space: space-name` (or `X-Engram-Space`) header to scope operations to a 
 |--------|------|-------------|
 | `POST` | `/add` | Extract memories from conversations |
 | `POST` | `/ingest` | Extract facts from URLs or text |
+| `POST` | `/guard` | Pre-action guardrail check (allow/warn/block) |
 | `POST` | `/derive` | Generate inferred memories |
 | `POST` | `/reflect` | Generate period reflection |
 | `GET` | `/reflections` | List past reflections |
@@ -556,7 +557,7 @@ Use `X-Space: space-name` (or `X-Engram-Space`) header to scope operations to a 
 
 ### Memory Lifecycle
 
-1. **Store** — Memory content is embedded using MiniLM (384-dim vectors, runs locally via ONNX) and stored in libsql with FTS5 full-text indexing.
+1. **Store** — Memory content is embedded using BGE-large-en-v1.5 (1024-dim vectors, runs locally via ONNX) and stored in libsql with FTS5 full-text indexing.
 
 2. **Auto-link** — New memories are compared against existing ones via in-memory cosine similarity. Memories above 0.7 similarity are linked with typed relationships (similarity, updates, extends, contradicts, caused_by, prerequisite_for).
 
@@ -589,11 +590,11 @@ Use `X-Space: space-name` (or `X-Engram-Space`) header to scope operations to a 
 │       │              │              │        │
 │  ┌────┴──────────────┴──────────────┴────┐  │
 │  │    libsql (SQLite + vector columns)   │  │
-│  │       FLOAT32(384) + FTS5             │  │
+│  │      FLOAT32(1024) + FTS5             │  │
 │  └───────────────────────────────────────┘  │
 │                                              │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
-│  │  MiniLM  │  │  LLM     │  │  Graph   │  │
+│  │ BGE-large│  │  LLM     │  │  Graph   │  │
 │  │  Embedder │  │  (opt.)  │  │  Engine  │  │
 │  └──────────┘  └──────────┘  └──────────┘  │
 └─────────────────────────────────────────────┘
@@ -601,7 +602,7 @@ Use `X-Space: space-name` (or `X-Engram-Space`) header to scope operations to a 
 
 - **Runtime:** Node.js 22+ (primary, with `--experimental-strip-types`) or Bun
 - **Database:** libsql (SQLite fork with vector column support)
-- **Embeddings:** Xenova/all-MiniLM-L6-v2 (384-dim, runs locally via ONNX)
+- **Embeddings:** BGE-large-en-v1.5 (1024-dim, runs locally via raw ONNX inference)
 - **Search:** In-memory cosine similarity + FTS5 full-text hybrid
 - **LLM:** Optional, for fact extraction / reranking / consolidation
 - **Decay:** FSRS-6 (21-parameter power-law forgetting curve)
@@ -645,7 +646,7 @@ Engram includes a WebGL graph visualization at `/gui`. Login with your `ENGRAM_G
 
 ### Storage
 
-All data lives in a single libsql database (`data/memory.db`). Vector embeddings are stored as `FLOAT32(384)` columns.
+All data lives in a single libsql database (`data/memory.db`). Vector embeddings are stored as `FLOAT32(1024)` columns.
 
 **Backup:** `GET /backup` returns a downloadable copy (admin required). WAL checkpoints every 5 minutes and on graceful shutdown. Manual checkpoint via `POST /checkpoint`.
 
@@ -714,8 +715,7 @@ server {
 ```bash
 # Start the server, then:
 cd engram
-node --test tests/api.test.mjs
-# 33 tests, 14 suites, 0 failures
+npx vitest run
 ```
 
 ---

@@ -28,7 +28,7 @@ npm run dev
 Engram is a single-process TypeScript server with zero external service dependencies.
 
 ```
-server.ts          — Monolith server (~7400 lines, legacy — use server-split.ts)
+archive/server.ts.legacy-monolith — Archived monolith server (~7400 lines, do not use)
 server-split.ts    — Modular entrypoint (imports from src/)
 mcp-server.ts      — MCP server (JSON-RPC 2.0 stdio transport)
 src/
@@ -56,7 +56,7 @@ landing.html       — Marketing landing page
 
 ### Key Design Decisions
 
-1. **Modular architecture**: The server has been split from a monolith (`server.ts`, ~7400 lines) into `src/` modules. The modular entrypoint is `server-split.ts`. Both work, but new development targets `src/`.
+1. **Modular architecture**: The server was split from a monolith (`archive/server.ts.legacy-monolith`, ~7400 lines) into `src/` modules. The only supported entrypoint is `server-split.ts`.
 
 2. **libsql, not better-sqlite3**: We use libsql for native FLOAT32 vector columns and HNSW index support. This gives us vector search without an external service.
 
