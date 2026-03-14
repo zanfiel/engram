@@ -72,15 +72,6 @@ section{padding:6rem 2rem}
 .code-body .num{color:var(--pink)}
 .code-body .cm{color:var(--muted)}
 
-/* Compare */
-.compare-table{width:100%;border-collapse:collapse;font-size:13px}
-.compare-table th{text-align:left;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.08);color:var(--text);font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:1px}
-.compare-table td{padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.03);color:var(--dim)}
-.compare-table tr:hover td{background:rgba(255,255,255,0.02)}
-.compare-table .yes{color:var(--gold)}
-.compare-table .no{color:var(--muted)}
-.compare-table td:first-child{color:var(--text);font-weight:500}
-
 /* CTA */
 .cta{text-align:center;padding:8rem 2rem;background:radial-gradient(ellipse 60% 50% at 50% 100%,rgba(196,162,101,0.03),transparent)}
 .cta h2{font-size:clamp(2rem,5vw,3rem);font-weight:800;letter-spacing:-0.02em;margin-bottom:1rem}
@@ -107,7 +98,7 @@ nav .links a:hover{color:var(--gold);text-decoration:none}
   <div class="links">
     <a href="#features">Features</a>
     <a href="#sdks">SDKs</a>
-    <a href="#compare">Compare</a>
+    <a href="#tech">Tech</a>
     <a href="https://github.com/zanfiel/engram">GitHub</a>
   </div>
 </nav>
@@ -289,35 +280,29 @@ nav .links a:hover{color:var(--gold);text-decoration:none}
   </div>
 </section>
 
-<!-- Compare -->
-<section id="compare" style="background:var(--bg2)">
+<!-- Technical Details -->
+<section id="tech" style="background:var(--bg2)">
   <div class="container">
-    <div class="section-label">Comparison</div>
-    <h2 class="section-title">How Engram stacks up</h2>
-    <p class="section-desc">Built for developers who want to own their stack.</p>
+    <div class="section-label">Under the Hood</div>
+    <h2 class="section-title">Built different</h2>
+    <p class="section-desc">No wrappers. No cloud APIs. Raw inference on your hardware.</p>
 
-    <div style="overflow-x:auto">
-    <table class="compare-table">
-      <thead>
-        <tr><th>Feature</th><th>Engram</th><th>Mem0</th><th>Supermemory</th></tr>
-      </thead>
-      <tbody>
-        <tr><td>Semantic search</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
-        <tr><td>Local embeddings</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Graph visualization</td><td class="yes">✓</td><td class="no">✗</td><td class="yes">✓</td></tr>
-        <tr><td>Memory versioning</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Auto-deduplication</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Auto-forget</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Fact extraction</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td></tr>
-        <tr><td>Multi-tenant</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td></tr>
-        <tr><td>No external API needed</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>SQLite (zero deps)</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Episodic memory</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Abstention (knows what it doesn't know)</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>FSRS-6 spaced repetition</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
-        <tr><td>Self-hosted</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
-      </tbody>
-    </table>
+    <div class="features" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr))">
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(196,162,101,0.08);color:var(--gold)">🧠</div>
+        <h3>BGE-large-en-v1.5 (1024-dim)</h3>
+        <p>Raw ONNX inference via onnxruntime-node with a hand-written BERT WordPiece tokenizer. No @huggingface/transformers, no Python, no wrappers. 512-token context, quantized INT8, sub-200ms per embedding.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(94,174,189,0.1);color:var(--cyan)">📖</div>
+        <h3>Episodic + Semantic Memory</h3>
+        <p>Two memory systems working together. Atomic facts for precise lookup. Conversation episodes for narrative context — what happened, why decisions were made, what the AI produced. Facts link back to their source episode.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(90,158,126,0.1);color:var(--green)">🧪</div>
+        <h3>FSRS-6 Spaced Repetition</h3>
+        <p>Power-law forgetting curve with 21 trained weights from millions of Anki reviews. Dual-strength memory model (storage + retrieval). Every memory access is an implicit review. Memories that matter persist; noise fades naturally.</p>
+      </div>
     </div>
   </div>
 </section>
@@ -325,7 +310,7 @@ nav .links a:hover{color:var(--gold);text-decoration:none}
 <!-- CTA -->
 <section class="cta">
   <h2>Get started in 30 seconds</h2>
-  <p>One command. Zero config. Full memory.</p>
+  <p>One command. Full memory. Your hardware.</p>
   <div class="cta-code"><span>$</span> docker compose up -d</div>
   <br>
   <div class="hero-actions" style="justify-content:center">
