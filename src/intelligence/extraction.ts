@@ -64,6 +64,12 @@ export function fastExtractFacts(content: string, memoryId: number, userId: numb
       try { insertSF.run(memoryId, "user", "earned", m[2] ? m[2].trim().substring(0, 200) : null, parseFloat(m[1].replace(",", "")), "dollars", dateRef, dateApprox, userId); factCount++; } catch {}
     }
 
+    // Pattern 8: Assistant/AI actions
+    const assistantPattern = /\b(?:the\s+)?(?:assistant|AI|Claude|Engram|I)\s+(recommended|suggested|implemented|created|fixed|diagnosed|configured|deployed|built|wrote|designed|refactored|migrated|upgraded|replaced|analyzed|discovered|resolved|identified)\s+(.+?)(?:\.|,|$)/gi;
+    for (const m of content.matchAll(assistantPattern)) {
+      try { insertSF.run(memoryId, "assistant", m[1].toLowerCase(), m[2].trim().substring(0, 200), null, null, dateRef, dateApprox, userId); factCount++; } catch {}
+    }
+
     // --- User Preferences ---
     const upsertPref = db.prepare(
       `INSERT INTO user_preferences (domain, preference, evidence_memory_id, user_id)

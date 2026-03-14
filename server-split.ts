@@ -10,10 +10,10 @@ import { PORT, HOST, OPEN_ACCESS, CORS_ORIGIN, ALLOWED_IPS, CONSOLIDATION_INTERV
 import { log } from "./src/config/logger.ts";
 
 // Database (importing triggers schema creation + migrations)
-import { db } from "./src/db/index.ts";
+import { db, updateMemoryEmbedding, writeVec } from "./src/db/index.ts";
 
 // Embeddings
-import { initEmbedder, embed, refreshEmbeddingCache, embeddingCacheLatest, embeddingToVectorJSON } from "./src/embeddings/index.ts";
+import { initEmbedder, embed, refreshEmbeddingCache, embeddingCacheLatest, embeddingToBuffer, embeddingToVectorJSON } from "./src/embeddings/index.ts";
 
 // GUI (importing triggers HMAC secret init)
 import { reloadGuiHtml } from "./src/gui/index.ts";
@@ -172,28 +172,36 @@ if (isLLMAvailable()) {
 sweepExpiredMemories();
 updateDecayScores();
 
-// Migrate BLOB embeddings → FLOAT32 vector column (one-time, idempotent)
+// One-time embedding dimension migration: detect 384-dim → re-embed to 1024-dim
 {
-  const updateMemoryVec = db.prepare("UPDATE memories SET embedding_vec = vector32(?) WHERE id = ?");
-  const unmigrated = db.prepare(
-    "SELECT id, embedding FROM memories WHERE embedding IS NOT NULL AND embedding_vec IS NULL"
-  ).all() as Array<{ id: number; embedding: ArrayBuffer | Buffer }>;
-  if (unmigrated.length > 0) {
-    let migrated = 0;
-    const batch = db.transaction(() => {
-      for (const m of unmigrated) {
+  const sample = db.prepare(
+    "SELECT id, embedding FROM memories WHERE embedding IS NOT NULL LIMIT 1"
+  ).get() as { id: number; embedding: ArrayBuffer | Buffer } | undefined;
+  if (sample) {
+    const buf = sample.embedding instanceof ArrayBuffer ? sample.embedding
+      : sample.embedding.buffer.slice(sample.embedding.byteOffset, sample.embedding.byteOffset + sample.embedding.byteLength);
+    const existingDim = buf.byteLength / 4;
+    if (existingDim !== 1024) {
+      log.info({ msg: "embedding_dimension_migration_start", from: existingDim, to: 1024 });
+      const allMems = db.prepare(
+        "SELECT id, content FROM memories WHERE embedding IS NOT NULL"
+      ).all() as Array<{ id: number; content: string }>;
+      let migrated = 0, failed = 0;
+      for (const mem of allMems) {
         try {
-          const ab = m.embedding instanceof ArrayBuffer ? m.embedding
-            : m.embedding.buffer.slice(m.embedding.byteOffset, m.embedding.byteOffset + m.embedding.byteLength);
-          const emb = new Float32Array(ab);
-          const vecJson = embeddingToVectorJSON(emb);
-          updateMemoryVec.run(vecJson, m.id);
+          const emb = await embed(mem.content);
+          updateMemoryEmbedding.run(embeddingToBuffer(emb), mem.id);
+          writeVec(mem.id, emb);
           migrated++;
-        } catch {}
+          if (migrated % 50 === 0) log.info({ msg: "migration_progress", migrated, total: allMems.length });
+        } catch (e: any) {
+          log.error({ msg: "migration_embed_failed", id: mem.id, error: e.message });
+          failed++;
+        }
       }
-    });
-    batch();
-    log.info({ msg: "vector_migration", migrated, total: unmigrated.length });
+      refreshEmbeddingCache();
+      log.info({ msg: "embedding_dimension_migration_complete", migrated, failed, total: allMems.length });
+    }
   }
 }
 
