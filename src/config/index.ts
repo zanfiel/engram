@@ -25,7 +25,7 @@ export const MODEL_URLS: Record<string, string> = {
   "model.onnx": "https://huggingface.co/Xenova/bge-large-en-v1.5/resolve/main/onnx/model.onnx",
 };
 export const AUTO_LINK_THRESHOLD = 0.7;
-export const SEARCH_MIN_SCORE = Number(process.env.ENGRAM_SEARCH_MIN_SCORE || 0.25);
+export const SEARCH_MIN_SCORE = Number(process.env.ENGRAM_SEARCH_MIN_SCORE || 0.58);
 export const AUTO_LINK_MAX = 3;
 export const DEFAULT_IMPORTANCE = 5;
 

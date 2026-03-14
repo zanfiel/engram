@@ -163,19 +163,3 @@ function inferDomain(text: string): string {
   return "general";
 }
 
-
-function embeddingToBuffer(emb: Float32Array): Buffer {
-  return Buffer.from(emb.buffer, emb.byteOffset, emb.byteLength);
-}
-
-function bufferToEmbedding(buf: Buffer | Uint8Array | ArrayBuffer): Float32Array {
-  if (buf instanceof ArrayBuffer) return new Float32Array(buf);
-  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-  return new Float32Array(ab);
-}
-
-/** Convert Float32Array to JSON string for libsql vector() function */
-function embeddingToVectorJSON(emb: Float32Array): string {
-  return "[" + Array.from(emb).join(",") + "]";
-}
-

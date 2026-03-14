@@ -1505,19 +1505,18 @@ Only include pairs that are actual contradictions.`;
         }
 
         // Phase 2.5: Episode context — for semantic results with episode_id, include episode summary
+        const seenEpisodeIds = new Set<number>();
         if (usedTokens < tokenBudget * 0.75) {
-          const epSeen = new Set<number>();
           for (const b of blocks.filter(b => b.source === "semantic").slice(0, 5)) {
             const mem = getMemoryWithoutEmbedding.get(b.id) as any;
             const epId = mem?.episode_id;
-            if (epId && !epSeen.has(epId)) {
-              epSeen.add(epId);
+            if (epId && !seenEpisodeIds.has(epId)) {
+              seenEpisodeIds.add(epId);
               const ep = getEpisode.get(epId) as any;
               if (ep?.summary) {
                 const tokens = estimateTokens(ep.summary);
                 if (usedTokens + tokens <= tokenBudget * 0.8) {
-                  blocks.push({ id: ep.id + 1000000, content: ep.summary, category: "episode", score: 75, source: "episode", tokens, created_at: ep.started_at });
-                  seenIds.add(ep.id + 1000000);
+                  blocks.push({ id: -epId, content: ep.summary, category: "episode", score: 75, source: "episode", tokens, created_at: ep.started_at });
                   usedTokens += tokens;
                 }
               }
@@ -1560,14 +1559,32 @@ Only include pairs that are actual contradictions.`;
           }
         }
 
+        // Phase 5: Implicit connection inference (LLM post-processing)
+        const semanticBlocks = blocks.filter(b => b.source === "semantic");
+        if (isLLMAvailable() && semanticBlocks.length >= 2 && usedTokens < tokenBudget * 0.95) {
+          try {
+            const topFacts = semanticBlocks.slice(0, 6).map(b => `[${b.id}] ${b.content}`).join("\n");
+            const inferenceResult = await callLLM(
+              `You find implicit connections between memories that aren't directly stated. Given these memories, identify 0-3 implicit connections. For each, write a single sentence stating the connection. If none exist, return "none". Be concise. Only state connections that are genuinely useful and non-obvious.`,
+              `Query: ${query}\n\nMemories:\n${topFacts}`
+            );
+            if (inferenceResult && !inferenceResult.toLowerCase().startsWith("none")) {
+              const tokens = estimateTokens(inferenceResult);
+              if (usedTokens + tokens <= tokenBudget) {
+                blocks.push({ id: 0, content: inferenceResult.trim(), category: "inference", score: 60, source: "inference", tokens });
+                usedTokens += tokens;
+              }
+            }
+          } catch {}
+        }
+
         // Defer access tracking to after response
-        const blockIds = blocks.map(b => b.id);
+        const blockIds = blocks.filter(b => b.id > 0).map(b => b.id);
         setTimeout(() => { try { const batch = db.transaction(() => { for (const id of blockIds) trackAccessWithFSRS(id); }); batch(); } catch {} }, 0);
 
         // Build formatted context string with intelligence layers
         const contextParts: string[] = [];
         const staticBlocks = blocks.filter(b => b.source === "static");
-        const semanticBlocks = blocks.filter(b => b.source === "semantic");
         const linkedBlocks = blocks.filter(b => b.source === "linked");
         const recentBlocks = blocks.filter(b => b.source === "recent");
 
@@ -1633,6 +1650,10 @@ Only include pairs that are actual contradictions.`;
         if (recentBlocks.length > 0) {
           contextParts.push("## Recent Activity\n" + recentBlocks.map(b => `- [${b.created_at || ""}] ${b.content}`).join("\n"));
         }
+        const inferenceBlocks = blocks.filter(b => b.source === "inference");
+        if (inferenceBlocks.length > 0) {
+          contextParts.push("## Implicit Connections\n" + inferenceBlocks.map(b => b.content).join("\n"));
+        }
 
         return json({
           context: contextParts.join("\n\n"),
@@ -1647,6 +1668,7 @@ Only include pairs that are actual contradictions.`;
             episode: episodeBlocks.length,
             linked: linkedBlocks.length,
             recent: recentBlocks.length,
+            inference: inferenceBlocks.length,
           },
         });
       } catch (e: any) {
@@ -2264,7 +2286,7 @@ Return JSON:
       try {
         const _searchT0 = performance.now();
         const body = await req.json() as any;
-        const { query, limit, include_links, expand_relationships, latest_only, tag, episode_id: filterEpisode } = body;
+        const { query, limit, include_links, expand_relationships, latest_only, tag, episode_id: filterEpisode, temporal_sort } = body;
         if (!query || typeof query !== "string") return errorResponse("query is required");
         const _searchT1 = performance.now();
         let results = await hybridSearch(
@@ -2304,6 +2326,16 @@ Return JSON:
           results = results.slice(0, Math.min(limit || 10, 50));
         }
 
+        // Temporal sort: order by created_at instead of score (for "what happened first/before/after" queries)
+        if (temporal_sort) {
+          const dir = temporal_sort === "asc" ? 1 : -1;
+          results.sort((a, b) => {
+            const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+            const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+            return (ta - tb) * dir;
+          });
+        }
+
         // Defer access tracking to after response (non-blocking, batched in transaction)
         const resultIds = results.map(r => r.id);
         setTimeout(() => {
@@ -2336,8 +2368,9 @@ Return JSON:
         log.info({ msg: "search_timing", total_ms: (_searchT3 - _searchT0).toFixed(1), hybrid_ms: (_searchT2 - _searchT1).toFixed(1), post_ms: (_searchT3 - _searchT2).toFixed(1), results: results.length });
 
         const topScore = results.length > 0 ? results[0].score : 0;
+        const topSemanticScore = results.length > 0 ? (results[0].semantic_score || topScore) : 0;
         const minScore = body.min_score ?? SEARCH_MIN_SCORE;
-        const abstained = results.length === 0 || topScore < minScore;
+        const abstained = results.length === 0 || topSemanticScore < minScore;
 
         return json({
           results: abstained ? [] : results,
@@ -3362,6 +3395,60 @@ Return JSON:
         return json({ assigned, episode_id: episodeId });
       } catch (e: any) {
         return safeError("assign memories", e);
+      }
+    }
+
+    // Finalize episode: generate summary from memories, embed, set ended_at
+    if (/^\/episodes\/\d+\/finalize$/.test(url.pathname) && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const episodeId = Number(url.pathname.split("/")[2]);
+        const ep = getEpisode.get(episodeId) as any;
+        if (!ep) return errorResponse("Episode not found", 404);
+
+        const memories = getEpisodeMemories.all(episodeId) as Array<{ content: string; category: string; created_at: string }>;
+        if (memories.length === 0) return errorResponse("Episode has no memories", 400);
+
+        let summary = ep.summary;
+        if (!summary) {
+          if (isLLMAvailable()) {
+            try {
+              const memText = memories.map(m => `[${m.category}] ${m.content}`).join("\n").substring(0, 8000);
+              summary = await callLLM(
+                `You are a memory system. Summarize these memories from a single session into a concise episodic narrative (1-3 paragraphs). Capture: what the user asked for, what the assistant did, key decisions made, problems solved, and outcomes. Include temporal flow. Write in past tense.`,
+                memText
+              );
+            } catch (e: any) {
+              log.warn({ msg: "episode_llm_summary_failed", error: e.message });
+            }
+          }
+          if (!summary) {
+            summary = memories.map(m => m.content).join(" ").substring(0, 1000);
+          }
+        }
+
+        const endedAt = new Date().toISOString().replace("T", " ").replace("Z", "");
+        updateEpisode.run(ep.title || `Session ${ep.session_id || ep.id}`, summary, endedAt, episodeId);
+
+        // Calculate duration
+        if (ep.started_at) {
+          const dur = Math.round((Date.now() - new Date(ep.started_at).getTime()) / 1000);
+          if (dur > 0) db.prepare("UPDATE episodes SET duration_seconds = ? WHERE id = ?").run(dur, episodeId);
+        }
+
+        // Embed the summary
+        try {
+          const embArray = await embed(summary);
+          updateEpisodeEmbedding.run(embeddingToBuffer(embArray), episodeId);
+          try { updateEpisodeVec.run(embeddingToVectorJSON(embArray), episodeId); } catch {}
+          refreshEmbeddingCache();
+        } catch (e: any) {
+          log.warn({ msg: "episode_finalize_embed_failed", error: e.message });
+        }
+
+        return json({ finalized: true, id: episodeId, summary, memory_count: memories.length });
+      } catch (e: any) {
+        return safeError("finalize episode", e);
       }
     }
 

@@ -53,7 +53,7 @@ export async function hybridSearch(
         results.set(mem.id, {
           id: mem.id, content: mem.content, category: mem.category,
           importance: mem.importance, created_at: "",
-          score: sim * 0.55, is_static: !!mem.is_static,
+          score: sim * 0.55, semantic_score: sim, is_static: !!mem.is_static,
           source_count: mem.source_count || 1,
         });
       }
@@ -118,13 +118,14 @@ export async function hybridSearch(
     if (r.is_static) r.score += 0.02;
   }
 
-  // 4. Relationship expansion
+  // 4. Relationship expansion (2-hop)
   if (expandRelationships) {
     const topIds = Array.from(results.entries())
       .sort((a, b) => b[1].score - a[1].score)
       .slice(0, 5)
       .map(([id]) => id);
 
+    const hop1Ids: number[] = [];
     for (const id of topIds) {
       const links = getLinksFor.all(id, id) as Array<{
         id: number; similarity: number; type: string; content: string;
@@ -147,7 +148,31 @@ export async function hybridSearch(
             is_latest: !!link.is_latest,
             source_count: link.source_count || 1,
           });
+          hop1Ids.push(link.id);
         }
+      }
+    }
+
+    // Hop 2: expand from hop 1 results (diminished score)
+    for (const id of hop1Ids.slice(0, 8)) {
+      const links2 = getLinksFor.all(id, id) as Array<{
+        id: number; similarity: number; type: string; content: string;
+        category: string; importance: number; created_at: string;
+        is_latest: boolean; is_forgotten: boolean; version: number; source_count: number;
+      }>;
+      for (const link of links2) {
+        if (link.is_forgotten || results.has(link.id)) continue;
+        results.set(link.id, {
+          id: link.id,
+          content: link.content,
+          category: link.category,
+          importance: link.importance,
+          created_at: link.created_at,
+          score: 0.04 * link.similarity, // diminished for 2nd hop
+          version: link.version,
+          is_latest: !!link.is_latest,
+          source_count: link.source_count || 1,
+        });
       }
     }
   }
