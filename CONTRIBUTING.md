@@ -28,13 +28,25 @@ npm run dev
 Engram is a single-process TypeScript server with zero external service dependencies.
 
 ```
-server.ts          — Main server (being modularized into src/)
-├── Embedding      — Xenova/all-MiniLM-L6-v2 via @huggingface/transformers
-├── Database       — SQLite via libsql with FTS5 + FLOAT32 vectors
-├── FSRS-6         — Spaced repetition scheduler (21 trained weights)
-├── LLM            — Fact extraction, consolidation, reflections (optional)
-├── Auth           — API keys + GUI cookies + RBAC
-└── HTTP           — Node.js createServer with Web Request/Response adapter
+server.ts          — Monolith server (~7400 lines, legacy — use server-split.ts)
+server-split.ts    — Modular entrypoint (imports from src/)
+mcp-server.ts      — MCP server (JSON-RPC 2.0 stdio transport)
+src/
+├── auth/          — API keys, GUI cookies, RBAC
+├── config/        — Environment and runtime configuration
+├── db/            — libsql with FTS5 + FLOAT32 vectors
+├── embeddings/    — Xenova/all-MiniLM-L6-v2 via @huggingface/transformers
+├── fsrs/          — FSRS-6 spaced repetition (21 trained weights)
+├── graph/         — Graphology-based knowledge graph + community detection
+├── gui/           — GUI route handlers
+├── helpers/       — Shared utilities
+├── intelligence/  — Fact extraction, consolidation, reflections, contradiction detection
+├── llm/           — LLM client (optional, OpenAI-compatible)
+├── memory/        — Core memory CRUD + versioning
+├── organization/  — Tags, episodes, entities, projects, spaces
+├── platform/      — Webhooks, digests, sync, import/export
+├── routes/        — HTTP route definitions
+└── tier4/         — Advanced features (time-travel, derived memories, reranker)
 
 engram-gui.html    — WebGL galaxy visualization (standalone HTML)
 engram-login.html  — Login page
@@ -43,7 +55,7 @@ landing.html       — Marketing landing page
 
 ### Key Design Decisions
 
-1. **Single file (for now)**: The server is ~6600 lines in one file. This is being split into `src/` modules, but the monolith works fine for a single-process server with no dependency injection needed.
+1. **Modular architecture**: The server has been split from a monolith (`server.ts`, ~7400 lines) into `src/` modules. The modular entrypoint is `server-split.ts`. Both work, but new development targets `src/`.
 
 2. **libsql, not better-sqlite3**: We use libsql for native FLOAT32 vector columns and HNSW index support. This gives us vector search without an external service.
 
@@ -51,7 +63,7 @@ landing.html       — Marketing landing page
 
 4. **FSRS-6 over exponential decay**: Every other memory system uses exponential decay. We use the FSRS-6 algorithm (power-law forgetting curve) with 21 weights trained on millions of Anki reviews. This is mathematically more accurate and gives us features nobody else has (dual-strength model, same-day review handling, optimal review intervals).
 
-5. **Node.js HTTP, not Express/Hono/Bun**: Zero framework dependency. The server uses `createServer` with a Web Request/Response adapter. This keeps the dependency count at 2 (libsql + @huggingface/transformers).
+5. **Node.js HTTP, not Express/Hono**: Zero framework dependency. The server uses `createServer` with a Web Request/Response adapter. Core dependencies: libsql, @huggingface/transformers, graphology, and @modelcontextprotocol/sdk.
 
 ## Code Style
 
@@ -63,11 +75,15 @@ landing.html       — Marketing landing page
 
 ## Testing
 
-Currently tested via integration (real server + real SQLite). We need:
-- [ ] Unit tests for FSRS-6 math
-- [ ] Unit tests for hybrid search scoring
-- [ ] Integration test suite for API endpoints
-- [ ] Benchmark suite for search latency
+Uses [vitest](https://vitest.dev/). Run with:
+
+```bash
+npx vitest run
+```
+
+We always need more coverage:
+- [ ] Benchmark suite for search latency vs competitors
+- [ ] Stress tests for large memory sets (10k+ memories)
 
 ## Pull Request Process
 
@@ -79,14 +95,12 @@ Currently tested via integration (real server + real SQLite). We need:
 
 ## Areas Where Help Is Needed
 
-- **MCP Server**: Full Model Context Protocol implementation for Claude/Cursor/VS Code
 - **OpenAPI Spec**: Generate from route definitions → Swagger UI at `/docs`
-- **SDK Clients**: `@engram/client` (TypeScript), `engram-client` (Python)
+- **SDK publishing**: `@engram/sdk` (TypeScript) and `engram-sdk` (Python) need npm/PyPI publishing
 - **Benchmarks**: Measure and publish latency vs Mem0, SuperMemory, ChromaDB
 - **Encryption at rest**: SQLCipher integration or envelope encryption
-- **Test suite**: Unit + integration tests
-- **Documentation**: API reference, deployment guides, architecture diagrams
+- **Documentation**: Deployment guides, architecture diagrams, more examples
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+Elastic License 2.0 — see [LICENSE](LICENSE) for details.
