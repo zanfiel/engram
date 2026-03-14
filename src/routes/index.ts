@@ -3453,6 +3453,72 @@ Return JSON:
     }
 
     // ========================================================================
+    // GUARDRAILS — pre-action conflict check against stored rules
+    // ========================================================================
+
+    function heuristicGuard(action: string, rules: Array<{ content: string; score: number; importance: number }>): "allow" | "warn" | "block" {
+      for (const r of rules) {
+        const rl = r.content.toLowerCase();
+        const hasProhibition = /\bnever\b|\bdo not\b|\bdon't\b|\bcritical\b|\bnot\b.*\ballowed\b|\bno\s+(?:purple|blue|indigo)\b/.test(rl);
+        // Any importance-10 rule that matches at all = warn (these are critical rules)
+        if (r.importance >= 10) return "warn";
+        // Prohibition language in a static rule = warn
+        if (hasProhibition) return "warn";
+      }
+      return "allow";
+    }
+
+    if (url.pathname === "/guard" && method === "POST") {
+      try {
+        const body = await req.json() as any;
+        const action = body.action;
+        if (!action || typeof action !== "string") return errorResponse("action (string) required — describe what you are about to do");
+
+        // Search static high-importance memories for conflicts
+        const results = await hybridSearch(action, 20, false, false, true, auth.user_id);
+        const rules = results.filter(r => r.is_static && r.importance >= 8);
+
+        if (rules.length === 0) {
+          return json({ signal: "allow", action, rules: [], message: "No conflicting rules found." });
+        }
+
+        // Ask LLM if any rules conflict with the proposed action
+        let signal: "allow" | "warn" | "block" = "warn";
+        let message = "";
+
+        if (isLLMAvailable()) {
+          try {
+            const rulesText = rules.slice(0, 5).map((r, i) => `RULE ${i + 1} (importance ${r.importance}): ${r.content}`).join("\n\n");
+            const llmResult = await callLLM(
+              `You are a guardrail system. Given an agent's PROPOSED ACTION and a set of RULES from memory, determine if the action conflicts with any rule. Respond with ONLY one of: BLOCK (action directly violates a rule), WARN (action is related to a rule and should proceed with caution), or ALLOW (no conflict). After the signal word, write a brief explanation on the same line.`,
+              `PROPOSED ACTION: ${action}\n\nRULES:\n${rulesText}`
+            );
+            const first = llmResult.trim().split("\n")[0].toUpperCase();
+            if (first.startsWith("BLOCK")) { signal = "block"; message = llmResult.trim(); }
+            else if (first.startsWith("ALLOW")) { signal = "allow"; message = llmResult.trim(); }
+            else { signal = "warn"; message = llmResult.trim(); }
+          } catch {
+            // LLM unavailable — semantic + keyword heuristic
+            signal = heuristicGuard(action, rules);
+            message = signal !== "allow" ? "Rule conflict detected (semantic + keyword heuristic). Review the rules before proceeding." : "No conflicts detected (LLM unavailable for deeper analysis).";
+          }
+        } else {
+          signal = heuristicGuard(action, rules);
+          message = signal !== "allow" ? "Rule conflict detected (semantic + keyword heuristic). Review the rules before proceeding." : "No conflicts detected.";
+        }
+
+        return json({
+          signal,
+          action,
+          message,
+          rules: rules.slice(0, 5).map(r => ({ id: r.id, content: r.content, importance: r.importance })),
+        });
+      } catch (e: any) {
+        return safeError("guard check", e);
+      }
+    }
+
+    // ========================================================================
     // CONSOLIDATION — v4.1
     // ========================================================================
 
