@@ -61,6 +61,7 @@ curl -X POST http://localhost:4200/recall \
 - ⏳ **Temporal search** — `temporal_sort` orders results chronologically. Episode search by date range.
 - 🔗 **2-hop graph traversal** — relationship expansion reaches 2 levels deep for multi-hop reasoning
 - 🧩 **Implicit connection inference** — LLM post-processing in /context finds unstated relationships between memories
+- 🛡️ **Guardrails** — `POST /guard` checks proposed actions against stored rules before execution. Returns allow/warn/block. Prevents repeated deployment mistakes, outdated references, and policy violations.
 - 📦 **Spaces, tags, episodes** — organize memories into named collections
 - 🧩 **Entities & projects** — track people, servers, tools, projects
 - 📬 **Webhooks & digests** — event hooks + scheduled HMAC-signed summaries
