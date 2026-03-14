@@ -10,10 +10,10 @@
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
-  --bg:#0a0e17;--bg2:#0f1420;--bg3:#151c2c;
-  --text:#e2e4e9;--dim:#666b7a;--muted:#444;
-  --accent:#818cf8;--accent2:#a78bfa;
-  --cyan:#22d3ee;--green:#34d399;--amber:#fbbf24;--pink:#f472b6;--red:#f87171;
+  --bg:#09090b;--bg2:#111114;--bg3:#1a1a1f;
+  --text:#e4e4e7;--dim:#8a8a96;--muted:#52525b;
+  --accent:#c4a265;--accent2:#d4b87a;
+  --cyan:#5eaebd;--green:#5a9e7e;--amber:#c4a265;--pink:#b07888;--red:#c06060;
   --radius:12px;
 }
 html{scroll-behavior:smooth}
@@ -24,17 +24,17 @@ code{font-family:'JetBrains Mono',monospace;font-size:0.85em;background:var(--bg
 
 /* Hero */
 .hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:5rem 2rem 2rem;position:relative}
-.hero::before{content:'';position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 80% 50% at 50% -20%,rgba(129,140,248,0.12),transparent),radial-gradient(ellipse 60% 40% at 80% 80%,rgba(167,139,250,0.06),transparent)}
-.hero-badge{display:inline-flex;align-items:center;gap:8px;padding:6px 16px;border-radius:99px;border:1px solid rgba(129,140,248,0.2);background:rgba(129,140,248,0.06);color:var(--accent);font-size:12px;font-weight:600;letter-spacing:0.5px;margin-bottom:2rem;text-transform:uppercase}
+.hero::before{content:'';position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 70% 45% at 50% -10%,rgba(196,162,101,0.06),transparent)}
+.hero-badge{display:inline-flex;align-items:center;gap:8px;padding:6px 16px;border-radius:99px;border:1px solid rgba(196,162,101,0.2);background:rgba(196,162,101,0.06);color:var(--accent);font-size:12px;font-weight:600;letter-spacing:0.5px;margin-bottom:2rem;text-transform:uppercase}
 .hero-badge .dot{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
 .hero h1{font-size:clamp(3rem,8vw,5.5rem);font-weight:800;letter-spacing:-0.03em;line-height:1.05;margin-bottom:1.5rem}
-.hero h1 span{background:linear-gradient(135deg,var(--accent),var(--accent2),var(--cyan));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.hero h1 span{background:linear-gradient(135deg,#f5f0e8,#c4a265);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
 .hero p{font-size:clamp(1rem,2.5vw,1.25rem);color:var(--dim);max-width:600px;margin-bottom:2.5rem}
 .hero-actions{display:flex;gap:12px;flex-wrap:wrap;justify-content:center}
 .btn{display:inline-block;padding:12px 28px;border-radius:var(--radius);font-size:14px;font-weight:600;font-family:'Inter',sans-serif;border:none;cursor:pointer;transition:all 0.2s}
-.btn-primary{background:var(--accent);color:#fff}
-.btn-primary:hover{background:#6366f1;transform:translateY(-1px);box-shadow:0 8px 30px rgba(129,140,248,0.3)}
+.btn-primary{background:var(--accent);color:#0a0a0a}
+.btn-primary:hover{background:var(--accent2);transform:translateY(-1px);box-shadow:0 8px 30px rgba(196,162,101,0.3)}
 .btn-secondary{background:rgba(255,255,255,0.04);color:var(--text);border:1px solid rgba(255,255,255,0.08)}
 .btn-secondary:hover{background:rgba(255,255,255,0.08);transform:translateY(-1px)}
 .hero-code{margin-top:3rem;text-align:left;background:var(--bg2);border:1px solid rgba(255,255,255,0.06);border-radius:var(--radius);padding:24px 28px;max-width:600px;width:100%;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.8;color:var(--dim);position:relative;overflow-x:auto}
@@ -57,16 +57,16 @@ section{padding:6rem 2rem}
 .feature-group:last-child{margin-bottom:0}
 .group-label{font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--dim);margin-bottom:1.25rem;padding-bottom:0.75rem;border-bottom:1px solid rgba(255,255,255,0.04)}
 .features{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem}
-.feature{background:var(--bg2);border:1px solid rgba(255,255,255,0.04);border-radius:var(--radius);padding:24px;transition:all 0.3s}
-.feature:hover{border-color:rgba(129,140,248,0.15);transform:translateY(-2px)}
-.feature.highlight{border-color:rgba(129,140,248,0.18);background:linear-gradient(135deg,rgba(129,140,248,0.05),rgba(167,139,250,0.02))}
+.feature{background:var(--bg2);border:1px solid rgba(176,176,190,0.2);border-radius:var(--radius);padding:24px;transition:all 0.3s}
+.feature:hover{border-color:rgba(176,176,190,0.5);transform:translateY(-2px)}
+.feature.highlight{border-color:rgba(196,162,101,0.4);background:linear-gradient(135deg,rgba(196,162,101,0.06),rgba(196,162,101,0.02))}
 .feature-icon{width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;margin-bottom:14px}
 .feature h3{font-size:14px;font-weight:700;margin-bottom:6px}
 .feature p{font-size:13px;color:var(--dim);line-height:1.6}
 
 /* Code blocks */
-.code-section{display:grid;grid-template-columns:1fr 1fr;gap:2rem;align-items:start}
-@media(max-width:768px){.code-section{grid-template-columns:1fr}}
+.code-section{display:grid;grid-template-columns:repeat(3,1fr);gap:1.5rem;align-items:start}
+@media(max-width:900px){.code-section{grid-template-columns:1fr}}
 .code-block{background:var(--bg2);border:1px solid rgba(255,255,255,0.04);border-radius:var(--radius);overflow:hidden}
 .code-header{padding:12px 20px;border-bottom:1px solid rgba(255,255,255,0.04);display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dim)}
 .code-header .lang{color:var(--accent);font-weight:600}
@@ -95,7 +95,7 @@ section{padding:6rem 2rem}
 
 /* CTA */
 .cta{text-align:center;padding:8rem 2rem;position:relative}
-.cta::before{content:'';position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 60% 50% at 50% 100%,rgba(129,140,248,0.08),transparent)}
+.cta::before{content:'';position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 60% 50% at 50% 100%,rgba(196,162,101,0.08),transparent)}
 .cta h2{font-size:clamp(2rem,5vw,3rem);font-weight:800;letter-spacing:-0.02em;margin-bottom:1rem}
 .cta p{color:var(--dim);margin-bottom:2rem;font-size:1.1rem}
 .cta-code{display:inline-block;background:var(--bg2);border:1px solid rgba(255,255,255,0.06);border-radius:var(--radius);padding:16px 32px;font-family:'JetBrains Mono',monospace;font-size:15px;color:var(--text);margin-bottom:2rem}
@@ -106,17 +106,32 @@ footer{text-align:center;padding:3rem 2rem;color:var(--muted);font-size:12px;bor
 footer a{color:var(--dim)}
 
 /* Nav */
-nav{position:fixed;top:0;left:0;right:0;z-index:50;padding:16px 2rem;display:flex;align-items:center;justify-content:space-between;backdrop-filter:blur(12px);background:rgba(10,14,23,0.8);border-bottom:1px solid rgba(255,255,255,0.04)}
+nav{position:fixed;top:0;left:0;right:0;z-index:50;padding:16px 2rem;display:flex;align-items:center;justify-content:space-between;backdrop-filter:blur(12px);background:rgba(9,9,11,0.85);border-bottom:1px solid rgba(255,255,255,0.04)}
 nav .logo{font-size:16px;font-weight:800;letter-spacing:-0.02em}
 nav .logo span{color:var(--accent)}
 nav .links{display:flex;gap:24px;font-size:13px;color:var(--dim)}
 nav .links a:hover{color:var(--text);text-decoration:none}
 .nav-toggle{display:none;background:none;border:none;color:var(--dim);font-size:20px;cursor:pointer;padding:4px}
+
+/* Sponsor dropdown */
+.sponsor-wrap{position:relative}
+.sponsor-link{display:inline-flex;align-items:center;gap:5px;color:var(--dim);cursor:pointer}
+.sponsor-link .heart{color:var(--pink);font-size:12px;transition:transform 0.2s}
+.sponsor-wrap:hover .heart{transform:scale(1.3)}
+.sponsor-drop{display:none;position:absolute;top:calc(100% + 12px);right:0;background:var(--bg2);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:8px 0;min-width:170px;box-shadow:0 8px 32px rgba(0,0,0,0.4)}
+.sponsor-wrap:hover .sponsor-drop{display:block}
+.sponsor-drop a{display:flex;align-items:center;gap:8px;padding:8px 16px;font-size:12px;color:var(--dim);white-space:nowrap;transition:background 0.15s}
+.sponsor-drop a:hover{background:rgba(255,255,255,0.04);color:var(--text);text-decoration:none}
+.sponsor-drop a span.s-icon{width:16px;text-align:center;font-size:14px}
+
 @media(max-width:640px){
   .nav-toggle{display:block}
-  nav .links{display:none;position:absolute;top:100%;left:0;right:0;flex-direction:column;gap:0;background:rgba(10,14,23,0.98);border-bottom:1px solid rgba(255,255,255,0.06);padding:1rem 2rem}
+  nav .links{display:none;position:absolute;top:100%;left:0;right:0;flex-direction:column;gap:0;background:rgba(9,9,11,0.98);border-bottom:1px solid rgba(255,255,255,0.06);padding:1rem 2rem}
   nav .links.open{display:flex}
   nav .links a{padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
+  .sponsor-wrap{width:100%}
+  .sponsor-drop{position:static;display:none;border:none;box-shadow:none;padding:0 0 0 1rem;background:transparent}
+  .sponsor-wrap:hover .sponsor-drop{display:block}
 }
 </style>
 </head>
@@ -132,6 +147,14 @@ nav .links a:hover{color:var(--text);text-decoration:none}
     <a href="#mcp">MCP</a>
     <a href="https://demo.engram.lol/gui">Demo</a>
     <a href="https://github.com/zanfiel/engram">GitHub</a>
+    <div class="sponsor-wrap">
+      <span class="sponsor-link"><span class="heart">&#9829;</span> Sponsor</span>
+      <div class="sponsor-drop">
+        <a href="https://github.com/sponsors/Zanfiel"><span class="s-icon">&#9733;</span> GitHub Sponsors</a>
+        <a href="https://www.patreon.com/ZanEngram"><span class="s-icon">&#9829;</span> Patreon</a>
+        <a href="https://ko-fi.com/zanfiel10426"><span class="s-icon">&#9749;</span> Ko-fi</a>
+      </div>
+    </div>
   </div>
 </nav>
 
@@ -169,12 +192,12 @@ nav .links a:hover{color:var(--text);text-decoration:none}
       <div class="group-label">Smart Memory</div>
       <div class="features">
         <div class="feature highlight">
-          <div class="feature-icon" style="background:rgba(129,140,248,0.15);color:var(--accent)">⏱️</div>
+          <div class="feature-icon" style="background:rgba(196,162,101,0.15);color:var(--accent)">⏱️</div>
           <h3>FSRS-6 Spaced Repetition</h3>
           <p>21-parameter algorithm trained on millions of Anki reviews. Power-law forgetting curves. Every access is an implicit review — stability grows over time.</p>
         </div>
         <div class="feature highlight">
-          <div class="feature-icon" style="background:rgba(167,139,250,0.15);color:var(--accent2)">💪</div>
+          <div class="feature-icon" style="background:rgba(176,176,190,0.15);color:var(--accent2)">💪</div>
           <h3>Dual-Strength Model</h3>
           <p>Bjork & Bjork (1992): storage strength never decays, retrieval strength resets on access. Combined retention score: 0.7 × retrieval + 0.3 × storage.</p>
         </div>
@@ -215,7 +238,7 @@ nav .links a:hover{color:var(--text);text-decoration:none}
           <p>LLM extracts static facts from conversations. Auto-tags with keywords, classifies importance, detects relationship types (updates, extends, contradicts, caused_by).</p>
         </div>
         <div class="feature">
-          <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">💬</div>
+          <div class="feature-icon" style="background:rgba(196,162,101,0.1);color:var(--accent)">💬</div>
           <h3>Conversation Extraction</h3>
           <p>Feed raw chat logs to <code>/add</code>. Get structured memories out. Works with any agent framework or raw message arrays.</p>
         </div>
@@ -225,7 +248,7 @@ nav .links a:hover{color:var(--text);text-decoration:none}
           <p>Point <code>/ingest</code> at a URL or paste raw text. Facts extracted and stored automatically with source tracking.</p>
         </div>
         <div class="feature">
-          <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:var(--accent2)">💭</div>
+          <div class="feature-icon" style="background:rgba(176,176,190,0.1);color:var(--accent2)">💭</div>
           <h3>Reflections</h3>
           <p>On-demand meta-analysis detects themes, patterns, and progress across your memory space. Reflections become searchable memories.</p>
         </div>
@@ -233,6 +256,16 @@ nav .links a:hover{color:var(--text);text-decoration:none}
           <div class="feature-icon" style="background:rgba(251,191,36,0.1);color:var(--amber)">🧬</div>
           <h3>Derived Memories & Consolidation</h3>
           <p>LLM inference finds patterns across clusters and generates new knowledge. Auto-consolidation compresses large clusters into dense memories.</p>
+        </div>
+        <div class="feature highlight">
+          <div class="feature-icon" style="background:rgba(196,162,101,0.15);color:var(--accent)">🚫</div>
+          <h3>Abstention</h3>
+          <p>Search returns <code>abstained: true</code> when confidence is below threshold. The system knows what it doesn't know — no more false positives on unrelated queries.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(90,158,126,0.1);color:var(--green)">🤖</div>
+          <h3>Assistant Recall</h3>
+          <p>Extracts what the AI said, recommended, and produced — not just user facts. LLM + regex patterns capture assistant actions as structured facts.</p>
         </div>
       </div>
     </div>
@@ -251,7 +284,7 @@ nav .links a:hover{color:var(--text);text-decoration:none}
           <p><code>engram store</code>, <code>engram recall</code>, <code>engram search</code> and more. Full access to every feature from your terminal. Stdin piping supported.</p>
         </div>
         <div class="feature">
-          <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">👥</div>
+          <div class="feature-icon" style="background:rgba(196,162,101,0.1);color:var(--accent)">👥</div>
           <h3>Multi-Tenant + RBAC</h3>
           <p>Isolated memory per user. Role-based access: admin, writer, reader. Per-key rate limiting, scoped permissions, API key management.</p>
         </div>
@@ -261,7 +294,7 @@ nav .links a:hover{color:var(--text);text-decoration:none}
           <p>Event hooks on every mutation with HMAC signing. Scheduled memory digest delivery. Built-in SSRF protection on webhook URLs.</p>
         </div>
         <div class="feature">
-          <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:var(--accent2)">🔄</div>
+          <div class="feature-icon" style="background:rgba(176,176,190,0.1);color:var(--accent2)">🔄</div>
           <h3>Cross-Instance Sync</h3>
           <p>Pull changes since a timestamp, push to another instance. Keep multiple Engram deployments in sync across environments.</p>
         </div>
@@ -282,7 +315,7 @@ nav .links a:hover{color:var(--text);text-decoration:none}
           <p>Explore your entire memory space as an interactive galaxy at <code>/gui</code>. Click memories, trace connections, search, create, and edit in the browser.</p>
         </div>
         <div class="feature">
-          <div class="feature-icon" style="background:rgba(129,140,248,0.1);color:var(--accent)">🕸️</div>
+          <div class="feature-icon" style="background:rgba(196,162,101,0.1);color:var(--accent)">🕸️</div>
           <h3>Knowledge Graph</h3>
           <p>Auto-linking via cosine similarity with typed edges. Graphology-powered centrality, community detection, and shortest path traversal.</p>
         </div>
@@ -297,7 +330,7 @@ nav .links a:hover{color:var(--text);text-decoration:none}
           <p>Track people, servers, tools, and projects as first-class objects with scoped search and relationship tracking.</p>
         </div>
         <div class="feature">
-          <div class="feature-icon" style="background:rgba(167,139,250,0.1);color:var(--accent2)">📥</div>
+          <div class="feature-icon" style="background:rgba(176,176,190,0.1);color:var(--accent2)">📥</div>
           <h3>Review Queue / Inbox</h3>
           <p>Auto-detected memories land in inbox for review. Approve, reject, or edit before they enter recall. Bulk operations supported.</p>
         </div>
@@ -332,7 +365,7 @@ nav .links a:hover{color:var(--text);text-decoration:none}
         <div style="color:var(--dim);font-size:14px;max-width:500px;line-height:1.6">Explore a live demo with sample memories and auto-generated links. Click nodes to inspect. Search, filter by category, create new memories. Keyboard shortcuts for power users.</div>
         <div style="display:flex;gap:12px;flex-wrap:wrap;justify-content:center;margin-top:0.5rem">
           <span style="padding:4px 12px;border-radius:99px;font-size:11px;background:rgba(34,211,238,0.1);color:var(--cyan)">WebGL Rendering</span>
-          <span style="padding:4px 12px;border-radius:99px;font-size:11px;background:rgba(167,139,250,0.1);color:var(--accent2)">Force-Directed Layout</span>
+          <span style="padding:4px 12px;border-radius:99px;font-size:11px;background:rgba(176,176,190,0.1);color:var(--accent2)">Force-Directed Layout</span>
           <span style="padding:4px 12px;border-radius:99px;font-size:11px;background:rgba(52,211,153,0.1);color:var(--green)">Real-time Search</span>
           <span style="padding:4px 12px;border-radius:99px;font-size:11px;background:rgba(244,114,182,0.1);color:var(--pink)">Category Filters</span>
         </div>
@@ -452,6 +485,21 @@ nav .links a:hover{color:var(--text);text-decoration:none}
           <span class="cm"># OpenAI Agents SDK out of the box</span>
         </div>
       </div>
+      <div class="code-block">
+        <div class="code-header"><span class="lang">cURL</span> raw HTTP</div>
+        <div class="code-body">
+          <span class="cm"># Store a memory</span><br>
+          curl -X POST localhost:<span class="num">4200</span>/store \<br>
+          &nbsp;&nbsp;-H <span class="str">"Authorization: Bearer eg_..."</span> \<br>
+          &nbsp;&nbsp;-d <span class="str">'{"content":"Auth migrated",</span><br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="str">"category":"decision",</span><br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="str">"importance":9}'</span><br><br>
+          <span class="cm"># Contextual recall</span><br>
+          curl -X POST localhost:<span class="num">4200</span>/context \<br>
+          &nbsp;&nbsp;-d <span class="str">'{"query":"auth setup",</span><br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="str">"budget":2000}'</span>
+        </div>
+      </div>
     </div>
   </div>
 </section>
@@ -497,9 +545,9 @@ nav .links a:hover{color:var(--text);text-decoration:none}
         <div class="feature" style="margin:0">
           <h3 style="font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--dim);margin-bottom:14px">Resources</h3>
           <div class="mcp-list">
-            <div class="mcp-item"><code style="color:var(--accent2);background:rgba(167,139,250,0.06)">engram://health</code><span>Server health + feature flags</span></div>
-            <div class="mcp-item"><code style="color:var(--accent2);background:rgba(167,139,250,0.06)">engram://profile</code><span>User profile + static facts</span></div>
-            <div class="mcp-item"><code style="color:var(--accent2);background:rgba(167,139,250,0.06)">engram://stats</code><span>Detailed statistics</span></div>
+            <div class="mcp-item"><code style="color:var(--accent2);background:rgba(176,176,190,0.06)">engram://health</code><span>Server health + feature flags</span></div>
+            <div class="mcp-item"><code style="color:var(--accent2);background:rgba(176,176,190,0.06)">engram://profile</code><span>User profile + static facts</span></div>
+            <div class="mcp-item"><code style="color:var(--accent2);background:rgba(176,176,190,0.06)">engram://stats</code><span>Detailed statistics</span></div>
           </div>
         </div>
       </div>
@@ -521,7 +569,8 @@ nav .links a:hover{color:var(--text);text-decoration:none}
 </section>
 
 <footer>
-  <p>Engram is open source software under the MIT License. &nbsp;·&nbsp; <a href="https://github.com/zanfiel/engram">GitHub</a></p>
+  <p><a href="https://github.com/zanfiel/engram/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Elastic%202.0-blue" alt="Elastic License 2.0" style="vertical-align:middle"></a></p>
+  <p style="margin-top:8px"><a href="https://github.com/zanfiel/engram">GitHub</a> &nbsp;·&nbsp; <a href="https://github.com/sponsors/Zanfiel">Sponsor</a> &nbsp;·&nbsp; <a href="https://www.patreon.com/ZanEngram">Patreon</a> &nbsp;·&nbsp; <a href="https://ko-fi.com/zanfiel10426">Ko-fi</a></p>
 </footer>
 
 </body>

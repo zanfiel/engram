@@ -39,7 +39,7 @@ curl -X POST http://localhost:4200/recall \
 
 - 🧠 **FSRS-6 spaced repetition** — cognitive science-backed memory decay using power-law forgetting curves (ported from [open-spaced-repetition](https://github.com/open-spaced-repetition/fsrs4anki))
 - 💪 **Dual-strength memory model** — Bjork & Bjork (1992) storage strength (never decays) + retrieval strength (decays via power law)
-- 🧬 **Hybrid semantic + full-text search** — MiniLM embeddings (384-dim, runs locally) combined with FTS5 full-text search
+- 🧬 **Hybrid semantic + full-text search** — BGE-large 1024-dim embeddings via raw ONNX inference (no external APIs) combined with FTS5 full-text search
 - 🔗 **Auto-linking** — memories automatically connect via cosine similarity, forming a knowledge graph
 - 📊 **Graph visualization** — explore your memory space in a WebGL galaxy
 - 🔄 **Versioning** — update memories without losing history
@@ -55,6 +55,12 @@ curl -X POST http://localhost:4200/recall \
 - 🗜️ **Auto-consolidation** — summarize large memory clusters automatically
 - 🏆 **LLM reranker** — search results reranked for semantic precision (optional)
 - 👥 **Multi-tenant** — isolated memory per user with API keys
+- 📖 **Episodic memory** — store conversation episodes as embedded, searchable narratives with temporal + semantic search. Facts link to source episodes.
+- 🚫 **Abstention** — search returns `abstained: true` when confidence is below threshold. The system knows when it doesn't know.
+- 🤖 **Assistant recall** — extracts what the AI said/did, not just user facts. LLM + regex patterns for assistant actions.
+- ⏳ **Temporal search** — `temporal_sort` orders results chronologically. Episode search by date range.
+- 🔗 **2-hop graph traversal** — relationship expansion reaches 2 levels deep for multi-hop reasoning
+- 🧩 **Implicit connection inference** — LLM post-processing in /context finds unstated relationships between memories
 - 📦 **Spaces, tags, episodes** — organize memories into named collections
 - 🧩 **Entities & projects** — track people, servers, tools, projects
 - 📬 **Webhooks & digests** — event hooks + scheduled HMAC-signed summaries
@@ -73,17 +79,45 @@ curl -X POST http://localhost:4200/recall \
 
 ## What's New in v5.7
 
-### Multi-Tenant Data Isolation (v5.7)
+### BGE-large 1024-dim Embeddings
+
+Replaced MiniLM-L6-v2 (384-dim, @huggingface/transformers) with **BGE-large-en-v1.5** (1024-dim) using raw `onnxruntime-node` and a hand-written BERT WordPiece tokenizer. No wrapper libraries — pure ONNX inference with mean pooling and L2 normalization.
+
+- **1024 dimensions** — significantly better semantic discrimination vs 384-dim
+- **512-token context** — 2x MiniLM's 256-token limit
+- **Quantized INT8** — 337MB model, sub-200ms per embedding on CPU
+- **Auto-migration** — existing 384-dim embeddings re-embedded on first startup
+
+### Episodic Memory
+
+Conversation episodes are now first-class embedded, searchable objects:
+
+- **Episode embeddings** — summaries embedded with BGE-large for semantic search
+- **Episode FTS5** — full-text search across episode titles and summaries
+- **Temporal search** — `GET /episodes?after=&before=` for date range queries
+- **Semantic search** — `GET /episodes?query=` for meaning-based episode retrieval
+- **Episode finalize** — `POST /episodes/:id/finalize` generates narrative summary from linked memories
+- **Context injection** — episode summaries automatically included in `/context` responses
+- **FSRS decay** — episodes participate in spaced repetition like any other memory
+
+### Benchmark Features (LongMemEval, LoCoMo, ConvoMem)
+
+- **Abstention** — configurable `ENGRAM_SEARCH_MIN_SCORE` (default 0.58). Returns `abstained: true` with empty results when top semantic score is below threshold. Prevents false positives.
+- **Assistant recall** — LLM extraction prompt + regex patterns capture what the AI recommended, implemented, fixed, or produced. Stored as structured facts with `subject: "assistant"`.
+- **Temporal sort** — `temporal_sort: "asc"` or `"desc"` in `/search` orders results chronologically instead of by relevance.
+- **2-hop graph traversal** — relationship expansion reaches 2 levels deep (diminished scoring on hop 2) for multi-hop QA.
+- **Implicit connection inference** — LLM post-processing in `/context` identifies unstated relationships between returned memories.
+
+### Multi-Tenant Data Isolation
 
 Complete security audit and fix of all cross-tenant data boundaries:
 
 - **User-scoped embedding cache** — `getCachedEmbeddings` now filters by `user_id`, preventing cross-user data leakage in search, auto-linking, contradiction detection, deduplication, and fact extraction.
 - **Ownership checks on all endpoints** — every GET/POST/PATCH/DELETE that operates on a specific resource (memory, conversation, entity, project, episode, link, version chain) now verifies the authenticated user owns it.
 - **Conversation isolation** — all conversation queries filter by `user_id`. Message search is scoped to the authenticated user's conversations.
-- **Write scope enforcement** — mutating endpoints (`/memory/:id/update`, `/deduplicate`, `/sweep`, `/backfill`, `/fsrs/init`, conversation CRUD) now require write scope.
-- **Stats scoped to user** — `/stats` consolidated from 13 unfiltered queries to 4 user-scoped queries. `db_path` no longer leaked to non-admins.
-- **Graph BFS user-filtered** — graph traversal now joins against `memories` to prevent cross-user node discovery.
-- **Confidence propagation** — `propagateConfidence` fully implemented in modular split (was a no-op stub).
+- **Write scope enforcement** — mutating endpoints require write scope.
+- **Stats scoped to user** — `/stats` consolidated from 13 unfiltered queries to 4 user-scoped queries.
+- **Graph BFS user-filtered** — graph traversal joins against `memories` to prevent cross-user node discovery.
 
 ### Node.js 22 Runtime (Primary) (v5.6)
 
