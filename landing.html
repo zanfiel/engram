@@ -186,7 +186,7 @@ nav .links a:hover{color:var(--text);text-decoration:none}
   <div class="container">
     <div class="section-label">Features</div>
     <h2 class="section-title">Everything agents need to remember</h2>
-    <p class="section-desc">One server. One SQLite file. Runs on Node.js 22+ or Bun. No external services required.</p>
+    <p class="section-desc">One server. One libsql database. Runs on Node.js 22+ or Bun. No external services required.</p>
 
     <div class="feature-group">
       <div class="group-label">Smart Memory</div>
@@ -230,7 +230,7 @@ nav .links a:hover{color:var(--text);text-decoration:none}
         <div class="feature highlight">
           <div class="feature-icon" style="background:rgba(34,211,238,0.15);color:var(--cyan)">🧠</div>
           <h3>Hybrid Semantic + FTS5</h3>
-          <p>BGE-large 1024-dim embeddings via raw ONNX inference, combined with SQLite FTS5 full-text search. Meaning and keywords — no OpenAI key required.</p>
+          <p>BGE-large 1024-dim embeddings via raw ONNX inference, combined with libsql FTS5 full-text search. Meaning and keywords — no OpenAI key required.</p>
         </div>
         <div class="feature">
           <div class="feature-icon" style="background:rgba(244,114,182,0.1);color:var(--pink)">🔍</div>
@@ -268,6 +268,7 @@ nav .links a:hover{color:var(--text);text-decoration:none}
           <p>Extracts what the AI said, recommended, and produced — not just user facts. LLM + regex patterns capture assistant actions as structured facts.</p>
         </div>
       </div>
+<div class="feature highlight">          <div class="feature-icon" style="background:rgba(248,113,113,0.15);color:var(--red)">🛡️</div>          <h3>Guardrails</h3>          <p>Agents call <code>/guard</code> before destructive actions. Engram checks stored rules for conflicts and returns allow/warn/block — preventing repeated mistakes before they happen.</p>        </div>
     </div>
 
     <div class="feature-group">
@@ -408,7 +409,7 @@ nav .links a:hover{color:var(--text);text-decoration:none}
         <p>If LLM configured: static facts extracted, keywords tagged, importance scored, relationships to existing memories detected.</p>
       </div>
       <div class="step">
-        <div class="step-num">05</div>
+        <div class="step-num">06</div>
         <div class="step-icon">🎯</div>
         <h3>Recall</h3>
         <p>Five layers combined: static facts, semantic matches, episodic context, linked memories (graph expansion), and recent activity.</p>
@@ -558,7 +559,7 @@ nav .links a:hover{color:var(--text);text-decoration:none}
 <!-- CTA -->
 <section class="cta">
   <h2>Get started in 30 seconds</h2>
-  <p>One command. Zero config. Full memory.</p>
+  <p>One command. Full memory. Your hardware.</p>
   <div class="cta-code"><span>$</span> docker compose up -d</div>
   <br>
   <div class="hero-actions" style="justify-content:center">
