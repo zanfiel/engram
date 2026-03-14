@@ -147,7 +147,7 @@ nav .links a:hover{color:var(--gold);text-decoration:none}
       <div class="feature">
         <div class="feature-icon" style="background:rgba(196,162,101,0.08);color:var(--gold)">🧠</div>
         <h3>Semantic Search</h3>
-        <p>384-dim embeddings generated locally with MiniLM. Find memories by meaning, not keywords. No OpenAI key required.</p>
+        <p>1024-dim embeddings via BGE-large-en-v1.5 with raw ONNX inference. Find memories by meaning, not keywords. No OpenAI key required.</p>
       </div>
       <div class="feature">
         <div class="feature-icon" style="background:rgba(94,174,189,0.1);color:var(--cyan)">🔗</div>
@@ -193,6 +193,11 @@ nav .links a:hover{color:var(--gold);text-decoration:none}
         <div class="feature-icon" style="background:rgba(196,162,101,0.08);color:var(--gold)">🕸️</div>
         <h3>Graph Intelligence</h3>
         <p>Memories form a knowledge graph with relationship inference. Auto-compute centrality, shortest paths, and community detection. Understand what matters.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" style="background:rgba(176,120,136,0.1);color:var(--pink)">📖</div>
+        <h3>Episodic Memory</h3>
+        <p>Store conversation episodes as narratives — what happened, what decisions were made, what was produced. Facts link back to their source episode for full context.</p>
       </div>
       <div class="feature">
         <div class="feature-icon" style="background:rgba(94,174,189,0.1);color:var(--cyan)">🔧</div>
@@ -251,7 +256,7 @@ nav .links a:hover{color:var(--gold);text-decoration:none}
 <section>
   <div class="container">
     <div class="section-label">How It Works</div>
-    <h2 class="section-title">Four-layer contextual recall</h2>
+    <h2 class="section-title">Five-layer contextual recall</h2>
     <p class="section-desc">Recall doesn't just search — it assembles the optimal context window from multiple strategies.</p>
 
     <div class="features" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
@@ -263,12 +268,17 @@ nav .links a:hover{color:var(--gold);text-decoration:none}
       <div class="feature" style="text-align:center">
         <div style="font-size:2rem;margin-bottom:12px">🎯</div>
         <h3>Semantic Match</h3>
-        <p>Embedding similarity to the current query. The most relevant memories float to the top.</p>
+        <p>1024-dim embedding similarity to the current query. The most relevant memories float to the top.</p>
       </div>
       <div class="feature" style="text-align:center">
-        <div style="font-size:2rem;margin-bottom:12px">⭐</div>
-        <h3>High Importance</h3>
-        <p>Critical memories (importance ≥ 7) surface regardless of query similarity. The agent never forgets what matters.</p>
+        <div style="font-size:2rem;margin-bottom:12px">📖</div>
+        <h3>Episodic Context</h3>
+        <p>Conversation episodes provide narrative context — what happened, why, and what decisions were made. Facts link back to their source episode.</p>
+      </div>
+      <div class="feature" style="text-align:center">
+        <div style="font-size:2rem;margin-bottom:12px">🔗</div>
+        <h3>Linked Memories</h3>
+        <p>Graph expansion pulls in related memories from the knowledge graph. Context grows outward from what was found.</p>
       </div>
       <div class="feature" style="text-align:center">
         <div style="font-size:2rem;margin-bottom:12px">🕐</div>
@@ -302,6 +312,9 @@ nav .links a:hover{color:var(--gold);text-decoration:none}
         <tr><td>Multi-tenant</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td></tr>
         <tr><td>No external API needed</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
         <tr><td>SQLite (zero deps)</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Episodic memory</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>Abstention (knows what it doesn't know)</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>FSRS-6 spaced repetition</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td></tr>
         <tr><td>Self-hosted</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
       </tbody>
     </table>
