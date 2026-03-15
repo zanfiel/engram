@@ -53,6 +53,7 @@ const TOOLS: ToolDefinition[] = [
           description: "Category (default: task)",
         },
         importance: { type: "number", description: "Importance 1-10 (default: 5)" },
+        model: { type: "string", description: "Model ID that created this memory (e.g. claude-opus-4-6, claude-sonnet-4-6)" },
       },
       required: ["content"],
     },
@@ -133,6 +134,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           category: args!.category ?? "task",
           importance: args!.importance ?? 5,
           source: SOURCE,
+          model: args!.model || undefined,
         });
         return { content: [{ type: "text", text: `Stored memory (id: ${result.id ?? "ok"})` }] };
       }

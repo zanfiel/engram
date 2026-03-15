@@ -4,7 +4,7 @@
 
 import { log } from "../config/logger.ts";
 import { RERANKER_ENABLED, RERANKER_TOP_K, AUTO_LINK_THRESHOLD, AUTO_LINK_MAX } from "../config/index.ts";
-import { db, searchMemoriesFTS, getMemoryWithoutEmbedding, getVersionChain, getLinksFor, insertLink } from "../db/index.ts";
+import { db, searchMemoriesFTS, getMemoryWithoutEmbedding, getVersionChainForUser, getLinksForUser, insertLink } from "../db/index.ts";
 import { embed, cosineSimilarity, getCachedEmbeddings, embeddingToBuffer, bufferToEmbedding } from "../embeddings/index.ts";
 import { calculateDecayScore } from "../fsrs/index.ts";
 import { sanitizeFTS } from "../helpers/index.ts";
@@ -14,6 +14,7 @@ interface SearchResult {
   content: string;
   category: string;
   source?: string;
+  model?: string;
   importance: number;
   created_at: string;
   score: number;
@@ -45,7 +46,7 @@ export async function hybridSearch(
   // 1. Vector search — in-memory cosine similarity (<1ms for 800 memories)
   try {
     const queryEmb = await embed(query);
-    const cached = getCachedEmbeddings(latestOnly);
+    const cached = getCachedEmbeddings(latestOnly, userId);
     for (const mem of cached) {
       if (mem.user_id !== userId) continue; // S7 FIX: user isolation
       const sim = cosineSimilarity(queryEmb, mem.embedding);
@@ -127,7 +128,7 @@ export async function hybridSearch(
 
     const hop1Ids: number[] = [];
     for (const id of topIds) {
-      const links = getLinksFor.all(id, id) as Array<{
+      const links = getLinksForUser.all(id, userId, id, userId) as Array<{
         id: number; similarity: number; type: string; content: string;
         category: string; importance: number; created_at: string;
         is_latest: boolean; is_forgotten: boolean; version: number; source_count: number;
@@ -155,7 +156,7 @@ export async function hybridSearch(
 
     // Hop 2: expand from hop 1 results (diminished score)
     for (const id of hop1Ids.slice(0, 8)) {
-      const links2 = getLinksFor.all(id, id) as Array<{
+      const links2 = getLinksForUser.all(id, userId, id, userId) as Array<{
         id: number; similarity: number; type: string; content: string;
         category: string; importance: number; created_at: string;
         is_latest: boolean; is_forgotten: boolean; version: number; source_count: number;
@@ -186,18 +187,19 @@ export async function hybridSearch(
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
 
-  // 6. Fill missing fields
+  // 6. Fill missing fields (always fetch model since it's not in the embedding cache)
   for (const r of sorted) {
-    if (!r.created_at || !r.version) {
+    if (!r.created_at || !r.version || r.model === undefined) {
       const mem = getMemoryWithoutEmbedding.get(r.id) as any;
       if (mem) {
         r.created_at = r.created_at || mem.created_at;
         r.source = r.source || mem.source;
-        r.version = mem.version;
-        r.is_latest = !!mem.is_latest;
-        r.is_static = !!mem.is_static;
-        r.source_count = mem.source_count;
-        r.root_memory_id = mem.root_memory_id;
+        r.model = mem.model || null;
+        r.version = r.version || mem.version;
+        r.is_latest = r.is_latest ?? !!mem.is_latest;
+        r.is_static = r.is_static ?? !!mem.is_static;
+        r.source_count = r.source_count || mem.source_count;
+        r.root_memory_id = r.root_memory_id || mem.root_memory_id;
       }
     }
   }
@@ -205,7 +207,7 @@ export async function hybridSearch(
   // 7. Include linked memories + version chain
   if (includeLinks) {
     for (const r of sorted) {
-      const links = getLinksFor.all(r.id, r.id) as Array<{
+      const links = getLinksForUser.all(r.id, userId, r.id, userId) as Array<{
         id: number; similarity: number; type: string; content: string; category: string;
         importance: number; created_at: string; is_latest: boolean; is_forgotten: boolean;
         version: number; source_count: number;
@@ -223,7 +225,7 @@ export async function hybridSearch(
       }
 
       const rootId = r.root_memory_id || r.id;
-      const chain = getVersionChain.all(rootId, rootId) as Array<{
+      const chain = getVersionChainForUser.all(rootId, rootId, userId) as Array<{
         id: number; content: string; category: string; version: number; is_latest: boolean;
         created_at: string; source_count: number;
       }>;
@@ -245,10 +247,11 @@ export async function hybridSearch(
 // AUTO-LINKING
 // ============================================================================
 
-export async function autoLink(memoryId: number, embedding: Float32Array): Promise<number> {
+export async function autoLink(memoryId: number, embedding: Float32Array, userId?: number): Promise<number> {
   // In-memory cosine scan — <1ms for 800 memories
   const similarities: Array<{ id: number; similarity: number }> = [];
-  const cached = getCachedEmbeddings(true);
+  const ownerId = userId ?? (getMemoryWithoutEmbedding.get(memoryId) as any)?.user_id;
+  const cached = getCachedEmbeddings(true, ownerId);
   for (const mem of cached) {
     if (mem.id === memoryId) continue;
     const sim = cosineSimilarity(embedding, mem.embedding);

@@ -166,7 +166,7 @@ import {
 } from "../db/index.ts";
 import { emitWebhookEvent } from "../platform/webhooks.ts";
 
-function propagateConfidence(memoryId: number, relationType: string, existingMemoryId: number): void {
+function propagateConfidence(memoryId: number, relationType: string, existingMemoryId: number, userId: number): void {
   if (relationType === "updates") {
     // Old memory's confidence drops — it's been superseded
     updateConfidence.run(0.3, existingMemoryId);
@@ -187,7 +187,7 @@ function propagateConfidence(memoryId: number, relationType: string, existingMem
       contradicts_memory_id: existingMemoryId,
       memory_content: current?.content,
       existing_content: existing?.content,
-    });
+    }, userId);
   } else if (relationType === "extends") {
     // Extended memory gets a small confidence boost — it's been corroborated
     const existing = getMemoryWithoutEmbedding.get(existingMemoryId) as any;
@@ -202,9 +202,11 @@ const incrementSourceCount = db.prepare("UPDATE memories SET source_count = sour
 export function processExtractionResult(
   newMemoryId: number,
   result: FactExtractionResult,
-  embArray: Float32Array | null
+  embArray: Float32Array | null,
+  userId?: number
 ): void {
   const rel = result.relation_to_existing;
+  const ownerId = userId ?? ((getMemoryWithoutEmbedding.get(newMemoryId) as any)?.user_id ?? 1);
 
   if (rel.type === "duplicate" && rel.existing_memory_id) {
     const existing = getMemoryWithoutEmbedding.get(rel.existing_memory_id) as any;
@@ -225,7 +227,7 @@ export function processExtractionResult(
       db.prepare(`UPDATE memories SET version = ?, root_memory_id = ?, parent_memory_id = ?, is_latest = 1 WHERE id = ?`)
         .run(newVersion, rootId, existing.id, newMemoryId);
       insertLink.run(newMemoryId, rel.existing_memory_id, 1.0, "updates");
-      propagateConfidence(newMemoryId, "updates", rel.existing_memory_id);
+      propagateConfidence(newMemoryId, "updates", rel.existing_memory_id, ownerId);
     }
   }
 
@@ -278,32 +280,32 @@ export function processExtractionResult(
   if ((result as any).structured_facts?.length) {
     const insertSF = db.prepare(
       `INSERT INTO structured_facts (memory_id, subject, verb, object, quantity, unit, date_ref, date_approx, user_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (const sf of (result as any).structured_facts) {
       try { insertSF.run(newMemoryId, sf.subject || "user", sf.verb || "unknown", sf.object || null,
-        sf.quantity != null ? Number(sf.quantity) : null, sf.unit || null, sf.date_ref || null, sf.date_approx || null); } catch {}
+        sf.quantity != null ? Number(sf.quantity) : null, sf.unit || null, sf.date_ref || null, sf.date_approx || null, ownerId); } catch {}
     }
   }
 
   if ((result as any).preferences?.length) {
     const upsertPref = db.prepare(
-      `INSERT INTO user_preferences (domain, preference, evidence_memory_id, user_id) VALUES (?, ?, ?, 1)
+      `INSERT INTO user_preferences (domain, preference, evidence_memory_id, user_id) VALUES (?, ?, ?, ?)
        ON CONFLICT(domain, preference, user_id) DO UPDATE SET strength = strength + 0.5, evidence_memory_id = excluded.evidence_memory_id, updated_at = datetime('now')`
     );
     for (const p of (result as any).preferences) {
-      try { upsertPref.run(p.domain || "general", p.preference, newMemoryId); } catch {}
+      try { upsertPref.run(p.domain || "general", p.preference, newMemoryId, ownerId); } catch {}
     }
   }
 
   if ((result as any).state_updates?.length) {
     const upsertState = db.prepare(
-      `INSERT INTO current_state (key, value, memory_id, user_id) VALUES (?, ?, ?, 1)
+      `INSERT INTO current_state (key, value, memory_id, user_id) VALUES (?, ?, ?, ?)
        ON CONFLICT(key, user_id) DO UPDATE SET previous_value = current_state.value, previous_memory_id = current_state.memory_id,
          value = excluded.value, memory_id = excluded.memory_id, updated_count = updated_count + 1, updated_at = datetime('now')`
     );
     for (const s of (result as any).state_updates) {
-      try { upsertState.run(s.key, s.value, newMemoryId); } catch {}
+      try { upsertState.run(s.key, s.value, newMemoryId, ownerId); } catch {}
     }
   }
 }

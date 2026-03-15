@@ -80,6 +80,69 @@ describe("Recall", () => {
 });
 
 // ============================================================================
+// SCRATCHPAD
+// ============================================================================
+describe("Scratchpad", () => {
+  const session = `test-session-${Date.now()}`;
+
+  it("PUT /scratch stores session entries", async () => {
+    const { status, data } = await api("/scratch", {
+      method: "PUT",
+      body: {
+        session,
+        agent: "opencode",
+        model: "gpt-5.4",
+        entries: [
+          { key: "task:scratch-test", value: "validating local scratch route" },
+          { key: "editing:routes", value: "engram scratch route" },
+        ],
+      },
+    });
+    assert.equal(status, 200);
+    assert.equal(data.stored, true);
+    assert.equal(data.session, session);
+    assert.ok(data.count >= 2);
+  });
+
+  it("GET /scratch returns active entries", async () => {
+    const { status, data } = await api(`/scratch?session=${encodeURIComponent(session)}`);
+    assert.equal(status, 200);
+    assert.ok(Array.isArray(data.entries));
+    assert.ok(data.entries.some((entry) => entry.key === "task:scratch-test"));
+  });
+
+  it("POST /context includes working memory from scratchpad", async () => {
+    const { status, data } = await api("/context", {
+      method: "POST",
+      body: { query: "scratch route", budget: 1200, session: "other-session" },
+    });
+    assert.equal(status, 200);
+    assert.match(data.context, /<working-memory>/);
+    assert.match(data.context, /task:scratch-test/);
+  });
+
+  it("DELETE /scratch/:session/:key removes a single entry", async () => {
+    const { status, data } = await api(`/scratch/${encodeURIComponent(session)}/${encodeURIComponent("editing:routes")}`, {
+      method: "DELETE",
+    });
+    assert.equal(status, 200);
+    assert.equal(data.deleted, true);
+    assert.equal(data.key, "editing:routes");
+  });
+
+  it("DELETE /scratch/:session removes all session entries", async () => {
+    const { status, data } = await api(`/scratch/${encodeURIComponent(session)}`, {
+      method: "DELETE",
+    });
+    assert.equal(status, 200);
+    assert.equal(data.deleted, true);
+    const listed = await api(`/scratch?session=${encodeURIComponent(session)}`);
+    assert.equal(listed.status, 200);
+    assert.equal(listed.data.count, 0);
+  });
+});
+
+// ============================================================================
 // MEMORY CRUD
 // ============================================================================
 describe("Memory CRUD", () => {
@@ -281,6 +344,16 @@ describe("Entities", () => {
     assert.equal(data.name, "Test Entity");
   });
 
+  it("POST /entities/:id/search scopes to owned entity", async () => {
+    const { status, data } = await api(`/entities/${testEntityId}/search`, {
+      method: "POST",
+      body: { query: "updated multi-tenant test", limit: 5 },
+    });
+    assert.equal(status, 200);
+    assert.ok(Array.isArray(data.results));
+    assert.equal(data.entity_id, testEntityId);
+  });
+
   it("DELETE /entities/:id deletes", async () => {
     const { status } = await api(`/entities/${testEntityId}`, { method: "DELETE" });
     assert.equal(status, 200);
@@ -302,6 +375,16 @@ describe("Projects", () => {
     const { status, data } = await api(`/projects/${testProjectId}`);
     assert.equal(status, 200);
     assert.equal(data.name, "Test Project");
+  });
+
+  it("POST /projects/:id/search scopes to owned project", async () => {
+    const { status, data } = await api(`/projects/${testProjectId}/search`, {
+      method: "POST",
+      body: { query: "updated multi-tenant test", limit: 5 },
+    });
+    assert.equal(status, 200);
+    assert.ok(Array.isArray(data.results));
+    assert.equal(data.project_id, testProjectId);
   });
 
   it("DELETE /projects/:id deletes", async () => {

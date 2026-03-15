@@ -276,8 +276,9 @@ export function refreshEmbeddingCache(): void {
   log.info({ msg: "embedding_cache_refreshed", total: embeddingCache.length, latest: embeddingCacheLatest.length, episodes: episodeCache.length, ms: Date.now() - t0 });
 }
 
-export function getCachedEmbeddings(latestOnly: boolean): CachedMem[] {
-  return latestOnly ? embeddingCacheLatest : embeddingCache;
+export function getCachedEmbeddings(latestOnly: boolean, userId?: number): CachedMem[] {
+  const rows = latestOnly ? embeddingCacheLatest : embeddingCache;
+  return userId == null ? rows : rows.filter(mem => mem.user_id === userId);
 }
 
 export function addToEmbeddingCache(mem: CachedMem): void {

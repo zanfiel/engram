@@ -35,13 +35,13 @@ export async function consolidateCluster(
 ): Promise<{ summaryId: number; archivedCount: number } | null> {
   if (!LLM_API_KEY) return null;
 
-  const members = getClusterMembers.all(centerMemoryId, centerMemoryId) as Array<any>;
+  const members = getClusterMembers.all(centerMemoryId, userId, userId) as Array<any>;
   if (members.length < CONSOLIDATION_THRESHOLD) return null;
 
   // Check if already consolidated
   const existing = db.prepare(
-    `SELECT id FROM consolidations WHERE source_memory_ids LIKE ?`
-  ).get(`%${centerMemoryId}%`) as any;
+      `SELECT id FROM consolidations WHERE user_id = ? AND source_memory_ids LIKE ?`
+  ).get(userId, `%${centerMemoryId}%`) as any;
   if (existing) return null;
 
   const memberContents = members.map(m =>
@@ -80,12 +80,12 @@ export async function consolidateCluster(
 
     // Track consolidation
     db.prepare(
-      `INSERT INTO consolidations (summary_memory_id, source_memory_ids, cluster_label)
-       VALUES (?, ?, ?)`
-    ).run(summaryMem.id, JSON.stringify(members.map(m => m.id)), result.title);
+       `INSERT INTO consolidations (summary_memory_id, source_memory_ids, user_id, cluster_label)
+        VALUES (?, ?, ?, ?)`
+    ).run(summaryMem.id, JSON.stringify(members.map(m => m.id)), userId, result.title);
 
     writeVec(summaryMem.id, embArray);
-    await autoLink(summaryMem.id, embArray);
+    await autoLink(summaryMem.id, embArray, userId);
     log.info({ msg: "consolidated", archived, summary_id: summaryMem.id, title: result.title });
     return { summaryId: summaryMem.id, archivedCount: archived };
   } catch (e: any) {
@@ -95,7 +95,7 @@ export async function consolidateCluster(
 }
 
 export async function runConsolidationSweep(userId: number = 1): Promise<number> {
-  const candidates = getClusterCandidates.all(CONSOLIDATION_THRESHOLD) as Array<{ source_id: number; link_count: number }>;
+  const candidates = getClusterCandidates.all(userId, CONSOLIDATION_THRESHOLD) as Array<{ source_id: number; link_count: number }>;
   let totalConsolidated = 0;
   for (const c of candidates) {
     const result = await consolidateCluster(c.source_id, userId);

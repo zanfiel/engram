@@ -91,6 +91,8 @@ Conversation episodes as first-class embedded, searchable objects — BGE-large 
 ### Multi-Tenant Data Isolation
 Complete security audit of all cross-tenant boundaries. User-scoped embedding cache, ownership checks on all endpoints, conversation isolation, write scope enforcement, user-scoped stats, and user-filtered graph BFS.
 
+Webhook and digest destinations now share the same public-URL validation, `/sync/receive` resolves by `sync_id` within the authenticated user only, and `/stats` no longer exposes the database path.
+
 ### Guardrails
 `POST /guard` — agents submit proposed actions, Engram checks stored rules for conflicts. Returns `allow`, `warn`, or `block` with matched rule context.
 
