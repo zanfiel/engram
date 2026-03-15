@@ -3670,7 +3670,10 @@ Return JSON:
         const tag = body.tag?.trim().toLowerCase();
         if (!tag) return errorResponse("tag is required");
         const limit = Math.min(Number(body.limit) || 20, 100);
-        const safeTag = tag.replace(/%/g, "\\%").replace(/_/g, "\\_");
+        const safeTag = tag
+          .replace(/\\/g, "\\\\")
+          .replace(/%/g, "\\%")
+          .replace(/_/g, "\\_");
         const results = getByTag.all(`%"${safeTag}"%`, auth.user_id, limit) as any[];
         for (const r of results) {
           try { r.tags = JSON.parse(r.tags); } catch { r.tags = []; }
