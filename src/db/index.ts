@@ -293,7 +293,7 @@ migrate(`
 `);
 
 // Link API keys to agent identities
-migrate("ALTER TABLE api_keys ADD COLUMN agent_id INTEGER REFERENCES agents(id)");
+// NOTE: api_keys.agent_id ALTER deferred until AFTER api_keys CREATE TABLE (v4 schema below)
 
 // Add agent_id + execution signing columns to audit_log
 migrate("ALTER TABLE audit_log ADD COLUMN agent_id INTEGER");
@@ -499,6 +499,9 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_spaces_user ON spaces(user_id);
 `);
 
+// Deferred from agents section: link API keys to agent identities (api_keys now exists)
+migrate("ALTER TABLE api_keys ADD COLUMN agent_id INTEGER REFERENCES agents(id)");
+
 // Scratchpad — short-term working memory with TTL
 migrate(`
   CREATE TABLE IF NOT EXISTS scratchpad (
@@ -519,17 +522,16 @@ migrate(`
   CREATE INDEX IF NOT EXISTS idx_scratchpad_agent ON scratchpad(user_id, agent);
 `);
 
-// v4 migrations — add user_id and space_id columns
+// v4 migrations — add user_id and space_id columns to memories
+// NOTE: conversations ALTER is deferred until AFTER conversations CREATE TABLE (below)
 for (const [tbl, col, def] of [
   ["memories", "user_id", "INTEGER NOT NULL DEFAULT 1"],
   ["memories", "space_id", "INTEGER"],
-  ["conversations", "user_id", "INTEGER NOT NULL DEFAULT 1"],
 ] as const) {
   migrate(`ALTER TABLE ${tbl} ADD COLUMN ${col} ${def}`);
 }
 migrate("CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id)");
 migrate("CREATE INDEX IF NOT EXISTS idx_memories_space ON memories(space_id)");
-migrate("CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id)");
 
 // RBAC: add role column (admin/writer/reader)
 migrate("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'");
@@ -615,6 +617,10 @@ db.exec(`
     VALUES ('delete', old.id, old.content, old.role);
   END;
 `);
+
+// v4 migration (deferred) — add user_id to conversations now that the table exists
+migrate("ALTER TABLE conversations ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1");
+migrate("CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id)");
 
 // ============================================================================
 // PREPARED STATEMENTS — memories (v3)
