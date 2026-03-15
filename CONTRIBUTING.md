@@ -28,30 +28,29 @@ npm run dev
 Engram is a single-process TypeScript server with zero external service dependencies.
 
 ```
-archive/server.ts.legacy-monolith — Archived monolith server (~7400 lines, do not use)
-server-split.ts    — Modular entrypoint (imports from src/)
-mcp-server.ts      — MCP server (JSON-RPC 2.0 stdio transport)
+archive/server.ts.legacy-monolith  (archived monolith, ~7400 lines, do not use)
+server-split.ts    modular entrypoint, imports from src/
+mcp-server.ts      MCP server, JSON-RPC 2.0 stdio transport
 src/
-├── auth/          — API keys, GUI cookies, RBAC
-├── config/        — Environment and runtime configuration
-├── db/            — libsql with FTS5 + FLOAT32 vectors
-├── embeddings/    — BGE-large-en-v1.5 (1024-dim) via raw onnxruntime-node
-├── fsrs/          — FSRS-6 spaced repetition (21 trained weights)
-├── graph/         — Graphology-based knowledge graph + community detection
-├── gui/           — GUI route handlers
-├── helpers/       — Shared utilities
-├── intelligence/  — Fact extraction, consolidation, reflections, contradiction detection
-├── llm/           — LLM client (optional, OpenAI-compatible)
-├── memory/        — Core memory CRUD + versioning
-├── memory/        — Core search (hybrid vector+FTS) and profile generation
-├── organization/  — Tags, episodes, entities, projects, spaces
-├── platform/      — Webhooks, digests, sync, import/export
-├── routes/        — HTTP route definitions
-└── tier4/         — Advanced features (causal chains, predictive recall, valence)
+├── auth/          API keys, GUI cookies, RBAC
+├── config/        environment and runtime configuration
+├── db/            libsql with FTS5 + FLOAT32 vectors
+├── embeddings/    BGE-large-en-v1.5 (1024-dim) via raw onnxruntime-node
+├── fsrs/          FSRS-6 spaced repetition, 21 trained weights
+├── graph/         Graphology-based knowledge graph + community detection
+├── gui/           GUI route handlers
+├── helpers/       shared utilities
+├── intelligence/  fact extraction, consolidation, reflections, contradiction detection
+├── llm/           LLM client (optional, OpenAI-compatible)
+├── memory/        core memory CRUD + versioning, hybrid vector+FTS search, profile generation
+├── organization/  tags, episodes, entities, projects, spaces
+├── platform/      webhooks, digests, sync, import/export
+├── routes/        HTTP route definitions
+└── tier4/         causal chains, predictive recall, valence scoring
 
-engram-gui.html    — WebGL galaxy visualization (standalone HTML)
-engram-login.html  — Login page
-landing.html       — Marketing landing page
+engram-gui.html    WebGL galaxy visualization (standalone HTML)
+engram-login.html  login page
+landing.html       marketing landing page
 ```
 
 ### Key Design Decisions
@@ -117,4 +116,4 @@ We always need more coverage:
 
 ## License
 
-Elastic License 2.0 (ELv2) — see [LICENSE](LICENSE) for details.
+Elastic License 2.0 (ELv2). See [LICENSE](LICENSE) for details.
