@@ -3,7 +3,7 @@
 // Auto-extracted from server.ts.monolith lines 2881-7283
 // ============================================================================
 
-import { readFileSync, statSync, copyFileSync, existsSync, unlinkSync } from "fs";
+import { readFileSync, writeFileSync, statSync, copyFileSync, existsSync, unlinkSync } from "fs";
 import { readFile } from "fs/promises";
 import { randomUUID, timingSafeEqual } from "crypto";
 import { resolve } from "path";
@@ -45,6 +45,8 @@ import {
   insertProject, listProjects, listProjectsByStatus, getProject, getProjectMemories,
   updateProject, deleteProject, linkMemoryProject, unlinkMemoryProject,
   listPending, countPending, approveMemory, rejectMemory, deleteMemory,
+  insertAgent, getAgent as getAgentById, getAgentByName, listAgents, updateAgentTrust,
+  revokeAgent, getAgentByKeyId, linkKeyToAgent, getAgentExecutions,
 } from "../db/index.ts";
 
 // Embeddings
@@ -72,6 +74,10 @@ import { buildDigestPayload, sendDigestWebhook, calculateNextSend, processSchedu
 
 // Helpers
 import { securityHeaders, json, errorResponse, safeError, sanitizeFTS } from "../helpers/index.ts";
+
+// Agent signing
+import { signExecution, verifyExecution, createPassport, verifyPassport, computeTrustScore, generateSigningSecret } from "../../sign/index.ts";
+import { SIGNING_SECRET_FILE } from "../config/index.ts";
 
 // Auth
 import {
@@ -203,6 +209,50 @@ function writeVec(id: number, emb: Float32Array): void {
 }
 
 export { sweepExpiredMemories, backfillEmbeddings, updateDecayScores };
+
+// ── Signing secret (auto-generated on first run) ──────────────────
+let signingSecret: string;
+try {
+  signingSecret = readFileSync(SIGNING_SECRET_FILE, "utf8").trim();
+} catch {
+  signingSecret = generateSigningSecret();
+  writeFileSync(SIGNING_SECRET_FILE, signingSecret, "utf8");
+  log.info({ msg: "signing_secret_generated" });
+}
+
+/** Update agent trust score from current stats */
+function refreshAgentTrust(agentId: number): void {
+  const agent = db.prepare("SELECT * FROM agents WHERE id = ?").get(agentId) as any;
+  if (!agent) return;
+  const score = computeTrustScore({
+    total_ops: agent.total_ops,
+    successful_ops: agent.successful_ops,
+    failed_ops: agent.failed_ops,
+    guard_allows: agent.guard_allows,
+    guard_warns: agent.guard_warns,
+    guard_blocks: agent.guard_blocks,
+  });
+  updateAgentTrust.run(score, agent.total_ops, agent.successful_ops, agent.failed_ops, agent.guard_allows, agent.guard_warns, agent.guard_blocks, agentId);
+}
+
+/** Record an operation for an agent and recalculate trust */
+function recordAgentOp(agentId: number | null, success: boolean): void {
+  if (!agentId) return;
+  if (success) {
+    db.prepare("UPDATE agents SET total_ops = total_ops + 1, successful_ops = successful_ops + 1 WHERE id = ?").run(agentId);
+  } else {
+    db.prepare("UPDATE agents SET total_ops = total_ops + 1, failed_ops = failed_ops + 1 WHERE id = ?").run(agentId);
+  }
+  refreshAgentTrust(agentId);
+}
+
+/** Record a guard result for an agent */
+function recordAgentGuard(agentId: number | null, signal: "allow" | "warn" | "block"): void {
+  if (!agentId) return;
+  const col = signal === "allow" ? "guard_allows" : signal === "warn" ? "guard_warns" : "guard_blocks";
+  db.prepare(`UPDATE agents SET ${col} = ${col} + 1 WHERE id = ?`).run(agentId);
+  refreshAgentTrust(agentId);
+}
 
 let _currentClientIp = "unknown";
 export function setClientIp(ip: string) { _currentClientIp = ip; }
@@ -581,6 +631,7 @@ async function fetchHandler(req: Request): Promise<Response> {
       const taggedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE tags IS NOT NULL AND is_forgotten = 0").get() as { count: number };
       const entityCount = db.prepare("SELECT COUNT(*) as count FROM entities").get() as { count: number };
       const projectCount = db.prepare("SELECT COUNT(*) as count FROM projects").get() as { count: number };
+      const agentCount = db.prepare("SELECT COUNT(*) as count FROM agents WHERE is_active = 1").get() as { count: number };
       const dbSize = statSync(DB_PATH).size;
       return json({
         status: "ok",
@@ -600,6 +651,7 @@ async function fetchHandler(req: Request): Promise<Response> {
         consolidations: consolidationCount.count,
         entities: entityCount.count,
         projects: projectCount.count,
+        agents: agentCount.count,
         conversations: convCount.count,
         messages: msgCount.count,
         embedding_model: EMBEDDING_MODEL,
@@ -636,6 +688,9 @@ async function fetchHandler(req: Request): Promise<Response> {
           smart_context: true,
           reflections: isLLMAvailable(),
           scheduled_digests: true,
+          agent_identity: true,
+          trust_scoring: true,
+          execution_signing: true,
         },
         db_size_mb: Math.round(dbSize / 1048576 * 100) / 100,
       });
@@ -3519,7 +3574,135 @@ Return JSON:
     }
 
     // ========================================================================
-    // GUARDRAILS — pre-action conflict check against stored rules
+    // AGENT IDENTITY — registration, trust scoring, passports
+    // ========================================================================
+
+    if (url.pathname === "/agents" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const body = await req.json() as any;
+        const { name, category, description, code_hash } = body;
+        if (!name || typeof name !== "string") return errorResponse("name (string) required");
+
+        // Check if agent already exists for this user
+        const existing = getAgentByName.get(name, auth.user_id) as any;
+        if (existing) return errorResponse(`Agent '${name}' already registered`, 409);
+
+        const row = insertAgent.get(auth.user_id, name, category || null, description || null, code_hash || null) as any;
+
+        // Auto-link to the current API key if authenticated with one
+        if (auth.key_id) {
+          linkKeyToAgent.run(row.id, auth.key_id, auth.user_id);
+        }
+
+        audit(auth.user_id, "agent.register", "agent", row.id, name, clientIp, requestId, row.id);
+        return json({ agent_id: row.id, name, trust_score: row.trust_score, created_at: row.created_at }, 201);
+      } catch (e: any) {
+        return safeError("agent register", e);
+      }
+    }
+
+    if (url.pathname === "/agents" && method === "GET") {
+      try {
+        const agents = listAgents.all(auth.user_id) as any[];
+        return json({ agents });
+      } catch (e: any) {
+        return safeError("list agents", e);
+      }
+    }
+
+    // GET /agents/:id
+    {
+      const agentMatch = url.pathname.match(/^\/agents\/(\d+)$/);
+      if (agentMatch && method === "GET") {
+        const agentId = Number(agentMatch[1]);
+        const agent = getAgentById.get(agentId, auth.user_id) as any;
+        if (!agent) return errorResponse("Agent not found", 404);
+        const { code_hash, ...safe } = agent;
+        return json(safe);
+      }
+
+      // POST /agents/:id/revoke
+      if (agentMatch && method === "POST" && url.pathname.endsWith("/revoke")) {
+        // already matched by agentMatch — need separate pattern
+      }
+    }
+
+    {
+      const revokeMatch = url.pathname.match(/^\/agents\/(\d+)\/revoke$/);
+      if (revokeMatch && method === "POST") {
+        if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+        const agentId = Number(revokeMatch[1]);
+        const body = await req.json().catch(() => ({})) as any;
+        const reason = body.reason || "revoked";
+        revokeAgent.run(reason, agentId, auth.user_id);
+        audit(auth.user_id, "agent.revoke", "agent", agentId, reason, clientIp, requestId, agentId);
+        return json({ revoked: true, agent_id: agentId });
+      }
+    }
+
+    // GET /agents/:id/passport
+    {
+      const passportMatch = url.pathname.match(/^\/agents\/(\d+)\/passport$/);
+      if (passportMatch && method === "GET") {
+        const agentId = Number(passportMatch[1]);
+        const agent = getAgentById.get(agentId, auth.user_id) as any;
+        if (!agent) return errorResponse("Agent not found", 404);
+        if (!agent.is_active) return errorResponse("Agent is revoked", 403);
+        const passport = createPassport(signingSecret, agent);
+        return json(passport);
+      }
+    }
+
+    // POST /agents/:id/link-key — link an API key to this agent
+    {
+      const linkMatch = url.pathname.match(/^\/agents\/(\d+)\/link-key$/);
+      if (linkMatch && method === "POST") {
+        if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+        const agentId = Number(linkMatch[1]);
+        const body = await req.json() as any;
+        const keyId = body.key_id;
+        if (!keyId) return errorResponse("key_id required");
+        const agent = getAgentById.get(agentId, auth.user_id) as any;
+        if (!agent) return errorResponse("Agent not found", 404);
+        linkKeyToAgent.run(agentId, keyId, auth.user_id);
+        return json({ linked: true, agent_id: agentId, key_id: keyId });
+      }
+    }
+
+    // GET /agents/:id/executions — signed execution history
+    {
+      const execMatch = url.pathname.match(/^\/agents\/(\d+)\/executions$/);
+      if (execMatch && method === "GET") {
+        const agentId = Number(execMatch[1]);
+        const agent = getAgentById.get(agentId, auth.user_id) as any;
+        if (!agent) return errorResponse("Agent not found", 404);
+        const limit = Number(url.searchParams.get("limit") || 50);
+        const executions = getAgentExecutions.all(agentId, limit) as any[];
+        return json({ agent_id: agentId, executions });
+      }
+    }
+
+    // POST /verify — verify a signed execution or passport
+    if (url.pathname === "/verify" && method === "POST") {
+      try {
+        const body = await req.json() as any;
+        if (body.passport) {
+          const result = verifyPassport(signingSecret, body.passport);
+          return json({ type: "passport", ...result });
+        }
+        if (body.execution) {
+          const valid = verifyExecution(signingSecret, body.execution);
+          return json({ type: "execution", valid });
+        }
+        return errorResponse("Provide 'passport' or 'execution' object to verify");
+      } catch (e: any) {
+        return safeError("verify", e);
+      }
+    }
+
+    // ========================================================================
+    // GUARDRAILS — pre-action conflict check against stored rules + trust
     // ========================================================================
 
     function heuristicGuard(action: string, rules: Array<{ content: string; score: number; importance: number }>): "allow" | "warn" | "block" {
@@ -3544,8 +3727,19 @@ Return JSON:
         const results = await hybridSearch(action, 20, false, false, true, auth.user_id);
         const rules = results.filter(r => r.is_static && r.importance >= 8);
 
+        // Get agent trust score if identified
+        let trustScore: number | null = null;
+        if (auth.agent_id) {
+          const agent = db.prepare("SELECT trust_score FROM agents WHERE id = ?").get(auth.agent_id) as any;
+          if (agent) trustScore = agent.trust_score;
+        }
+
         if (rules.length === 0) {
-          return json({ signal: "allow", action, rules: [], message: "No conflicting rules found." });
+          // Record clean guard pass
+          recordAgentGuard(auth.agent_id, "allow");
+          const exec = auth.agent_id ? signExecution(signingSecret, auth.agent_id, "guard", { action }, { signal: "allow" }) : null;
+          if (exec) audit(auth.user_id, "guard", null, null, "allow", clientIp, requestId, auth.agent_id, exec.execution_hash, exec.signature);
+          return json({ signal: "allow", action, rules: [], message: "No conflicting rules found.", trust_score: trustScore, execution: exec });
         }
 
         // Ask LLM if any rules conflict with the proposed action
@@ -3554,30 +3748,45 @@ Return JSON:
 
         if (isLLMAvailable()) {
           try {
+            const trustContext = trustScore !== null ? `\nAGENT TRUST SCORE: ${trustScore}/100 (${trustScore < 30 ? "LOW — be strict" : trustScore < 70 ? "MODERATE" : "HIGH — earned trust"})` : "";
             const rulesText = rules.slice(0, 5).map((r, i) => `RULE ${i + 1} (importance ${r.importance}): ${r.content}`).join("\n\n");
             const llmResult = await callLLM(
-              `You are a guardrail system. Given an agent's PROPOSED ACTION and a set of RULES from memory, determine if the action conflicts with any rule. Respond with ONLY one of: BLOCK (action directly violates a rule), WARN (action is related to a rule and should proceed with caution), or ALLOW (no conflict). After the signal word, write a brief explanation on the same line.`,
-              `PROPOSED ACTION: ${action}\n\nRULES:\n${rulesText}`
+              `You are a guardrail system. Given an agent's PROPOSED ACTION and a set of RULES from memory, determine if the action conflicts with any rule. Respond with ONLY one of: BLOCK (action directly violates a rule), WARN (action is related to a rule and should proceed with caution), or ALLOW (no conflict). After the signal word, write a brief explanation on the same line.${trustContext ? " Factor the agent's trust score into borderline decisions — low-trust agents should get WARN or BLOCK more readily." : ""}`,
+              `PROPOSED ACTION: ${action}\n\nRULES:\n${rulesText}${trustContext}`
             );
             const first = llmResult.trim().split("\n")[0].toUpperCase();
             if (first.startsWith("BLOCK")) { signal = "block"; message = llmResult.trim(); }
             else if (first.startsWith("ALLOW")) { signal = "allow"; message = llmResult.trim(); }
             else { signal = "warn"; message = llmResult.trim(); }
           } catch {
-            // LLM unavailable — semantic + keyword heuristic
             signal = heuristicGuard(action, rules);
             message = signal !== "allow" ? "Rule conflict detected (semantic + keyword heuristic). Review the rules before proceeding." : "No conflicts detected (LLM unavailable for deeper analysis).";
           }
         } else {
           signal = heuristicGuard(action, rules);
-          message = signal !== "allow" ? "Rule conflict detected (semantic + keyword heuristic). Review the rules before proceeding." : "No conflicts detected.";
+          // Trust-based escalation: low-trust agent + heuristic warn → block
+          if (trustScore !== null && trustScore < 30 && signal === "warn") {
+            signal = "block";
+            message = `Blocked: low trust score (${trustScore}) combined with rule conflict.`;
+          } else {
+            message = signal !== "allow" ? "Rule conflict detected (semantic + keyword heuristic). Review the rules before proceeding." : "No conflicts detected.";
+          }
         }
+
+        // Record guard result for trust scoring
+        recordAgentGuard(auth.agent_id, signal);
+
+        // Sign the guard execution
+        const exec = auth.agent_id ? signExecution(signingSecret, auth.agent_id, "guard", { action }, { signal, rules_matched: rules.length }) : null;
+        if (exec) audit(auth.user_id, "guard", null, null, signal, clientIp, requestId, auth.agent_id, exec.execution_hash, exec.signature);
 
         return json({
           signal,
           action,
           message,
+          trust_score: trustScore,
           rules: rules.slice(0, 5).map(r => ({ id: r.id, content: r.content, importance: r.importance })),
+          execution: exec,
         });
       } catch (e: any) {
         return safeError("guard check", e);

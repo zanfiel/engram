@@ -10,6 +10,7 @@ export interface AuthContext {
   user_id: number;
   space_id: number | null;
   key_id: number | null;
+  agent_id: number | null;
   scopes: string[];
   is_admin: boolean;
 }
@@ -31,7 +32,7 @@ export function authenticate(req: Request): AuthContext | AuthError | null {
   const hash = createHash("sha256").update(key).digest("hex");
 
   const row = db.prepare(
-    `SELECT ak.id, ak.user_id, ak.scopes, ak.rate_limit, u.is_admin, u.role
+    `SELECT ak.id, ak.user_id, ak.scopes, ak.rate_limit, ak.agent_id, u.is_admin, u.role
      FROM api_keys ak JOIN users u ON ak.user_id = u.id
      WHERE ak.key_prefix = ? AND ak.key_hash = ? AND ak.is_active = 1`
   ).get(prefix, hash) as any;
@@ -74,10 +75,18 @@ export function authenticate(req: Request): AuthContext | AuthError | null {
     effectiveScopes = keyScopes.filter((s: string) => s !== "admin");
   }
 
+  // Resolve agent identity — check if key is linked to an active agent
+  let agent_id: number | null = row.agent_id ?? null;
+  if (agent_id) {
+    const agent = db.prepare("SELECT id FROM agents WHERE id = ? AND is_active = 1").get(agent_id) as any;
+    if (!agent) agent_id = null; // agent revoked, unlink
+  }
+
   return {
     user_id: row.user_id,
     space_id,
     key_id: row.id,
+    agent_id,
     scopes: effectiveScopes,
     is_admin: !!row.is_admin && role === "admin",
   };
@@ -89,11 +98,11 @@ export function getAuthOrDefault(req: Request, guiAuthed: (req: Request) => bool
   if (auth) return auth;
   // GUI cookie auth
   if (guiAuthed(req)) {
-    return { user_id: 1, space_id: null, key_id: null, scopes: ["read", "write"], is_admin: false };
+    return { user_id: 1, space_id: null, key_id: null, agent_id: null, scopes: ["read", "write"], is_admin: false };
   }
   if (OPEN_ACCESS) {
     // S7 FIX: OPEN_ACCESS grants read+write but NOT admin
-    return { user_id: 1, space_id: null, key_id: null, scopes: ["read", "write"], is_admin: false };
+    return { user_id: 1, space_id: null, key_id: null, agent_id: null, scopes: ["read", "write"], is_admin: false };
   }
   return null;
 }

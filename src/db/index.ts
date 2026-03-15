@@ -262,11 +262,47 @@ migrate("CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DE
 migrate("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action)");
 migrate("CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_log(target_type, target_id)");
 
+// v5.8 — Agent Identity & Trust
+migrate(`
+  CREATE TABLE IF NOT EXISTS agents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    category TEXT,
+    description TEXT,
+    code_hash TEXT,
+    trust_score REAL NOT NULL DEFAULT 50,
+    total_ops INTEGER NOT NULL DEFAULT 0,
+    successful_ops INTEGER NOT NULL DEFAULT 0,
+    failed_ops INTEGER NOT NULL DEFAULT 0,
+    guard_allows INTEGER NOT NULL DEFAULT 0,
+    guard_warns INTEGER NOT NULL DEFAULT 0,
+    guard_blocks INTEGER NOT NULL DEFAULT 0,
+    is_active BOOLEAN NOT NULL DEFAULT 1,
+    revoked_at TEXT,
+    revoke_reason TEXT,
+    last_seen_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(user_id, name)
+  );
+  CREATE INDEX IF NOT EXISTS idx_agents_user ON agents(user_id);
+  CREATE INDEX IF NOT EXISTS idx_agents_active ON agents(is_active);
+`);
+
+// Link API keys to agent identities
+migrate("ALTER TABLE api_keys ADD COLUMN agent_id INTEGER REFERENCES agents(id)");
+
+// Add agent_id + execution signing columns to audit_log
+migrate("ALTER TABLE audit_log ADD COLUMN agent_id INTEGER");
+migrate("ALTER TABLE audit_log ADD COLUMN execution_hash TEXT");
+migrate("ALTER TABLE audit_log ADD COLUMN signature TEXT");
+migrate("CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_log(agent_id)");
+
 export const insertAudit = db.prepare(
-  "INSERT INTO audit_log (user_id, action, target_type, target_id, details, ip, request_id) VALUES (?, ?, ?, ?, ?, ?, ?)"
+  "INSERT INTO audit_log (user_id, action, target_type, target_id, details, ip, request_id, agent_id, execution_hash, signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 );
-export function audit(userId: number | null, action: string, targetType: string | null, targetId: number | null, details: string | null, ip: string | null, requestId: string | null) {
-  try { insertAudit.run(userId, action, targetType, targetId, details, ip, requestId); } catch (e: any) { log.warn({ msg: "audit_write_fail", action, error: String(e).slice(0, 200) }); }
+export function audit(userId: number | null, action: string, targetType: string | null, targetId: number | null, details: string | null, ip: string | null, requestId: string | null, agentId?: number | null, executionHash?: string | null, signature?: string | null) {
+  try { insertAudit.run(userId, action, targetType, targetId, details, ip, requestId, agentId ?? null, executionHash ?? null, signature ?? null); } catch (e: any) { log.warn({ msg: "audit_write_fail", action, error: String(e).slice(0, 200) }); }
 }
 
 // v4.3 — Entities, Projects
@@ -1204,4 +1240,44 @@ export const getTemporalPatternsForNow = db.prepare(
    LEFT JOIN projects p ON tp.project_id = p.id
    WHERE tp.user_id = ? AND tp.day_of_week = ? AND tp.hour_of_day = ?
    ORDER BY tp.access_count DESC LIMIT ?`
+);
+
+// ============================================================================
+// AGENT IDENTITY — prepared statements
+// ============================================================================
+
+export const insertAgent = db.prepare(
+  `INSERT INTO agents (user_id, name, category, description, code_hash) VALUES (?, ?, ?, ?, ?) RETURNING id, trust_score, created_at`
+);
+
+export const getAgent = db.prepare(
+  `SELECT * FROM agents WHERE id = ? AND user_id = ?`
+);
+
+export const getAgentByName = db.prepare(
+  `SELECT * FROM agents WHERE name = ? AND user_id = ?`
+);
+
+export const listAgents = db.prepare(
+  `SELECT id, name, category, description, trust_score, total_ops, successful_ops, failed_ops, guard_allows, guard_warns, guard_blocks, is_active, last_seen_at, created_at FROM agents WHERE user_id = ? ORDER BY created_at DESC`
+);
+
+export const updateAgentTrust = db.prepare(
+  `UPDATE agents SET trust_score = ?, total_ops = ?, successful_ops = ?, failed_ops = ?, guard_allows = ?, guard_warns = ?, guard_blocks = ?, last_seen_at = datetime('now') WHERE id = ?`
+);
+
+export const revokeAgent = db.prepare(
+  `UPDATE agents SET is_active = 0, revoked_at = datetime('now'), revoke_reason = ?, trust_score = 0 WHERE id = ? AND user_id = ?`
+);
+
+export const getAgentByKeyId = db.prepare(
+  `SELECT a.* FROM agents a JOIN api_keys ak ON ak.agent_id = a.id WHERE ak.id = ? AND a.is_active = 1`
+);
+
+export const linkKeyToAgent = db.prepare(
+  `UPDATE api_keys SET agent_id = ? WHERE id = ? AND user_id = ?`
+);
+
+export const getAgentExecutions = db.prepare(
+  `SELECT id, action, target_type, target_id, details, execution_hash, signature, created_at FROM audit_log WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?`
 );

@@ -35,3 +35,5 @@ query.ts
 *.cmd
 sync-to-fallback.sh
 import-opencode.py
+backup-debug-*/
+backup-auditfix-*/
