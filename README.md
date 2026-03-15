@@ -8,7 +8,7 @@ Store, search, recall, and link memories with automatic embeddings,
 fact extraction, versioning, deduplication, and graph visualization.
 
 [![License: Elastic-2.0](https://img.shields.io/badge/License-Elastic--2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-5.7.0-gold.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-5.7.2-gold.svg)](CHANGELOG.md)
 
 [Quick Start](#quick-start) · [API Reference](#api-reference) · [SDKs](#sdks) · [MCP Server](#mcp-server) · [CLI](#cli) · [Self-Host](#self-hosting) · [GUI](#gui)
 
@@ -20,7 +20,7 @@ fact extraction, versioning, deduplication, and graph visualization.
 
 ## What is Engram?
 
-Engram gives your AI agents **long-term memory**. Instead of losing context between sessions, agents store what they learn and recall it when relevant — automatically.
+Engram gives your AI agents **long-term memory**. Instead of losing context between sessions, agents store what they learn and recall it when relevant - automatically.
 
 ```bash
 # Store what the agent learns
@@ -29,7 +29,7 @@ curl -X POST http://localhost:4200/store \
   -H "Content-Type: application/json" \
   -d '{"content": "User prefers dark mode and uses Vim keybindings", "category": "decision", "importance": 8}'
 
-# Later, in a new session — recall relevant context
+# Later, in a new session - recall relevant context
 curl -X POST http://localhost:4200/recall \
   -H "Authorization: Bearer eg_your_key" \
   -H "Content-Type: application/json" \
@@ -39,44 +39,44 @@ curl -X POST http://localhost:4200/recall \
 
 **Key features:**
 
-- 🧠 **FSRS-6 spaced repetition** — cognitive science-backed memory decay using power-law forgetting curves (ported from [open-spaced-repetition](https://github.com/open-spaced-repetition/fsrs4anki))
-- 💪 **Dual-strength memory model** — Bjork & Bjork (1992) storage strength (never decays) + retrieval strength (decays via power law)
-- 🧬 **Hybrid semantic + full-text search** — BGE-large 1024-dim embeddings via raw ONNX inference (no external APIs) combined with FTS5 full-text search
-- 🔗 **Auto-linking** — memories automatically connect via cosine similarity, forming a knowledge graph
-- 📊 **Graph visualization** — explore your memory space in a WebGL galaxy
-- 🔄 **Versioning** — update memories without losing history
-- 🧹 **Auto-deduplication** — detects and merges near-duplicate memories
-- ⏰ **Implicit spaced repetition** — every access is an FSRS review, building stability over time
-- 🔍 **Fact extraction & auto-tagging** — LLM extracts facts, classifies, tags (optional, requires LLM)
-- 💬 **Conversation extraction** — feed chat logs, get structured memories
-- ⚡ **Contradiction detection** — find and resolve conflicting memories
-- ⏪ **Time-travel queries** — query what you knew at any point in time
-- 🎯 **Smart context builder** — token-budget-aware RAG context assembly
-- 💭 **Reflections** — periodic meta-analysis that becomes searchable memory
-- 🧬 **Derived memories** — inference engine finds patterns across memories
-- 🗜️ **Auto-consolidation** — summarize large memory clusters automatically
-- 🏆 **LLM reranker** — search results reranked for semantic precision (optional)
-- 👥 **Multi-tenant** — isolated memory per user with API keys
-- 📖 **Episodic memory** — store conversation episodes as embedded, searchable narratives with temporal + semantic search. Facts link to source episodes.
-- 🚫 **Abstention** — search returns `abstained: true` when confidence is below threshold. The system knows when it doesn't know.
-- 🤖 **Assistant recall** — extracts what the AI said/did, not just user facts. LLM + regex patterns for assistant actions.
-- ⏳ **Temporal search** — `temporal_sort` orders results chronologically. Episode search by date range.
-- 🔗 **2-hop graph traversal** — relationship expansion reaches 2 levels deep for multi-hop reasoning
-- 🧩 **Implicit connection inference** — LLM post-processing in /context finds unstated relationships between memories
-- 🛡️ **Guardrails** — `POST /guard` checks proposed actions against stored rules before execution. Returns allow/warn/block. Prevents repeated deployment mistakes, outdated references, and policy violations.
-- 📦 **Spaces, tags, episodes** — organize memories into named collections
-- 🧩 **Entities & projects** — track people, servers, tools, projects
-- 📬 **Webhooks & digests** — event hooks + scheduled HMAC-signed summaries
-- 🔄 **Sync & import** — cross-instance sync, import from Mem0 / Supermemory
-- 📥 **URL ingest** — extract facts from web pages or text blobs
-- 🛠️ **MCP server** — JSON-RPC 2.0 stdio transport for Claude Desktop, Cursor, Windsurf
-- ⌨️ **CLI** — full-featured command-line interface (`engram store`, `engram search`, etc.)
-- 📥 **Review queue / inbox** — auto-detected memories land in review; explicit stores bypass
-- 🔒 **Security hardening** — auth required by default, body/content limits, IP allowlists, timing-safe auth
-- 📋 **Audit trail** — every mutation logged (who, what, when, from where)
-- 📊 **Structured JSON logging** — configurable log levels, request IDs, zero raw console output
-- 💾 **Backup & checkpoint** — download SQLite DB via API, manual WAL checkpoint, graceful shutdown
-- 🐳 **One-command deploy** — `docker compose up`
+- 🧠 **FSRS-6 spaced repetition** - cognitive science-backed memory decay using power-law forgetting curves (ported from [open-spaced-repetition](https://github.com/open-spaced-repetition/fsrs4anki))
+- 💪 **Dual-strength memory model** - Bjork & Bjork (1992) storage strength (never decays) + retrieval strength (decays via power law)
+- 🧬 **Hybrid semantic + full-text search** - BGE-large 1024-dim embeddings via raw ONNX inference (no external APIs) combined with FTS5 full-text search
+- 🔗 **Auto-linking** - memories automatically connect via cosine similarity, forming a knowledge graph
+- 📊 **Graph visualization** - explore your memory space in a WebGL galaxy
+- 🔄 **Versioning** - update memories without losing history
+- 🧹 **Auto-deduplication** - detects and merges near-duplicate memories
+- ⏰ **Implicit spaced repetition** - every access is an FSRS review, building stability over time
+- 🔍 **Fact extraction & auto-tagging** - LLM extracts facts, classifies, tags (optional, requires LLM)
+- 💬 **Conversation extraction** - feed chat logs, get structured memories
+- ⚡ **Contradiction detection** - find and resolve conflicting memories
+- ⏪ **Time-travel queries** - query what you knew at any point in time
+- 🎯 **Smart context builder** - token-budget-aware RAG context assembly
+- 💭 **Reflections** - periodic meta-analysis that becomes searchable memory
+- 🧬 **Derived memories** - inference engine finds patterns across memories
+- 🗜️ **Auto-consolidation** - summarize large memory clusters automatically
+- 🏆 **LLM reranker** - search results reranked for semantic precision (optional)
+- 👥 **Multi-tenant** - isolated memory per user with API keys
+- 📖 **Episodic memory** - store conversation episodes as embedded, searchable narratives with temporal + semantic search. Facts link to source episodes.
+- 🚫 **Abstention** - search returns `abstained: true` when confidence is below threshold. The system knows when it doesn't know.
+- 🤖 **Assistant recall** - extracts what the AI said/did, not just user facts. LLM + regex patterns for assistant actions.
+- ⏳ **Temporal search** - `temporal_sort` orders results chronologically. Episode search by date range.
+- 🔗 **2-hop graph traversal** - relationship expansion reaches 2 levels deep for multi-hop reasoning
+- 🧩 **Implicit connection inference** - LLM post-processing in /context finds unstated relationships between memories
+- 🛡️ **Guardrails** - `POST /guard` checks proposed actions against stored rules before execution. Returns allow/warn/block. Prevents repeated deployment mistakes, outdated references, and policy violations.
+- 📦 **Spaces, tags, episodes** - organize memories into named collections
+- 🧩 **Entities & projects** - track people, servers, tools, projects
+- 📬 **Webhooks & digests** - event hooks + scheduled HMAC-signed summaries
+- 🔄 **Sync & import** - cross-instance sync, import from Mem0 / Supermemory
+- 📥 **URL ingest** - extract facts from web pages or text blobs
+- 🛠️ **MCP server** - JSON-RPC 2.0 stdio transport for Claude Desktop, Cursor, Windsurf
+- ⌨️ **CLI** - full-featured command-line interface (`engram store`, `engram search`, etc.)
+- 📥 **Review queue / inbox** - auto-detected memories land in review; explicit stores bypass
+- 🔒 **Security hardening** - auth required by default, body/content limits, IP allowlists, timing-safe auth
+- 📋 **Audit trail** - every mutation logged (who, what, when, from where)
+- 📊 **Structured JSON logging** - configurable log levels, request IDs, zero raw console output
+- 💾 **Backup & checkpoint** - download SQLite DB via API, manual WAL checkpoint, graceful shutdown
+- 🐳 **One-command deploy** - `docker compose up`
 
 ---
 
@@ -86,7 +86,7 @@ curl -X POST http://localhost:4200/recall \
 Replaced MiniLM-L6-v2 (384-dim) with **BGE-large-en-v1.5** (1024-dim) using raw `onnxruntime-node` and a hand-written BERT WordPiece tokenizer. 1024 dimensions, 512-token context, quantized INT8 (337MB, sub-200ms on CPU). Auto-migration re-embeds existing vectors on first startup.
 
 ### Episodic Memory
-Conversation episodes as first-class embedded, searchable objects — BGE-large embeddings, FTS5 search, temporal date-range queries, semantic search, `POST /episodes/:id/finalize` for narrative summaries, FSRS decay, and automatic `/context` injection.
+Conversation episodes as first-class embedded, searchable objects - BGE-large embeddings, FTS5 search, temporal date-range queries, semantic search, `POST /episodes/:id/finalize` for narrative summaries, FSRS decay, and automatic `/context` injection.
 
 ### Multi-Tenant Data Isolation
 Complete security audit of all cross-tenant boundaries. User-scoped embedding cache, ownership checks on all endpoints, conversation isolation, write scope enforcement, user-scoped stats, and user-filtered graph BFS.
@@ -94,7 +94,7 @@ Complete security audit of all cross-tenant boundaries. User-scoped embedding ca
 Webhook and digest destinations now share the same public-URL validation, `/sync/receive` resolves by `sync_id` within the authenticated user only, and `/stats` no longer exposes the database path.
 
 ### Guardrails
-`POST /guard` — agents submit proposed actions, Engram checks stored rules for conflicts. Returns `allow`, `warn`, or `block` with matched rule context.
+`POST /guard` - agents submit proposed actions, Engram checks stored rules for conflicts. Returns `allow`, `warn`, or `block` with matched rule context.
 
 ### Benchmark Features
 Abstention (`ENGRAM_SEARCH_MIN_SCORE`), assistant recall (LLM + regex extraction of AI actions), temporal sort, 2-hop graph traversal, implicit connection inference in `/context`.
@@ -105,23 +105,23 @@ Monolith `server.ts` replaced by `server-split.ts` + modular `src/routes/`.
 <details>
 <summary><strong>Previous releases</strong></summary>
 
-#### v5.6 — Node.js 22, Graph Intelligence
+#### v5.6 - Node.js 22, Graph Intelligence
 - Node.js 22+ as primary runtime (`--experimental-strip-types`), Bun maintained for compatibility
 - Optimized MCP server (529 → 168 lines), vitest framework (76+ tests)
-- Graphology knowledge graph — centrality, shortest paths, community detection, relationship inference
+- Graphology knowledge graph - centrality, shortest paths, community detection, relationship inference
 
-#### v5.5 — Intelligence Layer
+#### v5.5 - Intelligence Layer
 - LLM fact extraction, auto-tagging, relationship classification
 - Conversation extraction, URL ingest, reflections, derived memories, auto-consolidation
-- MCP server improvements — error handling, streaming, tool introspection
+- MCP server improvements - error handling, streaming, tool introspection
 
-#### v5.3 — Security Hardening
+#### v5.3 - Security Hardening
 - Auth required by default, rate limit fix, body size limits
 - GUI auth rate limiting, timing-safe password comparison
 - Security headers, CORS origin pinning, IP allowlisting
 - Audit trail, structured JSON logging
 
-#### v5.0 — FSRS-6 Spaced Repetition
+#### v5.0 - FSRS-6 Spaced Repetition
 - 21-parameter power-law forgetting curve (ported from open-spaced-repetition/fsrs4anki)
 - Dual-strength model (Bjork & Bjork 1992): storage strength + retrieval strength
 - Formula: `R = (1 + factor * t/S)^(-w20)`
@@ -138,14 +138,14 @@ Monolith `server.ts` replaced by `server-split.ts` + modular `src/routes/`.
 git clone https://github.com/zanfiel/engram.git
 cd engram
 cp .env.example .env
-# Edit .env — set ENGRAM_GUI_PASSWORD
+# Edit .env - set ENGRAM_GUI_PASSWORD
 
 docker compose up -d
 ```
 
 Engram is now running at `http://localhost:4200`.
 
-### From source (Node.js 22+ — recommended)
+### From source (Node.js 22+ - recommended)
 
 ```bash
 git clone https://github.com/zanfiel/engram.git
@@ -154,7 +154,7 @@ npm install
 ENGRAM_GUI_PASSWORD=your-password node --experimental-strip-types server-split.ts
 ```
 
-### From source (Bun — legacy)
+### From source (Bun - legacy)
 
 ```bash
 git clone https://github.com/zanfiel/engram.git
@@ -171,7 +171,7 @@ curl -X POST http://localhost:4200/keys \
   -d '{"name": "my-agent", "scopes": "read,write"}'
 ```
 
-Save the returned `eg_...` key — it's shown only once.
+Save the returned `eg_...` key - it's shown only once.
 
 ---
 
@@ -179,7 +179,7 @@ Save the returned `eg_...` key — it's shown only once.
 
 ### TypeScript / JavaScript
 
-The SDK lives in `sdk/` within the repo. Zero dependencies — uses native `fetch`.
+The SDK lives in `sdk/` within the repo. Zero dependencies - uses native `fetch`.
 
 ```bash
 cd sdk && npm install && npm run build
@@ -211,7 +211,7 @@ const recent = await engram.list({ limit: 10, category: "task" });
 // Update (creates new version)
 await engram.update(result.id, "Deployed v2.4 to production");
 
-// FSRS state — check memory health
+// FSRS state - check memory health
 const fsrs = await engram.fsrsState(result.id);
 // → { retrievability: 0.95, stability: 4.2, next_review_days: 4 }
 
@@ -505,25 +505,25 @@ Use `X-Space: space-name` (or `X-Engram-Space`) header to scope operations to a 
 
 ### Memory Lifecycle
 
-1. **Store** — Memory content is embedded using BGE-large-en-v1.5 (1024-dim vectors, runs locally via ONNX) and stored in libsql with FTS5 full-text indexing.
+1. **Store** - Memory content is embedded using BGE-large-en-v1.5 (1024-dim vectors, runs locally via ONNX) and stored in libsql with FTS5 full-text indexing.
 
-2. **Auto-link** — New memories are compared against existing ones via in-memory cosine similarity. Memories above 0.7 similarity are linked with typed relationships (similarity, updates, extends, contradicts, caused_by, prerequisite_for).
+2. **Auto-link** - New memories are compared against existing ones via in-memory cosine similarity. Memories above 0.7 similarity are linked with typed relationships (similarity, updates, extends, contradicts, caused_by, prerequisite_for).
 
-3. **FSRS-6 initialization** — Each new memory gets initial FSRS state: stability, difficulty, storage strength, retrieval strength. The power-law forgetting curve starts tracking retrievability.
+3. **FSRS-6 initialization** - Each new memory gets initial FSRS state: stability, difficulty, storage strength, retrieval strength. The power-law forgetting curve starts tracking retrievability.
 
-4. **Fact extraction** — If an LLM is configured, Engram analyzes new memories, extracts static facts, auto-tags with keywords, classifies importance, and detects relationships to existing memories.
+4. **Fact extraction** - If an LLM is configured, Engram analyzes new memories, extracts static facts, auto-tags with keywords, classifies importance, and detects relationships to existing memories.
 
-5. **Recall** — Four retrieval strategies combined: static facts (always), semantic matches (cosine similarity), high-importance (weighted by FSRS retrievability), recent (temporal). Every recalled memory gets an implicit FSRS review, building stability.
+5. **Recall** - Four retrieval strategies combined: static facts (always), semantic matches (cosine similarity), high-importance (weighted by FSRS retrievability), recent (temporal). Every recalled memory gets an implicit FSRS review, building stability.
 
-6. **Spaced repetition** — Each access is an FSRS-6 review graded as "Good". Archived/forgotten memories receive an "Again" grade. Stability grows with successful recalls — frequently accessed memories can have stability measured in months or years.
+6. **Spaced repetition** - Each access is an FSRS-6 review graded as "Good". Archived/forgotten memories receive an "Again" grade. Stability grows with successful recalls - frequently accessed memories can have stability measured in months or years.
 
-7. **Dual-strength decay** — Storage strength (0-10) accumulates over time, representing deep consolidation. Retrieval strength (0-1) decays via power law, representing current accessibility. Together they produce a retention score: `0.7 × retrieval + 0.3 × (storage/10)`.
+7. **Dual-strength decay** - Storage strength (0-10) accumulates over time, representing deep consolidation. Retrieval strength (0-1) decays via power law, representing current accessibility. Together they produce a retention score: `0.7 × retrieval + 0.3 × (storage/10)`.
 
-8. **Contradiction detection** — Scans for memories that conflict. LLM verification eliminates false positives. Contradictions can be resolved by keeping one side, both, or merging.
+8. **Contradiction detection** - Scans for memories that conflict. LLM verification eliminates false positives. Contradictions can be resolved by keeping one side, both, or merging.
 
-9. **Consolidation** — Large clusters of related memories get summarized into a single dense memory. Originals are archived, links preserved.
+9. **Consolidation** - Large clusters of related memories get summarized into a single dense memory. Originals are archived, links preserved.
 
-10. **Reflection** — On-demand meta-analysis generates insights about themes, progress, and patterns. Reflections become searchable memories themselves.
+10. **Reflection** - On-demand meta-analysis generates insights about themes, progress, and patterns. Reflections become searchable memories themselves.
 
 ### Architecture
 
@@ -586,11 +586,11 @@ Engram includes a WebGL graph visualization at `/gui`. Login with your `ENGRAM_G
 | `ENGRAM_CORS_ORIGIN` | `*` | Pin to your domain in production |
 | `ENGRAM_MAX_BODY_SIZE` | `1048576` | Max request body (bytes) |
 | `ENGRAM_MAX_CONTENT_SIZE` | `102400` | Max memory content (bytes) |
-| `ENGRAM_ALLOWED_IPS` | — | Comma-separated IP allowlist |
+| `ENGRAM_ALLOWED_IPS` | - | Comma-separated IP allowlist |
 | `ENGRAM_HOT_RELOAD` | `0` | Set `1` to reload GUI from disk each request |
-| `LLM_URL` | — | OpenAI-compatible API URL |
-| `LLM_API_KEY` | — | API key for LLM |
-| `LLM_MODEL` | — | Model name (e.g., `gpt-4o`, `claude-sonnet-4-20250514`) |
+| `LLM_URL` | - | OpenAI-compatible API URL |
+| `LLM_API_KEY` | - | API key for LLM |
+| `LLM_MODEL` | - | Model name (e.g., `gpt-4o`, `claude-sonnet-4-20250514`) |
 
 ### Storage
 
@@ -598,7 +598,7 @@ All data lives in a single libsql database (`data/memory.db`). Vector embeddings
 
 **Backup:** `GET /backup` returns a downloadable copy (admin required). WAL checkpoints every 5 minutes and on graceful shutdown. Manual checkpoint via `POST /checkpoint`.
 
-**Audit:** `GET /audit` shows all mutations — who stored, deleted, archived, or modified memories, from which IP, with request IDs.
+**Audit:** `GET /audit` shows all mutations - who stored, deleted, archived, or modified memories, from which IP, with request IDs.
 
 ### Reverse Proxy
 
@@ -616,48 +616,6 @@ server {
 
 ---
 
-## Comparison
-
-| Feature | Engram | Mem0 | Supermemory |
-|---------|--------|------|-------------|
-| **Spaced repetition (FSRS-6)** | ✅ | ❌ | ❌ |
-| **Dual-strength memory model** | ✅ | ❌ | ❌ |
-| Semantic search (hybrid) | ✅ | ✅ | ✅ |
-| Local embeddings (no API) | ✅ | ❌ | ❌ |
-| Full-text search (FTS5) | ✅ | ❌ | ❌ |
-| Graph visualization | ✅ | ❌ | ✅ |
-| Memory versioning | ✅ | ❌ | ❌ |
-| Auto-deduplication | ✅ | ❌ | ❌ |
-| Auto-forget / TTL | ✅ | ❌ | ❌ |
-| Contradiction detection | ✅ | ❌ | ❌ |
-| Time-travel queries | ✅ | ❌ | ❌ |
-| Smart context builder (RAG) | ✅ | ❌ | ❌ |
-| Reflections | ✅ | ❌ | ❌ |
-| Derived memories | ✅ | ❌ | ❌ |
-| Auto-consolidation | ✅ | ❌ | ❌ |
-| LLM reranker | ✅ | ❌ | ❌ |
-| Fact extraction + auto-tagging | ✅ | ✅ | ❌ |
-| Conversation extraction | ✅ | ✅ | ❌ |
-| MCP server (JSON-RPC stdio) | ✅ | ❌ | ❌ |
-| CLI | ✅ | ❌ | ❌ |
-| Multi-tenant + API keys | ✅ | ✅ | ❌ |
-| Spaces / collections | ✅ | ❌ | ✅ |
-| Entities & projects | ✅ | ❌ | ❌ |
-| Episodic memory | ✅ | ❌ | ❌ |
-| Conversation log + search | ✅ | ❌ | ❌ |
-| Webhooks & digests | ✅ | ❌ | ❌ |
-| Cross-instance sync | ✅ | ❌ | ❌ |
-| URL ingest | ✅ | ❌ | ❌ |
-| Import from Mem0 / Supermemory | ✅ | — | — |
-| Review queue / inbox | ✅ | ❌ | ❌ |
-| Audit trail | ✅ | ❌ | ❌ |
-| Structured JSON logging | ✅ | ❌ | ❌ |
-| API backup & WAL checkpoint | ✅ | ❌ | ❌ |
-| Self-hosted | ✅ | ✅ | ✅ |
-| Single-file DB (zero deps) | ✅ | ❌ | ❌ |
-
----
-
 ## Test Suite
 
 ```bash
@@ -670,4 +628,4 @@ npx vitest run
 
 ## License
 
-Elastic License 2.0 — see [LICENSE](LICENSE).
+Elastic License 2.0 - see [LICENSE](LICENSE).

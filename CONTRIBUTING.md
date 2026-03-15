@@ -65,11 +65,11 @@ landing.html       marketing landing page
 
 5. **Node.js HTTP, not Express/Hono**: Zero framework dependency. The server uses `createServer` with a Web Request/Response adapter. Core dependencies: libsql, onnxruntime-node, graphology, and @modelcontextprotocol/sdk.
 
-6. **Raw ONNX inference**: Embeddings use onnxruntime-node directly with a hand-written BERT WordPiece tokenizer — no @huggingface/transformers wrapper. Model files (tokenizer.json + quantized ONNX) are auto-downloaded from HuggingFace on first run.
+6. **Raw ONNX inference**: Embeddings use onnxruntime-node directly with a hand-written BERT WordPiece tokenizer - no @huggingface/transformers wrapper. Model files (tokenizer.json + quantized ONNX) are auto-downloaded from HuggingFace on first run.
 
 7. **Episodic memory**: Conversations are stored as episodes with narrative summaries, embedded for semantic search, and linked to extracted facts. This enables temporal queries ("what did I work on last week?") and contextual recall ("why was this decision made?").
 
-8. **Abstention**: Search returns an `abstained` flag when top result confidence is below a configurable threshold. This prevents false positives — the system knows when it doesn't have relevant information.
+8. **Abstention**: Search returns an `abstained` flag when top result confidence is below a configurable threshold. This prevents false positives - the system knows when it doesn't have relevant information.
 
 ## Code Style
 
