@@ -672,4 +672,4 @@ node --test tests/api.test.mjs
 
 ## License
 
-MIT
+Elastic License 2.0 — see [LICENSE](LICENSE).
