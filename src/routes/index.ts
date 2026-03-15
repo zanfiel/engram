@@ -633,24 +633,113 @@ async function fetchHandler(req: Request): Promise<Response> {
     // ========================================================================
     // HEALTH
     // ========================================================================
-    // BENCH RESET — wipe all data (only in OPEN_ACCESS mode)
+    // BENCH RESET -- wipe user-scoped data (only in OPEN_ACCESS mode)
+    // Requires a userId AND confirm: "DESTROY" in the request body. NEVER wipes all users' data.
     if (url.pathname === "/reset" && method === "POST") {
       if (!OPEN_ACCESS) return errorResponse("Reset only available in OPEN_ACCESS mode", 403);
-      const tables = [
-        "reconsolidations", "causal_links", "causal_chains", "temporal_patterns",
-        "scratchpad", "reflections", "digests", "webhooks",
-        "structured_facts", "current_state", "user_preferences",
-        "memory_entities", "memory_projects", "memory_links", "entity_relationships",
-        "consolidations", "episodes", "messages",
-        "entities", "projects", "memories", "memories_fts", "conversations",
+      const body = await req.json().catch(() => ({})) as any;
+      // Safety: require explicit confirm: "DESTROY" to prevent accidental wipes
+      if (body.confirm !== "DESTROY") {
+        return errorResponse('Reset requires "confirm": "DESTROY" in the request body. This is a destructive operation.', 400);
+      }
+      const userId = typeof body.userId === "number" ? body.userId
+        : typeof body.user_id === "number" ? body.user_id : null;
+      if (userId === null) {
+        return errorResponse("userId is required. POST {\"userId\": <number>, \"confirm\": \"DESTROY\"} to reset a specific user's data. Global wipe is disabled.", 400);
+      }
+      const resetSource = typeof body.source === "string" ? body.source : null;
+
+      // Source-scoped reset: only delete memories matching this source (for benchmarks)
+      if (resetSource) {
+        const memIds = db.prepare("SELECT id FROM memories WHERE user_id = ? AND source = ?").all(userId, resetSource) as { id: number }[];
+        const memIdSet = memIds.map((r) => r.id);
+        if (memIdSet.length > 0) {
+          for (let i = 0; i < memIdSet.length; i += 500) {
+            const chunk = memIdSet.slice(i, i + 500);
+            const placeholders = chunk.map(() => "?").join(",");
+            const childTables = ["reconsolidations", "causal_links", "memory_entities", "memory_projects", "memory_links"];
+            for (const t of childTables) {
+              try {
+                const col = t === "memory_links" ? "source_id" : "memory_id";
+                db.prepare(`DELETE FROM ${t} WHERE ${col} IN (${placeholders})`).run(...chunk);
+                if (t === "memory_links") {
+                  db.prepare(`DELETE FROM memory_links WHERE target_id IN (${placeholders})`).run(...chunk);
+                }
+              } catch {}
+            }
+          }
+          for (let i = 0; i < memIdSet.length; i += 500) {
+            const chunk = memIdSet.slice(i, i + 500);
+            const placeholders = chunk.map(() => "?").join(",");
+            db.prepare(`DELETE FROM memories WHERE id IN (${placeholders})`).run(...chunk);
+          }
+        }
+        try { db.exec("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')"); } catch {}
+        invalidateEmbeddingCache();
+        log.info({ msg: "reset_by_source", user_id: userId, source: resetSource, memories_deleted: memIdSet.length });
+        return json({ reset: true, user_id: userId, source: resetSource, memories_deleted: memIdSet.length, scoped: true });
+      }
+
+      // Full user reset: wipe ALL data for this user_id
+      // Tables with direct user_id column -- delete rows owned by this user
+      const userScopedTables = [
+        "causal_chains", "temporal_patterns", "scratchpad", "reflections",
+        "digests", "webhooks", "structured_facts", "current_state",
+        "user_preferences", "consolidations", "episodes", "entities",
+        "projects", "conversations",
       ];
       let wiped = 0;
-      for (const t of tables) {
-        try { db.exec("DELETE FROM " + t); wiped++; } catch {}
+      // First: delete junction/child rows that reference this user's memories
+      const memIds = db.prepare("SELECT id FROM memories WHERE user_id = ?").all(userId) as { id: number }[];
+      const memIdSet = memIds.map((r) => r.id);
+      if (memIdSet.length > 0) {
+        // Batch delete in chunks of 500 to avoid SQLite variable limits
+        for (let i = 0; i < memIdSet.length; i += 500) {
+          const chunk = memIdSet.slice(i, i + 500);
+          const placeholders = chunk.map(() => "?").join(",");
+          const childTables = [
+            "reconsolidations", "causal_links", "memory_entities",
+            "memory_projects", "memory_links",
+          ];
+          for (const t of childTables) {
+            try {
+              const col = t === "memory_links" ? "source_id" : "memory_id";
+              db.prepare(`DELETE FROM ${t} WHERE ${col} IN (${placeholders})`).run(...chunk);
+              if (t === "memory_links") {
+                db.prepare(`DELETE FROM memory_links WHERE target_id IN (${placeholders})`).run(...chunk);
+              }
+            } catch {}
+          }
+        }
+        wiped++;
       }
+      // Delete entity_relationships via this user's entities
+      try {
+        const entIds = db.prepare("SELECT id FROM entities WHERE user_id = ?").all(userId) as { id: number }[];
+        const entIdSet = entIds.map((r) => r.id);
+        for (let i = 0; i < entIdSet.length; i += 500) {
+          const chunk = entIdSet.slice(i, i + 500);
+          const placeholders = chunk.map(() => "?").join(",");
+          db.prepare(`DELETE FROM entity_relationships WHERE source_entity_id IN (${placeholders}) OR target_entity_id IN (${placeholders})`).run(...chunk, ...chunk);
+        }
+      } catch {}
+      // Delete messages via this user's conversations
+      try {
+        db.prepare("DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id = ?)").run(userId);
+      } catch {}
+      // Delete user-scoped tables
+      for (const t of userScopedTables) {
+        try { db.prepare(`DELETE FROM ${t} WHERE user_id = ?`).run(userId); wiped++; } catch {}
+      }
+      // Delete memories last (after children are cleaned)
+      try { db.prepare("DELETE FROM memories WHERE user_id = ?").run(userId); wiped++; } catch {}
+      // Rebuild FTS indexes
+      try { db.exec("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')"); } catch {}
+      try { db.exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')"); } catch {}
+      try { db.exec("INSERT INTO episodes_fts(episodes_fts) VALUES('rebuild')"); } catch {}
       invalidateEmbeddingCache();
-      log.info({ msg: "reset_complete", tables_wiped: wiped });
-      return json({ reset: true, tables_wiped: wiped });
+      log.info({ msg: "reset_complete", user_id: userId, memories_deleted: memIdSet.length, tables_wiped: wiped });
+      return json({ reset: true, user_id: userId, memories_deleted: memIdSet.length, tables_wiped: wiped });
     }
 
     if (url.pathname === "/health" && method === "GET") {
@@ -1656,7 +1745,22 @@ Only include pairs that are actual contradictions.`;
     if (url.pathname === "/context" && method === "POST") {
       try {
         const body = await req.json() as any;
-        const { query, max_tokens, token_budget: tokenBudgetAlt, budget, include_static, include_recent, strategy } = body;
+        const { query, max_tokens, token_budget: tokenBudgetAlt, budget, include_static, include_recent, strategy,
+          // Benchmark/tuning overrides
+          max_memory_tokens: overrideMaxMemTokens,
+          dedup_threshold: overrideDedupThreshold,
+          min_relevance: overrideMinRelevance,
+          semantic_ceiling: overrideSemanticCeiling,
+          semantic_limit: overrideSemanticLimit,
+          // Layer toggles (all default to true for backward compat)
+          include_episodes,
+          include_linked,
+          include_inference,
+          include_current_state,
+          include_preferences,
+          include_structured_facts,
+          include_working_memory,
+        } = body;
 
         if (!query || typeof query !== "string") return errorResponse("query (string) required");
 
@@ -1665,11 +1769,18 @@ Only include pairs that are actual contradictions.`;
         const tokenBudget = Math.min(rawBudget, 64000);
         const includeStatic = include_static !== false;
         const includeRecent = include_recent !== false;
+        const doIncludeEpisodes = include_episodes !== false;
+        const doIncludeLinked = include_linked !== false;
+        const doIncludeInference = include_inference !== false;
+        const doIncludeCurrentState = include_current_state !== false;
+        const doIncludePreferences = include_preferences !== false;
+        const doIncludeStructuredFacts = include_structured_facts !== false;
+        const doIncludeWorkingMemory = include_working_memory !== false;
         const contextStrategy = strategy || "balanced"; // balanced | precision | breadth
         const workingMemorySession = typeof body.session === "string" && body.session.trim() ? body.session.trim() : null;
 
         const estimateTokens = (text: string) => Math.ceil(text.length / 4);
-        const MAX_MEMORY_TOKENS = 600;
+        const MAX_MEMORY_TOKENS = overrideMaxMemTokens != null ? Number(overrideMaxMemTokens) : 1500;
 
         const truncateContent = (content: string): string => {
           if (estimateTokens(content) <= MAX_MEMORY_TOKENS) return content;
@@ -1740,9 +1851,9 @@ Only include pairs that are actual contradictions.`;
         }
 
         // ---- Phase 2: Semantic search (core relevance) ----
-        const semanticCeiling = contextStrategy === "precision" ? 0.75 : contextStrategy === "breadth" ? 0.65 : 0.70;
-        const semanticLimit = contextStrategy === "precision" ? 40 : contextStrategy === "breadth" ? 60 : 50;
-        const semanticResults = await hybridSearch(query, semanticLimit, false, true, RERANKER_ENABLED && isLLMAvailable(), auth.user_id);
+        const semanticCeiling = overrideSemanticCeiling != null ? Number(overrideSemanticCeiling) : (contextStrategy === "precision" ? 0.75 : contextStrategy === "breadth" ? 0.82 : 0.70);
+        const semanticLimit = overrideSemanticLimit != null ? Number(overrideSemanticLimit) : (contextStrategy === "precision" ? 40 : contextStrategy === "breadth" ? 100 : 80);
+        const semanticResults = await hybridSearch(query, semanticLimit, false, true, true, auth.user_id);
 
         for (const r of semanticResults) {
           if (seenIds.has(r.id)) continue;
@@ -1750,19 +1861,21 @@ Only include pairs that are actual contradictions.`;
           const tokens = estimateTokens(truncated);
           if (usedTokens + tokens > tokenBudget * semanticCeiling) break;
 
-          // Dedup: skip if >0.88 similar to already-included memory
+          // Dedup: skip if too similar to already-included memory
+          const dedupThresh = overrideDedupThreshold != null ? Number(overrideDedupThreshold) : 0.88;
           const cached = embMap.get(r.id);
           if (cached && blockEmbeddings.length > 0) {
             let isDupe = false;
             for (const existing of blockEmbeddings) {
-              if (cosineSimilarity(cached.embedding, existing) > 0.88) { isDupe = true; break; }
+              if (cosineSimilarity(cached.embedding, existing) > dedupThresh) { isDupe = true; break; }
             }
             if (isDupe) continue;
           }
 
           // Minimum relevance threshold
+          const minRelev = overrideMinRelevance != null ? Number(overrideMinRelevance) : 0.15;
           const rawScore = r.combined_score || r.semantic_score || r.score || 0;
-          if (rawScore < 0.15) continue;
+          if (rawScore < minRelev) continue;
 
           // Recency boost: last 48h get +10%
           let score = rawScore;
@@ -1783,7 +1896,7 @@ Only include pairs that are actual contradictions.`;
 
         // ---- Phase 2.5: Episode context ----
         const seenEpisodeIds = new Set<number>();
-        if (usedTokens < tokenBudget * 0.75) {
+        if (doIncludeEpisodes && usedTokens < tokenBudget * 0.75) {
           for (const b of blocks.filter(b => b.source === "semantic").slice(0, 5)) {
             const mem = getMemoryWithoutEmbedding.get(b.id) as any;
             const epId = mem?.episode_id;
@@ -1803,7 +1916,7 @@ Only include pairs that are actual contradictions.`;
         }
 
         // ---- Phase 3: Linked memories (graph expansion) ----
-        if (contextStrategy !== "precision" && usedTokens < tokenBudget * 0.85) {
+        if (doIncludeLinked && contextStrategy !== "precision" && usedTokens < tokenBudget * 0.85) {
           const semanticIds = blocks.filter(b => b.source === "semantic").slice(0, 5).map(b => b.id);
           for (const sid of semanticIds) {
             if (usedTokens >= tokenBudget * 0.85) break;
@@ -1866,7 +1979,7 @@ Only include pairs that are actual contradictions.`;
 
         // Phase 5: Implicit connection inference (LLM post-processing)
         const semanticBlocks = blocks.filter(b => b.source === "semantic");
-        if (isLLMAvailable() && semanticBlocks.length >= 2 && usedTokens < tokenBudget * 0.95) {
+        if (doIncludeInference && isLLMAvailable() && semanticBlocks.length >= 2 && usedTokens < tokenBudget * 0.95) {
           try {
             const topFacts = semanticBlocks.slice(0, 6).map(b => `[${b.id}] ${b.content}`).join("\n");
             const inferenceResult = await callLLM(
@@ -1893,57 +2006,65 @@ Only include pairs that are actual contradictions.`;
         const linkedBlocks = blocks.filter(b => b.source === "linked");
         const recentBlocks = blocks.filter(b => b.source === "recent");
 
-        try {
-          const scratchRows = listScratchEntriesForContext.all(auth.user_id, workingMemorySession, workingMemorySession) as ScratchEntryRow[];
-          const workingMemory = buildWorkingMemoryBlock(scratchRows);
-          if (workingMemory) contextParts.push(workingMemory);
-        } catch {}
+        if (doIncludeWorkingMemory) {
+          try {
+            const scratchRows = listScratchEntriesForContext.all(auth.user_id, workingMemorySession, workingMemorySession) as ScratchEntryRow[];
+            const workingMemory = buildWorkingMemoryBlock(scratchRows);
+            if (workingMemory) contextParts.push(workingMemory);
+          } catch {}
+        }
 
         // Intelligence Layer: Current State (key-value pairs tracked over time)
-        try {
-          const stateRows = db.prepare(
-            "SELECT key, value, updated_count FROM current_state WHERE user_id = ? ORDER BY updated_at DESC LIMIT 30"
-          ).all(auth.user_id) as any[];
-          if (stateRows.length > 0) {
-            const stateLines = stateRows.map((s: any) => `- ${s.key}: ${s.value}${s.updated_count > 1 ? ` (updated ${s.updated_count}x)` : ""}`);
-            contextParts.push("## Current State\n" + stateLines.join("\n"));
-          }
-        } catch {}
+        if (doIncludeCurrentState) {
+          try {
+            const stateRows = db.prepare(
+              "SELECT key, value, updated_count FROM current_state WHERE user_id = ? ORDER BY updated_at DESC LIMIT 30"
+            ).all(auth.user_id) as any[];
+            if (stateRows.length > 0) {
+              const stateLines = stateRows.map((s: any) => `- ${s.key}: ${s.value}${s.updated_count > 1 ? ` (updated ${s.updated_count}x)` : ""}`);
+              contextParts.push("## Current State\n" + stateLines.join("\n"));
+            }
+          } catch {}
+        }
 
         // Intelligence Layer: User Preferences
-        try {
-          const prefRows = db.prepare(
-            "SELECT domain, preference, strength FROM user_preferences WHERE user_id = ? ORDER BY strength DESC LIMIT 20"
-          ).all(auth.user_id) as any[];
-          if (prefRows.length > 0) {
-            const prefLines = prefRows.map((p: any) => `- [${p.domain}] ${p.preference}`);
-            contextParts.push("## User Preferences\n" + prefLines.join("\n"));
-          }
-        } catch {}
+        if (doIncludePreferences) {
+          try {
+            const prefRows = db.prepare(
+              "SELECT domain, preference, strength FROM user_preferences WHERE user_id = ? ORDER BY strength DESC LIMIT 20"
+            ).all(auth.user_id) as any[];
+            if (prefRows.length > 0) {
+              const prefLines = prefRows.map((p: any) => `- [${p.domain}] ${p.preference}`);
+              contextParts.push("## User Preferences\n" + prefLines.join("\n"));
+            }
+          } catch {}
+        }
 
         // Intelligence Layer: Structured Facts relevant to query
-        try {
-          const memIds = blocks.map(b => b.id);
-          if (memIds.length > 0) {
-            const placeholders = memIds.map(() => "?").join(",");
-            const sfRows = db.prepare(
-              `SELECT subject, verb, object, quantity, unit, date_ref, date_approx
-               FROM structured_facts WHERE memory_id IN (${placeholders})
-               ORDER BY date_approx DESC NULLS LAST`
-            ).all(...memIds) as any[];
-            if (sfRows.length > 0) {
-              const sfLines = sfRows.map((sf: any) => {
-                let line = `- ${sf.subject} ${sf.verb}`;
-                if (sf.object) line += ` ${sf.object}`;
-                if (sf.quantity != null) line += ` (qty: ${sf.quantity}${sf.unit ? " " + sf.unit : ""})`;
-                if (sf.date_approx) line += ` [${sf.date_approx}]`;
-                else if (sf.date_ref) line += ` [${sf.date_ref}]`;
-                return line;
-              });
-              contextParts.push("## Extracted Facts\n" + sfLines.join("\n"));
+        if (doIncludeStructuredFacts) {
+          try {
+            const memIds = blocks.map(b => b.id);
+            if (memIds.length > 0) {
+              const placeholders = memIds.map(() => "?").join(",");
+              const sfRows = db.prepare(
+                `SELECT subject, verb, object, quantity, unit, date_ref, date_approx
+                 FROM structured_facts WHERE memory_id IN (${placeholders})
+                 ORDER BY date_approx DESC NULLS LAST`
+              ).all(...memIds) as any[];
+              if (sfRows.length > 0) {
+                const sfLines = sfRows.map((sf: any) => {
+                  let line = `- ${sf.subject} ${sf.verb}`;
+                  if (sf.object) line += ` ${sf.object}`;
+                  if (sf.quantity != null) line += ` (qty: ${sf.quantity}${sf.unit ? " " + sf.unit : ""})`;
+                  if (sf.date_approx) line += ` [${sf.date_approx}]`;
+                  else if (sf.date_ref) line += ` [${sf.date_ref}]`;
+                  return line;
+                });
+                contextParts.push("## Extracted Facts\n" + sfLines.join("\n"));
+              }
             }
-          }
-        } catch {}
+          } catch {}
+        }
 
         // Attribution helper: produces "(by model via source)" tag for memory provenance
         const attrib = (b: ContextBlock): string => {
@@ -2603,7 +2724,7 @@ Return JSON:
       try {
         const _searchT0 = performance.now();
         const body = await req.json() as any;
-        const { query, limit, include_links, expand_relationships, latest_only, tag, episode_id: filterEpisode, temporal_sort } = body;
+        const { query, limit, include_links, expand_relationships, latest_only, tag, episode_id: filterEpisode, temporal_sort, vector_floor } = body;
         if (!query || typeof query !== "string") return errorResponse("query is required");
         const _searchT1 = performance.now();
         let results = await hybridSearch(
@@ -2612,7 +2733,8 @@ Return JSON:
           include_links || false,
           expand_relationships ?? true,
           latest_only ?? true,
-          auth.user_id
+          auth.user_id,
+          vector_floor != null ? Number(vector_floor) : undefined
         );
 
         const _searchT2 = performance.now();

@@ -39,7 +39,8 @@ export async function hybridSearch(
   includeLinks: boolean = false,
   expandRelationships: boolean = false,
   latestOnly: boolean = true,
-  userId: number = 1
+  userId: number = 1,
+  vectorFloor: number = 0.15
 ): Promise<SearchResult[]> {
   const results = new Map<number, SearchResult>();
 
@@ -50,7 +51,7 @@ export async function hybridSearch(
     for (const mem of cached) {
       if (mem.user_id !== userId) continue; // S7 FIX: user isolation
       const sim = cosineSimilarity(queryEmb, mem.embedding);
-      if (sim > 0.35) {
+      if (sim > vectorFloor) {
         results.set(mem.id, {
           id: mem.id, content: mem.content, category: mem.category,
           importance: mem.importance, created_at: "",

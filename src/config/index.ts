@@ -8,7 +8,9 @@ import { mkdirSync } from "fs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-export const DATA_DIR = resolve(__dirname, "../../data");
+export const DATA_DIR = process.env.ENGRAM_DATA_DIR
+  ? resolve(process.env.ENGRAM_DATA_DIR)
+  : resolve(__dirname, "../../data");
 export const DB_PATH = resolve(DATA_DIR, "memory.db");
 export const PORT = Number(process.env.ENGRAM_PORT || process.env.ZANMEMORY_PORT || 4200);
 export const HOST = process.env.ENGRAM_HOST || process.env.ZANMEMORY_HOST || "0.0.0.0";
@@ -24,9 +26,9 @@ export const MODEL_URLS: Record<string, string> = {
   "model_quantized.onnx": "https://huggingface.co/Xenova/bge-large-en-v1.5/resolve/main/onnx/model_quantized.onnx",
   "model.onnx": "https://huggingface.co/Xenova/bge-large-en-v1.5/resolve/main/onnx/model.onnx",
 };
-export const AUTO_LINK_THRESHOLD = 0.7;
+export const AUTO_LINK_THRESHOLD = 0.55;
 export const SEARCH_MIN_SCORE = Number(process.env.ENGRAM_SEARCH_MIN_SCORE || 0.58);
-export const AUTO_LINK_MAX = 3;
+export const AUTO_LINK_MAX = Number(process.env.AUTO_LINK_MAX ?? 6);
 export const DEFAULT_IMPORTANCE = 5;
 
 // LLM config (for fact extraction)
