@@ -27,7 +27,7 @@
     "dev": "node --experimental-strip-types --watch server-split.ts"
   },
   "dependencies": {
-    "@huggingface/transformers": "^3.8.1",
+    "onnxruntime-node": "^1.21.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "graphology": "^0.26.0",
     "graphology-communities-louvain": "^2.0.2",

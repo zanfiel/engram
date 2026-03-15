@@ -16,7 +16,7 @@ import {
   CONSOLIDATION_THRESHOLD, RATE_WINDOW_MS, OPEN_ACCESS_RATE_LIMIT, DEFAULT_RATE_LIMIT,
   GUI_AUTH_MAX_ATTEMPTS, GUI_AUTH_WINDOW_MS, GUI_AUTH_LOCKOUT_MS,
   ENABLE_CAUSAL_CHAINS, ENABLE_PREDICTIVE_RECALL, ENABLE_EMOTIONAL_VALENCE,
-  ENABLE_RECONSOLIDATION,
+  ENABLE_RECONSOLIDATION, SEARCH_MIN_SCORE,
 } from "../config/index.ts";
 import { log } from "../config/logger.ts";
 
@@ -28,6 +28,7 @@ import {
   getVersionChain, updateMemoryEmbedding, updateMemoryVec,
   getAllTags, getByTag, insertEpisode, getEpisode, getEpisodeBySession, getEpisodeMemories,
   listEpisodes, assignToEpisode, updateEpisode,
+  updateEpisodeEmbedding, updateEpisodeVec, searchEpisodesFTS, listEpisodesByTimeRange,
   insertConversation, getConversation, getConversationBySession, listConversations,
   listConversationsByAgent, touchConversation, updateConversation, deleteConversation,
   insertMessage, getMessages, searchMessages, bulkInsertConvo,
@@ -50,7 +51,7 @@ import {
 import {
   embed, cosineSimilarity, getCachedEmbeddings, addToEmbeddingCache,
   invalidateEmbeddingCache, embeddingToBuffer, bufferToEmbedding, embeddingToVectorJSON,
-  graphCache, setGraphCache,
+  graphCache, setGraphCache, episodeCache, refreshEmbeddingCache,
 } from "../embeddings/index.ts";
 
 // Search + linking
@@ -1503,6 +1504,27 @@ Only include pairs that are actual contradictions.`;
           usedTokens += tokens;
         }
 
+        // Phase 2.5: Episode context — for semantic results with episode_id, include episode summary
+        if (usedTokens < tokenBudget * 0.75) {
+          const epSeen = new Set<number>();
+          for (const b of blocks.filter(b => b.source === "semantic").slice(0, 5)) {
+            const mem = getMemoryWithoutEmbedding.get(b.id) as any;
+            const epId = mem?.episode_id;
+            if (epId && !epSeen.has(epId)) {
+              epSeen.add(epId);
+              const ep = getEpisode.get(epId) as any;
+              if (ep?.summary) {
+                const tokens = estimateTokens(ep.summary);
+                if (usedTokens + tokens <= tokenBudget * 0.8) {
+                  blocks.push({ id: ep.id + 1000000, content: ep.summary, category: "episode", score: 75, source: "episode", tokens, created_at: ep.started_at });
+                  seenIds.add(ep.id + 1000000);
+                  usedTokens += tokens;
+                }
+              }
+            }
+          }
+        }
+
         // Phase 3: Linked memories (expand context graph)
         if (contextStrategy !== "precision" && usedTokens < tokenBudget * 0.85) {
           const semanticIds = blocks.filter(b => b.source === "semantic").slice(0, 5).map(b => b.id);
@@ -1601,6 +1623,10 @@ Only include pairs that are actual contradictions.`;
         if (semanticBlocks.length > 0) {
           contextParts.push("## Relevant Memories\n" + semanticBlocks.map(b => `- [${b.category}] ${b.content}`).join("\n"));
         }
+        const episodeBlocks = blocks.filter(b => b.source === "episode");
+        if (episodeBlocks.length > 0) {
+          contextParts.push("## Episode Context\n" + episodeBlocks.map(b => `- [${b.created_at || ""}] ${b.content}`).join("\n"));
+        }
         if (linkedBlocks.length > 0) {
           contextParts.push("## Related Context\n" + linkedBlocks.map(b => `- ${b.content}`).join("\n"));
         }
@@ -1618,6 +1644,7 @@ Only include pairs that are actual contradictions.`;
           breakdown: {
             static: staticBlocks.length,
             semantic: semanticBlocks.length,
+            episode: episodeBlocks.length,
             linked: linkedBlocks.length,
             recent: recentBlocks.length,
           },
@@ -2288,14 +2315,34 @@ Return JSON:
           } catch {}
         }, 0);
 
-        // Lightweight: skip episodic expansion (available via /memory/:id)
-        const episodeContext: Array<{ episode_id: number; title: string; memories: any[] }> = [];
+        // Episode context: fetch episode summaries for results with episode_id
+        const episodeContext: Array<{ episode_id: number; title: string; summary: string; started_at: string }> = [];
+        if (body.include_episodes) {
+          const seenEpisodes = new Set<number>();
+          for (const r of results) {
+            const mem = getMemoryWithoutEmbedding.get(r.id) as any;
+            const epId = mem?.episode_id;
+            if (epId && !seenEpisodes.has(epId)) {
+              seenEpisodes.add(epId);
+              const ep = getEpisode.get(epId) as any;
+              if (ep?.summary) {
+                episodeContext.push({ episode_id: ep.id, title: ep.title || "", summary: ep.summary, started_at: ep.started_at });
+              }
+            }
+          }
+        }
 
         const _searchT3 = performance.now();
         log.info({ msg: "search_timing", total_ms: (_searchT3 - _searchT0).toFixed(1), hybrid_ms: (_searchT2 - _searchT1).toFixed(1), post_ms: (_searchT3 - _searchT2).toFixed(1), results: results.length });
 
+        const topScore = results.length > 0 ? results[0].score : 0;
+        const minScore = body.min_score ?? SEARCH_MIN_SCORE;
+        const abstained = results.length === 0 || topScore < minScore;
+
         return json({
-          results,
+          results: abstained ? [] : results,
+          abstained,
+          top_score: Math.round(topScore * 1000) / 1000,
           ...(episodeContext.length > 0 ? { episodes: episodeContext } : {}),
         });
       } catch (e: any) {
@@ -3169,7 +3216,43 @@ Return JSON:
         const ep = insertEpisode.get(
           body.title || null, body.session_id || null, body.agent || null, auth.user_id
         ) as { id: number; started_at: string };
-        return json({ created: true, id: ep.id, started_at: ep.started_at });
+
+        // If conversation text provided, generate narrative summary via LLM
+        let summary = body.summary || null;
+        if (body.conversation && isLLMAvailable() && !summary) {
+          try {
+            summary = await callLLM(
+              `You are a memory system. Summarize this conversation into a concise episodic narrative (1-3 paragraphs). Capture: what the user asked for, what the assistant did, key decisions made, problems solved, and outcomes. Include temporal flow ("first... then... finally..."). Write in past tense.`,
+              body.conversation.substring(0, 8000)
+            );
+          } catch (e: any) {
+            log.warn({ msg: "episode_summarization_failed", error: e.message });
+          }
+        }
+
+        // Update with summary, timestamps, duration
+        if (summary || body.ended_at) {
+          updateEpisode.run(body.title || null, summary, body.ended_at || null, ep.id);
+        }
+        if (body.started_at && body.ended_at) {
+          const dur = Math.round((new Date(body.ended_at).getTime() - new Date(body.started_at).getTime()) / 1000);
+          if (dur > 0) db.prepare("UPDATE episodes SET duration_seconds = ? WHERE id = ?").run(dur, ep.id);
+        }
+
+        // Embed the summary for semantic search
+        const textToEmbed = summary || body.title || body.conversation?.substring(0, 500) || "";
+        if (textToEmbed) {
+          try {
+            const embArray = await embed(textToEmbed);
+            updateEpisodeEmbedding.run(embeddingToBuffer(embArray), ep.id);
+            try { updateEpisodeVec.run(embeddingToVectorJSON(embArray), ep.id); } catch {}
+            refreshEmbeddingCache();
+          } catch (e: any) {
+            log.warn({ msg: "episode_embed_failed", error: e.message });
+          }
+        }
+
+        return json({ created: true, id: ep.id, started_at: ep.started_at, summary });
       } catch (e: any) {
         return safeError("create episode", e);
       }
@@ -3177,6 +3260,56 @@ Return JSON:
 
     if (url.pathname === "/episodes" && method === "GET") {
       const limit = Math.min(Number(url.searchParams.get("limit") || 20), 100);
+      const query = url.searchParams.get("query");
+      const after = url.searchParams.get("after");
+      const before = url.searchParams.get("before");
+
+      // Temporal search
+      if (after || before) {
+        const from = after || "2000-01-01";
+        const to = before || "2099-12-31";
+        const episodes = listEpisodesByTimeRange.all(auth.user_id, from, to, limit) as any[];
+        return json({ episodes });
+      }
+
+      // Semantic search over episodes
+      if (query) {
+        try {
+          const queryEmb = await embed(query);
+          const scored: Array<any & { score: number }> = [];
+
+          // Vector search over episode cache
+          for (const ep of episodeCache) {
+            if (ep.user_id !== auth.user_id) continue;
+            const sim = cosineSimilarity(queryEmb, ep.embedding);
+            if (sim > 0.3) scored.push({ id: ep.id, summary: ep.summary, score: sim });
+          }
+
+          // FTS search
+          try {
+            const ftsHits = searchEpisodesFTS.all(sanitizeFTS(query), auth.user_id, limit) as any[];
+            for (const hit of ftsHits) {
+              const existing = scored.find(s => s.id === hit.id);
+              if (existing) { existing.score += 0.2; }
+              else { scored.push({ ...hit, score: 0.3 }); }
+            }
+          } catch {}
+
+          scored.sort((a, b) => b.score - a.score);
+          const topIds = scored.slice(0, limit).map(s => s.id);
+          const episodes = topIds.map(id => {
+            const ep = getEpisode.get(id) as any;
+            const s = scored.find(x => x.id === id);
+            return ep ? { ...ep, score: Math.round((s?.score || 0) * 1000) / 1000 } : null;
+          }).filter(Boolean);
+
+          return json({ episodes });
+        } catch (e: any) {
+          return safeError("episode search", e);
+        }
+      }
+
+      // Default: list recent
       const episodes = listEpisodes.all(auth.user_id, limit) as any[];
       return json({ episodes });
     }
@@ -3198,6 +3331,15 @@ Return JSON:
         const id = Number(url.pathname.split("/")[2]);
         const body = await req.json() as any;
         updateEpisode.run(body.title || null, body.summary || null, body.ended_at || null, id);
+        // Re-embed if summary changed
+        if (body.summary) {
+          try {
+            const embArray = await embed(body.summary);
+            updateEpisodeEmbedding.run(embeddingToBuffer(embArray), id);
+            try { updateEpisodeVec.run(embeddingToVectorJSON(embArray), id); } catch {}
+            refreshEmbeddingCache();
+          } catch {}
+        }
         return json({ updated: true, id });
       } catch (e: any) {
         return safeError("update episode", e);

@@ -146,7 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Basic CRUD: store, search, recall, delete
 - Conversation storage with message search
 - JSON export/import
-- Node.js HTTP server (zero dependencies beyond libsql + transformers)
+- Node.js HTTP server (minimal dependencies: libsql, onnxruntime-node, graphology)
 
 ## [3.0.0] - 2026-03-06
 

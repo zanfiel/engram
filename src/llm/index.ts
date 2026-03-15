@@ -126,6 +126,7 @@ Rules:
 - "none" = no meaningful relation
 - For forget_after: ISO 8601 datetime. Permanent facts = null.
 - 1-3 key facts per content
+- Extract BOTH user facts AND assistant actions. If the assistant recommended, implemented, fixed, diagnosed, or produced something, extract that as a fact too (e.g. "assistant implemented FSRS-6 spaced repetition", "assistant recommended using WAL mode").
 - Include "tags": 2-5 lowercase keywords
 - Include "structured_facts", "preferences", "state_updates" if applicable`;
 

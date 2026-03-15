@@ -14,9 +14,18 @@ export const PORT = Number(process.env.ENGRAM_PORT || process.env.ZANMEMORY_PORT
 export const HOST = process.env.ENGRAM_HOST || process.env.ZANMEMORY_HOST || "0.0.0.0";
 
 // Embedding config
-export const EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
-export const EMBEDDING_DIM = 384;
+export const EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5";
+export const EMBEDDING_DIM = 1024;
+export const EMBEDDING_MAX_SEQ = 512;
+export const MODEL_DIR = resolve(DATA_DIR, "models", "bge-large-en-v1.5");
+export const ONNX_MODEL_FILE = process.env.ENGRAM_EMBEDDING_FP32 === "1" ? "model.onnx" : "model_quantized.onnx";
+export const MODEL_URLS: Record<string, string> = {
+  "tokenizer.json": "https://huggingface.co/Xenova/bge-large-en-v1.5/resolve/main/tokenizer.json",
+  "model_quantized.onnx": "https://huggingface.co/Xenova/bge-large-en-v1.5/resolve/main/onnx/model_quantized.onnx",
+  "model.onnx": "https://huggingface.co/Xenova/bge-large-en-v1.5/resolve/main/onnx/model.onnx",
+};
 export const AUTO_LINK_THRESHOLD = 0.7;
+export const SEARCH_MIN_SCORE = Number(process.env.ENGRAM_SEARCH_MIN_SCORE || 0.25);
 export const AUTO_LINK_MAX = 3;
 export const DEFAULT_IMPORTANCE = 5;
 
