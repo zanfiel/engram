@@ -1,11 +1,27 @@
 {
-  "name": "engram",
+  "name": "@zanfiel/engram",
   "version": "5.5.0",
   "type": "module",
-  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zanfiel/engram.git"
+  },
   "engines": {
     "node": ">=22.0.0"
   },
+  "files": [
+    "server-split.ts",
+    "mcp-server.ts",
+    "src/",
+    "engram-gui.html",
+    "engram-login.html",
+    "Dockerfile",
+    "docker-compose.yml",
+    ".env.example",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
   "scripts": {
     "start": "node --experimental-strip-types server-split.ts",
     "dev": "node --experimental-strip-types --watch server-split.ts"
