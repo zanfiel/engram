@@ -35,7 +35,7 @@ import {
   getStaticMemories, getRecentDynamicMemories,
   getAllMemoriesForGraph, getAllLinksForGraph,
   countNoEmbedding, getMemoryWithoutEmbedding,
-  updateFSRS, getFSRS,
+  updateFSRS, getFSRS, trackAccessWithFSRS,
   insertWebhook, listWebhooks, deleteWebhook,
   getChangesSince, getMemoryBySyncId,
   insertEntity, listEntities, listEntitiesByType, getEntity, getEntityMemories,
@@ -155,29 +155,6 @@ function updateDecayScores(): number {
     updated++;
   }
   return updated;
-}
-
-// Track access with FSRS review
-function trackAccessWithFSRS(memoryId: number, grade: typeof FSRSRating[keyof typeof FSRSRating] = FSRSRating.Good): void {
-  try {
-    const state = getFSRS.get(memoryId) as any;
-    if (state) {
-      const now = Date.now();
-      const lastReview = state.fsrs_last_review_at || state.created_at;
-      let elapsedDays = 1;
-      if (lastReview) {
-        const refTime = new Date(lastReview + (lastReview.includes("Z") ? "" : "Z")).getTime();
-        if (!isNaN(refTime)) elapsedDays = Math.max(0, (now - refTime) / (1000 * 60 * 60 * 24));
-      }
-      const newState = fsrsProcessReview(state, grade, elapsedDays);
-      updateFSRS.run(
-        newState.difficulty, newState.stability,
-        newState.storage_strength, newState.retrieval_strength,
-        new Date().toISOString(), (state.review_count || 0) + 1,
-        memoryId
-      );
-    }
-  } catch {}
 }
 
 // Sweep expired memories
@@ -585,7 +562,7 @@ async function fetchHandler(req: Request): Promise<Response> {
       const isAuthed = !!maybeAuth;
       const memCount = db.prepare("SELECT COUNT(*) as count FROM memories").get() as { count: number };
       if (!isAuthed) {
-        return json({ status: "ok", version: 5.5, memories: memCount.count });
+        return json({ status: "ok", version: "5.7.1", memories: memCount.count });
       }
       // Full health for authenticated users
       const convCount = db.prepare("SELECT COUNT(*) as count FROM conversations").get() as { count: number };
@@ -607,7 +584,7 @@ async function fetchHandler(req: Request): Promise<Response> {
       const dbSize = statSync(DB_PATH).size;
       return json({
         status: "ok",
-        version: 5.5,
+        version: "5.7.1",
         memories: memCount.count,
         embedded: embCount.count,
         unembedded: noEmbCount2,
@@ -1447,64 +1424,127 @@ Only include pairs that are actual contradictions.`;
     if (url.pathname === "/context" && method === "POST") {
       try {
         const body = await req.json() as any;
-        const { query, max_tokens, include_static, include_recent, strategy } = body;
+        const { query, max_tokens, token_budget: tokenBudgetAlt, budget, include_static, include_recent, strategy } = body;
 
         if (!query || typeof query !== "string") return errorResponse("query (string) required");
 
-        const tokenBudget = Math.min(Number(max_tokens) || 4000, 32000);
-        const includeStatic = include_static !== false; // default true
-        const includeRecent = include_recent !== false; // default true
+        // Accept token_budget, budget, OR max_tokens (MCP sends token_budget)
+        const rawBudget = Number(max_tokens) || Number(tokenBudgetAlt) || Number(budget) || 8000;
+        const tokenBudget = Math.min(rawBudget, 64000);
+        const includeStatic = include_static !== false;
+        const includeRecent = include_recent !== false;
         const contextStrategy = strategy || "balanced"; // balanced | precision | breadth
 
-        // Rough token estimation: ~4 chars per token
         const estimateTokens = (text: string) => Math.ceil(text.length / 4);
+        const MAX_MEMORY_TOKENS = 600;
+
+        const truncateContent = (content: string): string => {
+          if (estimateTokens(content) <= MAX_MEMORY_TOKENS) return content;
+          const maxChars = MAX_MEMORY_TOKENS * 4;
+          const cutPoint = content.lastIndexOf(". ", maxChars);
+          if (cutPoint > maxChars * 0.6) return content.substring(0, cutPoint + 1) + " [truncated]";
+          return content.substring(0, maxChars) + "... [truncated]";
+        };
 
         interface ContextBlock {
           id: number;
           content: string;
           category: string;
           score: number;
-          source: string; // "static" | "semantic" | "recent" | "linked"
+          source: string;
           tokens: number;
           created_at?: string;
         }
 
         const blocks: ContextBlock[] = [];
         let usedTokens = 0;
+        const seenIds = new Set<number>();
 
-        // Phase 1: Static facts (always highest priority — these define identity/config)
+        // Embed query for ranking statics + dedup
+        let queryEmb: Float32Array | null = null;
+        try { queryEmb = await embed(query); } catch {}
+
+        // Build embedding lookup for dedup + static ranking
+        const allCached = getCachedEmbeddings(true);
+        const embMap = new Map<number, { embedding: Float32Array }>();
+        for (const c of allCached) {
+          if ((c as any).user_id === auth.user_id) embMap.set(c.id, c);
+        }
+        const blockEmbeddings: Float32Array[] = [];
+
+        // ---- Phase 1: Static facts, RANKED by query relevance ----
         if (includeStatic) {
           const statics = getStaticMemories.all(auth.user_id) as any[];
+          const scored: Array<{ mem: any; relevance: number }> = [];
           for (const s of statics) {
-            const tokens = estimateTokens(s.content);
-            if (usedTokens + tokens > tokenBudget * 0.4) break; // cap statics at 40% of budget
+            let relevance = 0.5;
+            if (queryEmb) {
+              const cached = embMap.get(s.id);
+              if (cached) relevance = cosineSimilarity(queryEmb, cached.embedding);
+            }
+            relevance += Math.min((s.source_count || 1) / 20, 0.1);
+            scored.push({ mem: s, relevance });
+          }
+          scored.sort((a, b) => b.relevance - a.relevance);
+
+          const staticBudget = contextStrategy === "precision" ? 0.2 : 0.3;
+          for (const { mem, relevance } of scored) {
+            const truncated = truncateContent(mem.content);
+            const tokens = estimateTokens(truncated);
+            if (usedTokens + tokens > tokenBudget * staticBudget) break;
             blocks.push({
-              id: s.id, content: s.content, category: s.category,
-              score: 100, source: "static", tokens,
+              id: mem.id, content: truncated, category: mem.category,
+              score: relevance * 100, source: "static", tokens,
             });
+            seenIds.add(mem.id);
             usedTokens += tokens;
+            const cached = embMap.get(mem.id);
+            if (cached) blockEmbeddings.push(cached.embedding);
           }
         }
 
-        // Phase 2: Semantic search (core relevance)
-        const semanticBudget = contextStrategy === "precision" ? 0.5 : contextStrategy === "breadth" ? 0.3 : 0.4;
-        const semanticLimit = contextStrategy === "precision" ? 30 : contextStrategy === "breadth" ? 50 : 40;
+        // ---- Phase 2: Semantic search (core relevance) ----
+        const semanticCeiling = contextStrategy === "precision" ? 0.75 : contextStrategy === "breadth" ? 0.65 : 0.70;
+        const semanticLimit = contextStrategy === "precision" ? 40 : contextStrategy === "breadth" ? 60 : 50;
         const semanticResults = await hybridSearch(query, semanticLimit, false, true, RERANKER_ENABLED && isLLMAvailable(), auth.user_id);
 
-        const seenIds = new Set(blocks.map(b => b.id));
         for (const r of semanticResults) {
           if (seenIds.has(r.id)) continue;
-          const tokens = estimateTokens(r.content);
-          if (usedTokens + tokens > tokenBudget * (0.4 + semanticBudget)) break;
+          const truncated = truncateContent(r.content);
+          const tokens = estimateTokens(truncated);
+          if (usedTokens + tokens > tokenBudget * semanticCeiling) break;
+
+          // Dedup: skip if >0.88 similar to already-included memory
+          const cached = embMap.get(r.id);
+          if (cached && blockEmbeddings.length > 0) {
+            let isDupe = false;
+            for (const existing of blockEmbeddings) {
+              if (cosineSimilarity(cached.embedding, existing) > 0.88) { isDupe = true; break; }
+            }
+            if (isDupe) continue;
+          }
+
+          // Minimum relevance threshold
+          const rawScore = r.combined_score || r.semantic_score || r.score || 0;
+          if (rawScore < 0.15) continue;
+
+          // Recency boost: last 48h get +10%
+          let score = rawScore;
+          if (r.created_at) {
+            const ageMs = Date.now() - new Date(r.created_at + "Z").getTime();
+            if (ageMs < 48 * 60 * 60 * 1000) score *= 1.10;
+          }
+
           blocks.push({
-            id: r.id, content: r.content, category: r.category,
-            score: r.combined_score || r.semantic_score || 0, source: "semantic", tokens,
+            id: r.id, content: truncated, category: r.category,
+            score, source: "semantic", tokens,
           });
           seenIds.add(r.id);
           usedTokens += tokens;
+          if (cached) blockEmbeddings.push(cached.embedding);
         }
 
-        // Phase 2.5: Episode context — for semantic results with episode_id, include episode summary
+        // ---- Phase 2.5: Episode context ----
         const seenEpisodeIds = new Set<number>();
         if (usedTokens < tokenBudget * 0.75) {
           for (const b of blocks.filter(b => b.source === "semantic").slice(0, 5)) {
@@ -1514,9 +1554,10 @@ Only include pairs that are actual contradictions.`;
               seenEpisodeIds.add(epId);
               const ep = getEpisode.get(epId) as any;
               if (ep?.summary) {
-                const tokens = estimateTokens(ep.summary);
+                const truncated = truncateContent(ep.summary);
+                const tokens = estimateTokens(truncated);
                 if (usedTokens + tokens <= tokenBudget * 0.8) {
-                  blocks.push({ id: -epId, content: ep.summary, category: "episode", score: 75, source: "episode", tokens, created_at: ep.started_at });
+                  blocks.push({ id: -epId, content: truncated, category: "episode", score: 75, source: "episode", tokens, created_at: ep.started_at });
                   usedTokens += tokens;
                 }
               }
@@ -1524,38 +1565,63 @@ Only include pairs that are actual contradictions.`;
           }
         }
 
-        // Phase 3: Linked memories (expand context graph)
+        // ---- Phase 3: Linked memories (graph expansion) ----
         if (contextStrategy !== "precision" && usedTokens < tokenBudget * 0.85) {
           const semanticIds = blocks.filter(b => b.source === "semantic").slice(0, 5).map(b => b.id);
           for (const sid of semanticIds) {
+            if (usedTokens >= tokenBudget * 0.85) break;
             const linked = getLinksFor.all(sid, sid) as any[];
             for (const l of linked) {
               if (seenIds.has(l.id) || l.is_forgotten) continue;
-              const tokens = estimateTokens(l.content);
-              if (usedTokens + tokens > tokenBudget * 0.9) break;
+              const truncated = truncateContent(l.content);
+              const tokens = estimateTokens(truncated);
+              if (usedTokens + tokens > tokenBudget * 0.88) break;
+
+              const cachedL = embMap.get(l.id);
+              if (cachedL && blockEmbeddings.length > 0) {
+                let isDupe = false;
+                for (const existing of blockEmbeddings) {
+                  if (cosineSimilarity(cachedL.embedding, existing) > 0.88) { isDupe = true; break; }
+                }
+                if (isDupe) continue;
+              }
+
               blocks.push({
-                id: l.id, content: l.content, category: l.category,
-                score: l.similarity * 50, source: "linked", tokens,
+                id: l.id, content: truncated, category: l.category,
+                score: (l.similarity || 0) * 50, source: "linked", tokens,
               });
               seenIds.add(l.id);
               usedTokens += tokens;
+              if (cachedL) blockEmbeddings.push(cachedL.embedding);
             }
           }
         }
 
-        // Phase 4: Recent memories (temporal context)
+        // ---- Phase 4: Recent memories (temporal context) ----
         if (includeRecent && usedTokens < tokenBudget * 0.95) {
           const recent = getRecentDynamicMemories.all(auth.user_id, 10) as any[];
           for (const r of recent) {
             if (seenIds.has(r.id)) continue;
-            const tokens = estimateTokens(r.content);
+            const truncated = truncateContent(r.content);
+            const tokens = estimateTokens(truncated);
             if (usedTokens + tokens > tokenBudget) break;
+
+            const cachedR = embMap.get(r.id);
+            if (cachedR && blockEmbeddings.length > 0) {
+              let isDupe = false;
+              for (const existing of blockEmbeddings) {
+                if (cosineSimilarity(cachedR.embedding, existing) > 0.88) { isDupe = true; break; }
+              }
+              if (isDupe) continue;
+            }
+
             blocks.push({
-              id: r.id, content: r.content, category: r.category,
+              id: r.id, content: truncated, category: r.category,
               score: 10, source: "recent", tokens,
             });
             seenIds.add(r.id);
             usedTokens += tokens;
+            if (cachedR) blockEmbeddings.push(cachedR.embedding);
           }
         }
 
@@ -4349,7 +4415,7 @@ If no meaningful inferences, return {"derived": []}`;
         // Graph visualization page
     if (url.pathname === "/graph/view" && method === "GET") {
       const graphHtml = await readFile(resolve(__dirname, "engram-graph.html"), "utf-8").catch(() => null);
-      if (!graphHtml) return errorResponse("Graph view not found. Place engram-graph.html alongside server.ts", 404);
+      if (!graphHtml) return errorResponse("Graph view not found. Place engram-graph.html alongside server-split.ts", 404);
       return new Response(graphHtml, { headers: { "Content-Type": "text/html" } });
     }
 

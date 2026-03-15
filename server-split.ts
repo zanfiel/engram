@@ -215,4 +215,4 @@ setInterval(async () => {
   }
 }, 5 * 60 * 1000);
 
-log.info({ msg: "server_started", version: "5.5", host: HOST, port: PORT, open_access: OPEN_ACCESS, cors: CORS_ORIGIN, log_level: process.env.ENGRAM_LOG_LEVEL || "info", allowed_ips: ALLOWED_IPS.length || "any" });
+log.info({ msg: "server_started", version: "5.7.1", host: HOST, port: PORT, open_access: OPEN_ACCESS, cors: CORS_ORIGIN, log_level: process.env.ENGRAM_LOG_LEVEL || "info", allowed_ips: ALLOWED_IPS.length || "any" });

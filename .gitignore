@@ -16,6 +16,9 @@ sync.log
 Thumbs.db
 
 # Old/backup code
+archive/
+backup-debug-*/
+server.ts.pre-multitenant-backup
 src.old/
 server.ts.monolith
 server.ts.pre-intelligence-bak

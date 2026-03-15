@@ -22,6 +22,6 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["server.ts", "src/**/*.ts"],
+  "include": ["server-split.ts", "mcp-server.ts", "src/**/*.ts"],
   "exclude": ["node_modules", "dist", "data"]
 }
