@@ -554,6 +554,19 @@ Use `X-Space: space-name` (or `X-Engram-Space`) header to scope operations to a 
 - **LLM:** Optional, for fact extraction / reranking / consolidation
 - **Decay:** FSRS-6 (21-parameter power-law forgetting curve)
 
+### Supported LLM Providers
+
+Engram works with any LLM provider via `LLM_URL`, `LLM_API_KEY`, and `LLM_MODEL`:
+
+| Provider | Example URL | Example Model |
+|----------|-------------|---------------|
+| **Anthropic** | `https://api.anthropic.com/v1/messages` | `claude-sonnet-4-20250514` |
+| **MiniMax** | `https://api.minimax.io/v1/chat/completions` | `MiniMax-M2.5` |
+| **OpenAI** | `https://api.openai.com/v1/chat/completions` | `gpt-4o` |
+| **Ollama** | `http://127.0.0.1:11434/v1/chat/completions` | `llama3` |
+| **LiteLLM** | `http://127.0.0.1:4000/v1/chat/completions` | Any routed model |
+| **vLLM** | `http://127.0.0.1:8000/v1/chat/completions` | Any served model |
+
 ---
 
 ## GUI
@@ -587,9 +600,9 @@ Engram includes a WebGL graph visualization at `/gui`. Login with your `ENGRAM_G
 | `ENGRAM_MAX_CONTENT_SIZE` | `102400` | Max memory content (bytes) |
 | `ENGRAM_ALLOWED_IPS` | — | Comma-separated IP allowlist |
 | `ENGRAM_HOT_RELOAD` | `0` | Set `1` to reload GUI from disk each request |
-| `LLM_URL` | — | OpenAI-compatible API URL |
+| `LLM_URL` | — | LLM API URL (Anthropic, MiniMax, or OpenAI-compatible) |
 | `LLM_API_KEY` | — | API key for LLM |
-| `LLM_MODEL` | — | Model name (e.g., `gpt-4o`, `claude-sonnet-4-20250514`) |
+| `LLM_MODEL` | — | Model name (e.g., `gpt-4o`, `claude-sonnet-4-20250514`, `MiniMax-M2.5`) |
 
 ### Storage
 
