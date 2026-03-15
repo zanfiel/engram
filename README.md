@@ -8,11 +8,10 @@ Store, search, recall, and link memories with automatic embeddings,
 fact extraction, versioning, deduplication, and graph visualization.
 
 [![License: Elastic-2.0](https://img.shields.io/badge/License-Elastic--2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-5.7.0-gold.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-5.7.2-gold.svg)](CHANGELOG.md)
 
 [Quick Start](#quick-start) · [API Reference](#api-reference) · [SDKs](#sdks) · [MCP Server](#mcp-server) · [CLI](#cli) · [Self-Host](#self-hosting) · [GUI](#gui)
 
-[![License: Elastic-2.0](https://img.shields.io/badge/License-Elastic%202.0-blue)](https://www.elastic.co/licensing/elastic-license)
 
 </div>
 
@@ -613,48 +612,6 @@ server {
     }
 }
 ```
-
----
-
-## Comparison
-
-| Feature | Engram | Mem0 | Supermemory |
-|---------|--------|------|-------------|
-| **Spaced repetition (FSRS-6)** | ✅ | ❌ | ❌ |
-| **Dual-strength memory model** | ✅ | ❌ | ❌ |
-| Semantic search (hybrid) | ✅ | ✅ | ✅ |
-| Local embeddings (no API) | ✅ | ❌ | ❌ |
-| Full-text search (FTS5) | ✅ | ❌ | ❌ |
-| Graph visualization | ✅ | ❌ | ✅ |
-| Memory versioning | ✅ | ❌ | ❌ |
-| Auto-deduplication | ✅ | ❌ | ❌ |
-| Auto-forget / TTL | ✅ | ❌ | ❌ |
-| Contradiction detection | ✅ | ❌ | ❌ |
-| Time-travel queries | ✅ | ❌ | ❌ |
-| Smart context builder (RAG) | ✅ | ❌ | ❌ |
-| Reflections | ✅ | ❌ | ❌ |
-| Derived memories | ✅ | ❌ | ❌ |
-| Auto-consolidation | ✅ | ❌ | ❌ |
-| LLM reranker | ✅ | ❌ | ❌ |
-| Fact extraction + auto-tagging | ✅ | ✅ | ❌ |
-| Conversation extraction | ✅ | ✅ | ❌ |
-| MCP server (JSON-RPC stdio) | ✅ | ❌ | ❌ |
-| CLI | ✅ | ❌ | ❌ |
-| Multi-tenant + API keys | ✅ | ✅ | ❌ |
-| Spaces / collections | ✅ | ❌ | ✅ |
-| Entities & projects | ✅ | ❌ | ❌ |
-| Episodic memory | ✅ | ❌ | ❌ |
-| Conversation log + search | ✅ | ❌ | ❌ |
-| Webhooks & digests | ✅ | ❌ | ❌ |
-| Cross-instance sync | ✅ | ❌ | ❌ |
-| URL ingest | ✅ | ❌ | ❌ |
-| Import from Mem0 / Supermemory | ✅ | — | — |
-| Review queue / inbox | ✅ | ❌ | ❌ |
-| Audit trail | ✅ | ❌ | ❌ |
-| Structured JSON logging | ✅ | ❌ | ❌ |
-| API backup & WAL checkpoint | ✅ | ❌ | ❌ |
-| Self-hosted | ✅ | ✅ | ✅ |
-| Single-file DB (zero deps) | ✅ | ❌ | ❌ |
 
 ---
 

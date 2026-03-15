@@ -10,7 +10,7 @@ import { PORT, HOST, OPEN_ACCESS, CORS_ORIGIN, ALLOWED_IPS, CONSOLIDATION_INTERV
 import { log } from "./src/config/logger.ts";
 
 // Database (importing triggers schema creation + migrations)
-import { db, updateMemoryEmbedding, writeVec } from "./src/db/index.ts";
+import { db, updateMemoryEmbedding, writeVec, purgeExpiredScratchpad } from "./src/db/index.ts";
 
 // Embeddings
 import { initEmbedder, embed, refreshEmbeddingCache, embeddingCacheLatest, embeddingToBuffer, embeddingToVectorJSON } from "./src/embeddings/index.ts";
@@ -19,7 +19,8 @@ import { initEmbedder, embed, refreshEmbeddingCache, embeddingCacheLatest, embed
 import { reloadGuiHtml } from "./src/gui/index.ts";
 
 // Routes
-import { fetchHandler, setClientIp, sweepExpiredMemories, backfillEmbeddings, updateDecayScores } from "./src/routes/index.ts";
+import { fetchHandler, setClientIp, sweepExpiredMemories, backfillEmbeddings } from "./src/routes/index.ts";
+import { updateDecayScores } from "./src/db/index.ts";
 
 // Intelligence
 import { runConsolidationSweep } from "./src/intelligence/consolidation.ts";
@@ -54,7 +55,7 @@ async function nodeToWebRequest(nodeReq: IncomingMessage): Promise<Request> {
   for (const [key, val] of Object.entries(nodeReq.headers)) {
     if (val) headers.set(key, Array.isArray(val) ? val.join(", ") : val);
   }
-  let body: BodyInit | undefined;
+  let body: Buffer | undefined;
   if (method !== "GET" && method !== "HEAD") {
     body = await new Promise<Buffer>((resolve) => {
       const chunks: Buffer[] = [];
@@ -149,6 +150,12 @@ setInterval(() => {
   if (swept > 0) log.info({ msg: "auto_forget_sweep", swept });
 }, FORGET_SWEEP_INTERVAL);
 
+// Scratchpad TTL sweep
+setInterval(() => {
+  const purged = purgeExpiredScratchpad();
+  if (purged > 0) log.info({ msg: "scratchpad_sweep", purged });
+}, 5 * 60 * 1000);
+
 // Decay score refresh (every 15 minutes)
 setInterval(() => {
   const updated = updateDecayScores();
@@ -171,6 +178,7 @@ if (isLLMAvailable()) {
 // Initial sweeps
 sweepExpiredMemories();
 updateDecayScores();
+purgeExpiredScratchpad();
 
 // One-time embedding dimension migration: detect 384-dim → re-embed to 1024-dim
 {

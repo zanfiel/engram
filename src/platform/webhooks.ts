@@ -5,6 +5,7 @@
 import { db } from "../db/index.ts";
 import { log } from "../config/logger.ts";
 import { createHmac } from "crypto";
+import { validatePublicUrlWithDNS } from "../helpers/index.ts";
 
 const getActiveWebhooks = db.prepare(
   "SELECT id, url, events, secret FROM webhooks WHERE user_id = ? AND active = 1"
@@ -29,6 +30,14 @@ export async function emitWebhookEvent(
     try {
       const events = JSON.parse(hook.events) as string[];
       if (!events.includes("*") && !events.includes(event)) continue;
+
+      // Dispatch-time SSRF revalidation (prevents DNS rebinding)
+      const urlError = await validatePublicUrlWithDNS(hook.url, "Webhook URL");
+      if (urlError) {
+        log.error({ msg: "webhook_ssrf_blocked", webhook_id: hook.id, error: urlError });
+        webhookFailed.run(hook.id);
+        continue;
+      }
 
       const body = JSON.stringify({ event, timestamp: new Date().toISOString(), data: payload });
       const headers: Record<string, string> = { "Content-Type": "application/json" };

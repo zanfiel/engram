@@ -101,6 +101,7 @@ for (const [col, def] of v3Columns) {
   migrate(`ALTER TABLE memories ADD COLUMN ${col} ${def}`);
 }
 migrate("ALTER TABLE memories ADD COLUMN importance INTEGER NOT NULL DEFAULT 5");
+migrate("ALTER TABLE memories ADD COLUMN model TEXT");
 migrate("ALTER TABLE memories ADD COLUMN embedding BLOB");
 
 // v3.1 indexes
@@ -187,6 +188,8 @@ migrate(`
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+migrate("ALTER TABLE consolidations ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1");
+migrate("CREATE INDEX IF NOT EXISTS idx_consolidations_user ON consolidations(user_id)");
 
 
 // v4.2 — Confidence, sync, webhooks
@@ -496,6 +499,26 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_spaces_user ON spaces(user_id);
 `);
 
+// Scratchpad — short-term working memory with TTL
+migrate(`
+  CREATE TABLE IF NOT EXISTS scratchpad (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id) ON DELETE CASCADE,
+    session TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    model TEXT NOT NULL,
+    entry_key TEXT NOT NULL,
+    value TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL DEFAULT (datetime('now', '+30 minutes')),
+    UNIQUE(user_id, session, entry_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_scratchpad_user_expires ON scratchpad(user_id, expires_at);
+  CREATE INDEX IF NOT EXISTS idx_scratchpad_session ON scratchpad(user_id, session);
+  CREATE INDEX IF NOT EXISTS idx_scratchpad_agent ON scratchpad(user_id, agent);
+`);
+
 // v4 migrations — add user_id and space_id columns
 for (const [tbl, col, def] of [
   ["memories", "user_id", "INTEGER NOT NULL DEFAULT 1"],
@@ -600,8 +623,8 @@ db.exec(`
 export const insertMemory = db.prepare(
   `INSERT INTO memories (content, category, source, session_id, importance, embedding,
     version, is_latest, parent_memory_id, root_memory_id, source_count, is_static,
-    is_forgotten, forget_after, forget_reason, is_inference)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    is_forgotten, forget_after, forget_reason, is_inference, model)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
    RETURNING id, created_at`
 );
 
@@ -632,7 +655,7 @@ export const getLatestEmbeddings = db.prepare(
 export const searchMemoriesFTS = db.prepare(
   `SELECT m.id, m.content, m.category, m.source, m.session_id, m.importance, m.created_at,
      m.version, m.is_latest, m.parent_memory_id, m.root_memory_id, m.source_count,
-     m.is_static, m.is_forgotten, m.is_inference,
+     m.is_static, m.is_forgotten, m.is_inference, m.model,
      rank as fts_rank
    FROM memories_fts f
    JOIN memories m ON f.rowid = m.id
@@ -644,14 +667,14 @@ export const searchMemoriesFTS = db.prepare(
 export const listRecent = db.prepare(
   `SELECT id, content, category, source, session_id, importance, created_at,
      version, is_latest, parent_memory_id, root_memory_id, source_count,
-     is_static, is_forgotten, is_inference, forget_after, is_archived, status
+     is_static, is_forgotten, is_inference, forget_after, is_archived, status, model
    FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND status != 'pending' AND user_id = ? ORDER BY created_at DESC LIMIT ?`
 );
 
 export const listByCategory = db.prepare(
   `SELECT id, content, category, source, session_id, importance, created_at,
      version, is_latest, parent_memory_id, root_memory_id, source_count,
-     is_static, is_forgotten, is_inference, forget_after, is_archived, status
+     is_static, is_forgotten, is_inference, forget_after, is_archived, status, model
    FROM memories WHERE category = ? AND is_forgotten = 0 AND is_archived = 0 AND status != 'pending' AND user_id = ? ORDER BY created_at DESC LIMIT ?`
 );
 
@@ -661,7 +684,8 @@ export const getMemory = db.prepare(`SELECT * FROM memories WHERE id = ?`);
 export const getMemoryWithoutEmbedding = db.prepare(
   `SELECT id, user_id, content, category, source, session_id, importance, created_at, updated_at,
      version, is_latest, parent_memory_id, root_memory_id, source_count,
-     is_static, is_forgotten, forget_after, forget_reason, is_inference, is_archived, status
+     is_static, is_forgotten, forget_after, forget_reason, is_inference, is_archived, status, model,
+     tags, episode_id, access_count, last_accessed_at, confidence
    FROM memories WHERE id = ?`
 );
 
@@ -706,29 +730,57 @@ export const insertLink = db.prepare(
 
 export const getLinksFor = db.prepare(
   `SELECT ml.target_id as id, ml.similarity, ml.type, m.content, m.category, m.importance, m.created_at,
-     m.is_latest, m.is_forgotten, m.version, m.source_count
+     m.is_latest, m.is_forgotten, m.version, m.source_count, m.model, m.source
    FROM memory_links ml
    JOIN memories m ON ml.target_id = m.id
    WHERE ml.source_id = ?
    UNION
    SELECT ml.source_id as id, ml.similarity, ml.type, m.content, m.category, m.importance, m.created_at,
-     m.is_latest, m.is_forgotten, m.version, m.source_count
+     m.is_latest, m.is_forgotten, m.version, m.source_count, m.model, m.source
    FROM memory_links ml
    JOIN memories m ON ml.source_id = m.id
    WHERE ml.target_id = ?
    ORDER BY similarity DESC`
 );
 
+// User-scoped variants for search module
+export const getLinksForUser = db.prepare(
+  `SELECT ml.target_id as id, ml.similarity, ml.type, m.content, m.category, m.importance, m.created_at,
+     m.is_latest, m.is_forgotten, m.version, m.source_count, m.model, m.source
+   FROM memory_links ml
+   JOIN memories m ON ml.target_id = m.id
+   WHERE ml.source_id = ? AND m.user_id = ?
+   UNION
+   SELECT ml.source_id as id, ml.similarity, ml.type, m.content, m.category, m.importance, m.created_at,
+     m.is_latest, m.is_forgotten, m.version, m.source_count, m.model, m.source
+   FROM memory_links ml
+   JOIN memories m ON ml.source_id = m.id
+   WHERE ml.target_id = ? AND m.user_id = ?
+   ORDER BY similarity DESC`
+);
+
+export const getVersionChainForUser = db.prepare(
+  `SELECT id, content, category, version, is_latest, created_at, source_count
+   FROM memories WHERE (root_memory_id = ? OR id = ?) AND user_id = ?
+   ORDER BY version ASC`
+);
+
 export const countNoEmbedding = db.prepare(
   `SELECT COUNT(*) as count FROM memories WHERE embedding IS NULL`
+);
+export const countNoEmbeddingForUser = db.prepare(
+  `SELECT COUNT(*) as count FROM memories WHERE embedding IS NULL AND user_id = ?`
 );
 export const getNoEmbedding = db.prepare(
   `SELECT id, content FROM memories WHERE embedding IS NULL LIMIT ?`
 );
+export const getNoEmbeddingForUser = db.prepare(
+  `SELECT id, content FROM memories WHERE embedding IS NULL AND user_id = ? LIMIT ?`
+);
 
 // Profile queries
 export const getStaticMemories = db.prepare(
-  `SELECT id, content, category, source_count, created_at, updated_at
+  `SELECT id, content, category, source_count, created_at, updated_at, model, source
    FROM memories WHERE is_static = 1 AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND status = 'approved' AND user_id = ?
    ORDER BY source_count DESC, updated_at DESC`
 );
@@ -772,11 +824,15 @@ export function trackAccessWithFSRS(memoryId: number, grade: FSRSRating = FSRSRa
   );
 }
 
-export function updateDecayScores(): number {
-  const memories = db.prepare(
-    `SELECT id, importance, created_at, access_count, last_accessed_at, is_static, source_count, fsrs_stability
-     FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1`
-  ).all() as Array<any>;
+export function updateDecayScores(userId?: number): number {
+  const query = userId != null
+    ? `SELECT id, importance, created_at, access_count, last_accessed_at, is_static, source_count, fsrs_stability
+       FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?`
+    : `SELECT id, importance, created_at, access_count, last_accessed_at, is_static, source_count, fsrs_stability
+       FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1`;
+  const memories = (userId != null
+    ? db.prepare(query).all(userId)
+    : db.prepare(query).all()) as Array<any>;
 
   let updated = 0;
   const updateDecay = db.prepare(`UPDATE memories SET decay_score = ? WHERE id = ?`);
@@ -809,7 +865,7 @@ export const getAllTags = db.prepare(
 
 // Inbox / Review queue prepared statements
 export const listPending = db.prepare(
-  `SELECT id, content, category, source, session_id, importance, created_at, tags, confidence, decay_score, status
+  `SELECT id, content, category, source, session_id, importance, created_at, tags, confidence, decay_score, status, model
    FROM memories WHERE status = 'pending' AND is_forgotten = 0 AND user_id = ?
    ORDER BY created_at DESC LIMIT ? OFFSET ?`
 );
@@ -832,6 +888,11 @@ export const updateEpisode = db.prepare(
    ended_at = COALESCE(?, ended_at), memory_count = (SELECT COUNT(*) FROM memories WHERE episode_id = episodes.id)
    WHERE id = ?`
 );
+export const updateEpisodeForUser = db.prepare(
+  `UPDATE episodes SET title = COALESCE(?, title), summary = COALESCE(?, summary),
+   ended_at = COALESCE(?, ended_at), memory_count = (SELECT COUNT(*) FROM memories WHERE episode_id = episodes.id)
+   WHERE id = ? AND user_id = ?`
+);
 export const getEpisode = db.prepare(`SELECT * FROM episodes WHERE id = ?`);
 export const getEpisodeBySession = db.prepare(
   `SELECT * FROM episodes WHERE session_id = ? AND agent = ? AND user_id = ? ORDER BY started_at DESC LIMIT 1`
@@ -841,10 +902,13 @@ export const listEpisodes = db.prepare(
 );
 export const getEpisodeMemories = db.prepare(
   `SELECT id, content, category, source, importance, created_at, tags, access_count
-   FROM memories WHERE episode_id = ? AND is_forgotten = 0 ORDER BY created_at ASC`
+   FROM memories WHERE episode_id = ? AND user_id = ? AND is_forgotten = 0 ORDER BY created_at ASC`
 );
 export const assignToEpisode = db.prepare(
   `UPDATE memories SET episode_id = ? WHERE id = ?`
+);
+export const assignToEpisodeForUser = db.prepare(
+  `UPDATE memories SET episode_id = ? WHERE id = ? AND user_id = ?`
 );
 
 // Episode embedding + search
@@ -869,7 +933,7 @@ export const getAllEpisodeEmbeddings = db.prepare(
 export const getClusterCandidates = db.prepare(
   `SELECT source_id, COUNT(*) as link_count FROM memory_links
    JOIN memories m ON memory_links.source_id = m.id
-   WHERE m.is_forgotten = 0 AND m.is_archived = 0 AND m.is_latest = 1
+   WHERE m.user_id = ? AND m.is_forgotten = 0 AND m.is_archived = 0 AND m.is_latest = 1
    GROUP BY source_id HAVING link_count >= ?
    ORDER BY link_count DESC LIMIT 10`
 );
@@ -877,8 +941,10 @@ export const getClusterCandidates = db.prepare(
 export const getClusterMembers = db.prepare(
   `SELECT DISTINCT m.id, m.content, m.category, m.importance, m.created_at, m.access_count
    FROM memory_links ml
+   JOIN memories center ON center.id = ?
    JOIN memories m ON (ml.target_id = m.id OR ml.source_id = m.id)
-   WHERE (ml.source_id = ? OR ml.target_id = ?) AND m.is_forgotten = 0 AND m.is_archived = 0
+   WHERE center.user_id = ? AND (ml.source_id = center.id OR ml.target_id = center.id)
+     AND m.user_id = ? AND m.is_forgotten = 0 AND m.is_archived = 0
    ORDER BY m.importance DESC, m.created_at DESC`
 );
 
@@ -915,7 +981,7 @@ export const getChangesSince = db.prepare(
    ORDER BY updated_at ASC LIMIT ?`
 );
 export const getMemoryBySyncId = db.prepare(
-  `SELECT id, updated_at FROM memories WHERE sync_id = ?`
+  `SELECT id, updated_at FROM memories WHERE sync_id = ? AND user_id = ?`
 );
 
 // Entity queries
@@ -959,7 +1025,7 @@ export const unlinkMemoryEntity = db.prepare(
 export const getEntityMemories = db.prepare(
   `SELECT m.id, m.content, m.category, m.importance, m.tags, m.created_at, m.decay_score, m.confidence
    FROM memories m JOIN memory_entities me ON me.memory_id = m.id
-   WHERE me.entity_id = ? AND m.is_forgotten = 0 AND m.is_archived = 0
+   WHERE me.entity_id = ? AND m.user_id = ? AND m.is_forgotten = 0 AND m.is_archived = 0
    ORDER BY m.created_at DESC LIMIT ?`
 );
 export const insertEntityRelationship = db.prepare(
@@ -1013,15 +1079,67 @@ export const unlinkMemoryProject = db.prepare(
 export const getProjectMemories = db.prepare(
   `SELECT m.id, m.content, m.category, m.importance, m.tags, m.created_at, m.decay_score, m.confidence
    FROM memories m JOIN memory_projects mp ON mp.memory_id = m.id
-   WHERE mp.project_id = ? AND m.is_forgotten = 0 AND m.is_archived = 0
+   WHERE mp.project_id = ? AND m.user_id = ? AND m.is_forgotten = 0 AND m.is_archived = 0
    ORDER BY m.created_at DESC LIMIT ?`
 );
 
 export const getRecentDynamicMemories = db.prepare(
-  `SELECT id, content, category, source_count, created_at
+  `SELECT id, content, category, source_count, created_at, model, source
    FROM memories WHERE is_static = 0 AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?
    ORDER BY created_at DESC LIMIT ?`
 );
+
+function changeCount(result: any): number {
+  return Number(result?.rowsAffected ?? result?.changes ?? 0);
+}
+
+export const upsertScratchEntry = db.prepare(
+  `INSERT INTO scratchpad (user_id, session, agent, model, entry_key, value, expires_at)
+   VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+30 minutes'))
+   ON CONFLICT(user_id, session, entry_key) DO UPDATE SET
+     agent = excluded.agent,
+     model = excluded.model,
+     value = excluded.value,
+     updated_at = datetime('now'),
+     expires_at = datetime('now', '+30 minutes')`
+);
+
+export const listScratchEntries = db.prepare(
+  `SELECT session, agent, model, entry_key, value, created_at, updated_at, expires_at
+   FROM scratchpad
+   WHERE user_id = ?
+     AND expires_at > datetime('now')
+     AND (? IS NULL OR agent = ?)
+     AND (? IS NULL OR model = ?)
+     AND (? IS NULL OR session = ?)
+   ORDER BY updated_at DESC, agent, session, entry_key`
+);
+
+export const listScratchEntriesForContext = db.prepare(
+  `SELECT session, agent, model, entry_key, value, updated_at
+   FROM scratchpad
+   WHERE user_id = ?
+     AND expires_at > datetime('now')
+     AND (? IS NULL OR session != ?)
+   ORDER BY updated_at DESC, agent, session, entry_key
+   LIMIT 20`
+);
+
+export const deleteScratchSession = db.prepare(
+  `DELETE FROM scratchpad WHERE user_id = ? AND session = ?`
+);
+
+export const deleteScratchSessionKey = db.prepare(
+  `DELETE FROM scratchpad WHERE user_id = ? AND session = ? AND entry_key = ?`
+);
+
+const purgeExpiredScratchEntriesStmt = db.prepare(
+  `DELETE FROM scratchpad WHERE expires_at <= datetime('now')`
+);
+
+export function purgeExpiredScratchpad(): number {
+  return changeCount(purgeExpiredScratchEntriesStmt.run());
+}
 
 // Graph data
 export const getAllMemoriesForGraph = db.prepare(
@@ -1041,26 +1159,27 @@ export const getAllLinksForGraph = db.prepare(
 // ============================================================================
 
 export const insertConversation = db.prepare(
-  `INSERT INTO conversations (agent, session_id, title, metadata) VALUES (?, ?, ?, ?) RETURNING id, started_at`
+  `INSERT INTO conversations (agent, session_id, title, metadata, user_id) VALUES (?, ?, ?, ?, ?) RETURNING id, started_at`
 );
 export const updateConversation = db.prepare(
-  `UPDATE conversations SET title = COALESCE(?, title), metadata = COALESCE(?, metadata), updated_at = datetime('now') WHERE id = ?`
+  `UPDATE conversations SET title = COALESCE(?, title), metadata = COALESCE(?, metadata), updated_at = datetime('now') WHERE id = ? AND user_id = ?`
 );
 export const getConversation = db.prepare(`SELECT * FROM conversations WHERE id = ?`);
+export const getConversationForUser = db.prepare(`SELECT * FROM conversations WHERE id = ? AND user_id = ?`);
 export const getConversationBySession = db.prepare(
-  `SELECT * FROM conversations WHERE agent = ? AND session_id = ? ORDER BY started_at DESC LIMIT 1`
+  `SELECT * FROM conversations WHERE agent = ? AND session_id = ? AND user_id = ? ORDER BY started_at DESC LIMIT 1`
 );
 export const listConversations = db.prepare(
   `SELECT c.id, c.agent, c.session_id, c.title, c.metadata, c.started_at, c.updated_at,
      (SELECT COUNT(*) FROM messages WHERE conversation_id = c.id) as message_count
-   FROM conversations c ORDER BY c.updated_at DESC LIMIT ?`
+   FROM conversations c WHERE c.user_id = ? ORDER BY c.updated_at DESC LIMIT ?`
 );
 export const listConversationsByAgent = db.prepare(
   `SELECT c.id, c.agent, c.session_id, c.title, c.metadata, c.started_at, c.updated_at,
      (SELECT COUNT(*) FROM messages WHERE conversation_id = c.id) as message_count
-   FROM conversations c WHERE c.agent = ? ORDER BY c.updated_at DESC LIMIT ?`
+   FROM conversations c WHERE c.user_id = ? AND c.agent = ? ORDER BY c.updated_at DESC LIMIT ?`
 );
-export const deleteConversation = db.prepare(`DELETE FROM conversations WHERE id = ?`);
+export const deleteConversation = db.prepare(`DELETE FROM conversations WHERE id = ? AND user_id = ?`);
 export const insertMessage = db.prepare(
   `INSERT INTO messages (conversation_id, role, content, metadata) VALUES (?, ?, ?, ?) RETURNING id, created_at`
 );
@@ -1074,7 +1193,7 @@ export const searchMessages = db.prepare(
    FROM messages_fts f
    JOIN messages m ON f.rowid = m.id
    JOIN conversations c ON m.conversation_id = c.id
-   WHERE messages_fts MATCH ?
+   WHERE messages_fts MATCH ? AND c.user_id = ?
    ORDER BY m.created_at DESC
    LIMIT ?`
 );
@@ -1084,7 +1203,7 @@ export const touchConversation = db.prepare(
 
 // Transaction-safe inserts (no RETURNING — avoids libsql "statements in progress" bug)
 export const insertConversationTx = db.prepare(
-  `INSERT INTO conversations (agent, session_id, title, metadata) VALUES (?, ?, ?, ?)`
+  `INSERT INTO conversations (agent, session_id, title, metadata, user_id) VALUES (?, ?, ?, ?, ?)`
 );
 export const insertMessageTx = db.prepare(
   `INSERT INTO messages (conversation_id, role, content, metadata) VALUES (?, ?, ?, ?)`
@@ -1092,9 +1211,9 @@ export const insertMessageTx = db.prepare(
 const getLastRowId = db.prepare(`SELECT last_insert_rowid() as id`);
 
 export const bulkInsertConvo = db.transaction(
-  (agent: string, sessionId: string | null, title: string | null, metadata: string | null,
+  (agent: string, sessionId: string | null, title: string | null, metadata: string | null, userId: number,
    msgs: Array<{ role: string; content: string; metadata?: string | null }>) => {
-    insertConversationTx.run(agent, sessionId, title, metadata);
+    insertConversationTx.run(agent, sessionId, title, metadata, userId);
     const { id } = getLastRowId.get() as { id: number };
     for (const msg of msgs) {
       insertMessageTx.run(id, msg.role, msg.content, msg.metadata || null);
@@ -1280,4 +1399,28 @@ export const linkKeyToAgent = db.prepare(
 
 export const getAgentExecutions = db.prepare(
   `SELECT id, action, target_type, target_id, details, execution_hash, signature, created_at FROM audit_log WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?`
+);
+
+// ============================================================================
+// USER-SCOPED LOOKUPS
+// ============================================================================
+
+export const getEpisodeForUser = db.prepare(`SELECT * FROM episodes WHERE id = ? AND user_id = ?`);
+
+export const getFSRSForUser = db.prepare(
+  `SELECT fsrs_stability, fsrs_difficulty, fsrs_storage_strength, fsrs_retrieval_strength,
+   fsrs_learning_state, fsrs_reps, fsrs_lapses, fsrs_last_review_at, last_accessed_at, created_at
+   FROM memories WHERE id = ? AND user_id = ?`
+);
+
+export const getEntityForUser = db.prepare(
+  `SELECT e.*, GROUP_CONCAT(DISTINCT me.memory_id) as memory_ids
+   FROM entities e LEFT JOIN memory_entities me ON me.entity_id = e.id
+   WHERE e.id = ? AND e.user_id = ? GROUP BY e.id`
+);
+
+export const getProjectForUser = db.prepare(
+  `SELECT p.*, GROUP_CONCAT(DISTINCT mp.memory_id) as memory_ids
+   FROM projects p LEFT JOIN memory_projects mp ON mp.project_id = p.id
+   WHERE p.id = ? AND p.user_id = ? GROUP BY p.id`
 );

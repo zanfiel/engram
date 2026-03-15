@@ -4,6 +4,7 @@
 
 import { db } from "../db/index.ts";
 import { log } from "../config/logger.ts";
+import { validatePublicUrlWithDNS } from "../helpers/index.ts";
 
 export async function buildDigestPayload(digest: any, userId: number): Promise<any> {
   const now = new Date();
@@ -42,12 +43,14 @@ export async function buildDigestPayload(digest: any, userId: number): Promise<a
     const contras = db.prepare(
       `SELECT ml.source_id, ml.target_id,
          ms.content as a_content, mt.content as b_content
-       FROM memory_links ml
-       JOIN memories ms ON ml.source_id = ms.id
-       JOIN memories mt ON ml.target_id = mt.id
-       WHERE ml.type = 'contradicts' AND ml.created_at > ? AND ms.is_forgotten = 0 AND mt.is_forgotten = 0
-       ORDER BY ml.created_at DESC LIMIT 10`
-    ).all(sinceStr) as any[];
+        FROM memory_links ml
+        JOIN memories ms ON ml.source_id = ms.id
+        JOIN memories mt ON ml.target_id = mt.id
+        WHERE ml.type = 'contradicts' AND ml.created_at > ?
+          AND ms.user_id = ? AND mt.user_id = ?
+          AND ms.is_forgotten = 0 AND mt.is_forgotten = 0
+        ORDER BY ml.created_at DESC LIMIT 10`
+    ).all(sinceStr, userId, userId) as any[];
 
     payload.contradictions = contras.map((c: any) => ({
       memory_a: { id: c.source_id, content: c.a_content.substring(0, 200) },
@@ -80,6 +83,13 @@ export async function sendDigestWebhook(digest: any, payload: any): Promise<void
     const key = await crypto.subtle.importKey("raw", encoder.encode(digest.webhook_secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
     const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(JSON.stringify(payload)));
     headers["X-Engram-Signature"] = Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  // Dispatch-time SSRF revalidation (prevents DNS rebinding)
+  const urlError = await validatePublicUrlWithDNS(digest.webhook_url, "Digest webhook URL");
+  if (urlError) {
+    log.error({ msg: "digest_ssrf_blocked", digest_id: digest.id, error: urlError });
+    throw new Error(urlError);
   }
 
   try {

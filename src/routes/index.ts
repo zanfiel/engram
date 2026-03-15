@@ -24,29 +24,33 @@ import { log } from "../config/logger.ts";
 import {
   db, audit,
   insertMemory, getMemory, listRecent, listByCategory,
-  insertLink, getLinksFor, markForgotten, markArchived, markUnarchived, markSuperseded,
-  getVersionChain, updateMemoryEmbedding, updateMemoryVec,
-  getAllTags, getByTag, insertEpisode, getEpisode, getEpisodeBySession, getEpisodeMemories,
+  insertLink, getLinksFor, getLinksForUser, markForgotten, markArchived, markUnarchived, markSuperseded,
+  getVersionChain, getVersionChainForUser, updateMemoryEmbedding, updateMemoryVec,
+  getAllTags, getByTag, insertEpisode, getEpisode, getEpisodeForUser, getEpisodeBySession, getEpisodeMemories,
   listEpisodes, assignToEpisode, updateEpisode,
   updateEpisodeEmbedding, updateEpisodeVec, searchEpisodesFTS, listEpisodesByTimeRange,
-  insertConversation, getConversation, getConversationBySession, listConversations,
+  insertConversation, getConversation, getConversationForUser, getConversationBySession, listConversations,
   listConversationsByAgent, touchConversation, updateConversation, deleteConversation,
   insertMessage, getMessages, searchMessages, bulkInsertConvo,
   getStaticMemories, getRecentDynamicMemories,
   getAllMemoriesForGraph, getAllLinksForGraph,
-  countNoEmbedding, getMemoryWithoutEmbedding,
-  updateFSRS, getFSRS, trackAccessWithFSRS,
+  countNoEmbedding, countNoEmbeddingForUser, getNoEmbeddingForUser, getMemoryWithoutEmbedding,
+  updateFSRS, getFSRS, getFSRSForUser, trackAccessWithFSRS,
   insertWebhook, listWebhooks, deleteWebhook,
   getChangesSince, getMemoryBySyncId,
-  insertEntity, listEntities, listEntitiesByType, getEntity, getEntityMemories,
+  insertEntity, listEntities, listEntitiesByType, getEntity, getEntityForUser, getEntityMemories,
   getEntityRelationships, updateEntity, deleteEntity,
   linkMemoryEntity, unlinkMemoryEntity, searchEntities,
   insertEntityRelationship, deleteEntityRelationship,
-  insertProject, listProjects, listProjectsByStatus, getProject, getProjectMemories,
+  insertProject, listProjects, listProjectsByStatus, getProject, getProjectForUser, getProjectMemories,
   updateProject, deleteProject, linkMemoryProject, unlinkMemoryProject,
   listPending, countPending, approveMemory, rejectMemory, deleteMemory,
   insertAgent, getAgent as getAgentById, getAgentByName, listAgents, updateAgentTrust,
   revokeAgent, getAgentByKeyId, linkKeyToAgent, getAgentExecutions,
+  updateEpisodeForUser, assignToEpisodeForUser,
+  upsertScratchEntry, listScratchEntries, listScratchEntriesForContext,
+  deleteScratchSession, deleteScratchSessionKey, purgeExpiredScratchpad,
+  updateDecayScores,
 } from "../db/index.ts";
 
 // Embeddings
@@ -73,7 +77,7 @@ import { emitWebhookEvent } from "../platform/webhooks.ts";
 import { buildDigestPayload, sendDigestWebhook, calculateNextSend, processScheduledDigests } from "../platform/digest.ts";
 
 // Helpers
-import { securityHeaders, json, errorResponse, safeError, sanitizeFTS } from "../helpers/index.ts";
+import { securityHeaders, json, errorResponse, safeError, sanitizeFTS, isPrivateHostname } from "../helpers/index.ts";
 
 // Agent signing
 import { signExecution, verifyExecution, createPassport, verifyPassport, computeTrustScore, generateSigningSecret, signMessage, verifyMessage, NonceTracker, verifyToolManifest } from "../../sign/index.ts";
@@ -94,6 +98,35 @@ import {
 // Bind guiAuthed into getAuthOrDefault so routes can call it with just (req)
 function getAuthOrDefault(req: Request): AuthContext | AuthError | null {
   return _getAuthOrDefault(req, guiAuthed);
+}
+
+type ScratchEntryRow = {
+  session: string;
+  agent: string;
+  model: string;
+  entry_key: string;
+  value: string | null;
+  created_at?: string;
+  updated_at: string;
+  expires_at?: string;
+};
+
+function formatScratchTimestamp(updatedAt: string): string {
+  const updatedMs = new Date(updatedAt + (updatedAt.includes("Z") ? "" : "Z")).getTime();
+  if (!Number.isFinite(updatedMs)) return "just now";
+  const diffMin = Math.max(0, Math.round((Date.now() - updatedMs) / 60000));
+  if (diffMin <= 1) return "just now";
+  return `${diffMin}m ago`;
+}
+
+function buildWorkingMemoryBlock(rows: ScratchEntryRow[]): string {
+  if (rows.length === 0) return "";
+  const lines = rows.map((row) => {
+    const model = row.model ? `/${row.model}` : "";
+    const value = row.value?.trim() ? ` ${row.value.trim()}` : "";
+    return `- [${row.agent}${model} #${row.session.slice(0, 8)}] ${row.entry_key}${value} (${formatScratchTimestamp(row.updated_at)})`;
+  });
+  return `<working-memory>\n${lines.join("\n")}\n</working-memory>`;
 }
 
 // Tier 4
@@ -135,40 +168,43 @@ function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-// Decay score calculation
-function calculateDecayScore(mem: any): number {
-  if (mem.fsrs_stability != null && mem.fsrs_stability > 0) {
-    const now = Date.now();
-    const refStr = mem.fsrs_last_review_at || mem.created_at;
-    if (!refStr) return mem.importance * 0.5;
-    const refTime = new Date(refStr + (refStr.includes("Z") ? "" : "Z")).getTime();
-    if (isNaN(refTime)) return mem.importance * 0.5;
-    const elapsedDays = (now - refTime) / (1000 * 60 * 60 * 24);
-    const r = fsrsRetrievability(mem.fsrs_stability, elapsedDays);
-    return mem.importance * r;
+function validatePublicWebhookUrl(rawUrl: string, label: string): string | null {
+  try {
+    const parsed = new URL(rawUrl);
+    if (!["http:", "https:"].includes(parsed.protocol)) return `${label} must be http or https`;
+    if (isPrivateHostname(parsed.hostname.toLowerCase())) return `${label} cannot point to private/internal addresses`;
+    return null;
+  } catch {
+    return `Invalid ${label.toLowerCase()}`;
   }
-  return mem.importance * 0.5;
 }
 
-function updateDecayScores(): number {
-  const all = db.prepare(
-    "SELECT id, importance, fsrs_difficulty, fsrs_stability, fsrs_storage_strength, fsrs_retrieval_strength, fsrs_last_review_at, fsrs_reps, created_at, access_count FROM memories WHERE is_forgotten = 0 AND is_archived = 0"
-  ).all() as any[];
-  let updated = 0;
-  for (const mem of all) {
-    const score = calculateDecayScore(mem);
-    db.prepare("UPDATE memories SET decay_score = ? WHERE id = ?").run(score, mem.id);
-    updated++;
-  }
-  return updated;
+function canAccessOwnedRow(row: { user_id?: number } | null | undefined, auth: AuthContext): boolean {
+  return !!row && (row.user_id === auth.user_id || auth.is_admin);
 }
 
-// Sweep expired memories
-function sweepExpiredMemories(): number {
-  const getExpiredMemories = db.prepare(
-    "SELECT id, content, forget_reason FROM memories WHERE forget_after IS NOT NULL AND forget_after <= datetime('now') AND is_forgotten = 0"
-  );
-  const expired = getExpiredMemories.all() as Array<{ id: number; content: string; forget_reason: string }>;
+function getOwnedEntityIds(ids: unknown, auth: AuthContext): number[] {
+  if (!Array.isArray(ids)) return [];
+  return ids
+    .map((id) => Number(id))
+    .filter((id) => Number.isInteger(id) && !!getEntityForUser.get(id, auth.user_id));
+}
+
+function getOwnedProjectIds(ids: unknown, auth: AuthContext): number[] {
+  if (!Array.isArray(ids)) return [];
+  return ids
+    .map((id) => Number(id))
+    .filter((id) => Number.isInteger(id) && !!getProjectForUser.get(id, auth.user_id));
+}
+
+// Sweep expired memories (tenant-scoped when userId provided)
+function sweepExpiredMemories(userId?: number): number {
+  const query = userId != null
+    ? "SELECT id, content, forget_reason FROM memories WHERE forget_after IS NOT NULL AND forget_after <= datetime('now') AND is_forgotten = 0 AND user_id = ?"
+    : "SELECT id, content, forget_reason FROM memories WHERE forget_after IS NOT NULL AND forget_after <= datetime('now') AND is_forgotten = 0";
+  const expired = (userId != null
+    ? db.prepare(query).all(userId)
+    : db.prepare(query).all()) as Array<{ id: number; content: string; forget_reason: string }>;
   for (const mem of expired) {
     markForgotten.run(mem.id);
     log.debug({ msg: "auto_forgot", id: mem.id, reason: mem.forget_reason || "expired" });
@@ -177,9 +213,10 @@ function sweepExpiredMemories(): number {
 }
 
 // Backfill embeddings
-async function backfillEmbeddings(batchSize: number = 50): Promise<number> {
-  const getNoEmbedding = db.prepare("SELECT id, content FROM memories WHERE embedding IS NULL LIMIT ?");
-  const missing = getNoEmbedding.all(batchSize) as Array<{ id: number; content: string }>;
+async function backfillEmbeddings(batchSize: number = 50, userId?: number): Promise<number> {
+  const missing = (userId == null
+    ? db.prepare("SELECT id, content FROM memories WHERE embedding IS NULL LIMIT ?").all(batchSize)
+    : getNoEmbeddingForUser.all(userId, batchSize)) as Array<{ id: number; content: string }>;
   let count = 0;
   for (const mem of missing) {
     try {
@@ -196,7 +233,7 @@ async function backfillEmbeddings(batchSize: number = 50): Promise<number> {
       const row = getMemory.get(mem.id) as any;
       if (row?.embedding) {
         const emb = bufferToEmbedding(row.embedding);
-        await autoLink(mem.id, emb);
+        await autoLink(mem.id, emb, row.user_id ?? userId);
       }
     }
   }
@@ -208,7 +245,7 @@ function writeVec(id: number, emb: Float32Array): void {
   try { updateMemoryVec.run(embeddingToVectorJSON(emb), id); } catch {}
 }
 
-export { sweepExpiredMemories, backfillEmbeddings, updateDecayScores };
+export { sweepExpiredMemories, backfillEmbeddings };
 
 // ── Signing secret (auto-generated on first run) ──────────────────
 let signingSecret: string;
@@ -372,7 +409,7 @@ async function fetchHandler(req: Request): Promise<Response> {
       log.info({ msg: "req", method, path: url.pathname, status: 401, ms: elapsed, ip: clientIp, rid: requestId });
       return json({ error: "Authentication required. Provide Bearer eg_* token." }, 401, { "X-Request-Id": requestId });
     }
-    const auth: AuthContext = maybeAuth || { user_id: 1, space_id: null, key_id: null, scopes: ["read"], is_admin: false };
+    const auth: AuthContext = maybeAuth || { user_id: 1, space_id: null, key_id: null, agent_id: null, scopes: ["read"], is_admin: false };
 
     // ========================================================================
     // USER MANAGEMENT (admin only)
@@ -584,7 +621,7 @@ async function fetchHandler(req: Request): Promise<Response> {
 
         // Queue embedding backfill for imported memories
         if (imported > 0) {
-          backfillEmbeddings(imported).then(() => invalidateEmbeddingCache()).catch(e => log.error({ msg: "import_backfill_error", error: String(e) }));
+          backfillEmbeddings(imported, auth.user_id).then(() => invalidateEmbeddingCache()).catch(e => log.error({ msg: "import_backfill_error", error: String(e) }));
         }
 
         return json({ imported, failed, total: items.length });
@@ -599,7 +636,14 @@ async function fetchHandler(req: Request): Promise<Response> {
     // BENCH RESET — wipe all data (only in OPEN_ACCESS mode)
     if (url.pathname === "/reset" && method === "POST") {
       if (!OPEN_ACCESS) return errorResponse("Reset only available in OPEN_ACCESS mode", 403);
-      const tables = ["structured_facts", "current_state", "user_preferences", "memory_entities", "memory_projects", "memory_links", "entity_relationships", "entities", "projects", "memories", "memories_fts", "conversations"];
+      const tables = [
+        "reconsolidations", "causal_links", "causal_chains", "temporal_patterns",
+        "scratchpad", "reflections", "digests", "webhooks",
+        "structured_facts", "current_state", "user_preferences",
+        "memory_entities", "memory_projects", "memory_links", "entity_relationships",
+        "consolidations", "episodes", "messages",
+        "entities", "projects", "memories", "memories_fts", "conversations",
+      ];
       let wiped = 0;
       for (const t of tables) {
         try { db.exec("DELETE FROM " + t); wiped++; } catch {}
@@ -611,35 +655,51 @@ async function fetchHandler(req: Request): Promise<Response> {
 
     if (url.pathname === "/health" && method === "GET") {
       log.debug({ msg: "req", method: "GET", path: "/health", status: 200, ip: clientIp, rid: requestId });
-      // S7 FIX: Unauthenticated users get minimal health; authenticated get full details
-      const isAuthed = !!maybeAuth;
-      const memCount = db.prepare("SELECT COUNT(*) as count FROM memories").get() as { count: number };
-      if (!isAuthed) {
-        return json({ status: "ok", version: "5.7.1", memories: memCount.count });
+      // Unauthenticated users get minimal health; authenticated get full details
+      const healthAuth = getAuthOrDefault(req);
+      if (isAuthError(healthAuth)) {
+        return json({ error: healthAuth.error }, healthAuth.status, { "X-Request-Id": requestId, ...(healthAuth.headers || {}) });
       }
-      // Full health for authenticated users
-      const convCount = db.prepare("SELECT COUNT(*) as count FROM conversations").get() as { count: number };
-      const msgCount = db.prepare("SELECT COUNT(*) as count FROM messages").get() as { count: number };
-      const linkCount = db.prepare("SELECT COUNT(*) as count FROM memory_links").get() as { count: number };
-      const embCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE embedding IS NOT NULL").get() as { count: number };
-      const noEmbCount2 = (countNoEmbedding.get() as { count: number }).count;
-      const forgottenCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_forgotten = 1").get() as { count: number };
-      const staticCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_static = 1 AND is_forgotten = 0").get() as { count: number };
-      const versionedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE version > 1").get() as { count: number };
-      const archivedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_archived = 1 AND is_forgotten = 0").get() as { count: number };
-      const pendingCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE status = 'pending' AND is_forgotten = 0").get() as { count: number };
-      const rejectedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE status = 'rejected'").get() as { count: number };
-      const episodeCount = db.prepare("SELECT COUNT(*) as count FROM episodes").get() as { count: number };
-      const consolidationCount = db.prepare("SELECT COUNT(*) as count FROM consolidations").get() as { count: number };
-      const taggedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE tags IS NOT NULL AND is_forgotten = 0").get() as { count: number };
-      const entityCount = db.prepare("SELECT COUNT(*) as count FROM entities").get() as { count: number };
-      const projectCount = db.prepare("SELECT COUNT(*) as count FROM projects").get() as { count: number };
-      const agentCount = db.prepare("SELECT COUNT(*) as count FROM agents WHERE is_active = 1").get() as { count: number };
+      const isAuthed = !!healthAuth;
+      if (!isAuthed) {
+        return json({ status: "ok", version: "5.7.2" });
+      }
+      // Full health for authenticated users — tenant-scoped for non-admins
+      const uid = healthAuth.user_id;
+      const isAdmin = healthAuth.is_admin;
+      const memWhere = isAdmin ? "" : " AND user_id = ?";
+      const memParams = isAdmin ? [] : [uid];
+      const ownedWhere = isAdmin ? "" : " WHERE user_id = ?";
+      const ownedParams = isAdmin ? [] : [uid];
+      const convCount = db.prepare(`SELECT COUNT(*) as count FROM conversations${ownedWhere}`).get(...ownedParams) as { count: number };
+      const msgCount = isAdmin
+        ? db.prepare("SELECT COUNT(*) as count FROM messages").get() as { count: number }
+        : db.prepare("SELECT COUNT(*) as count FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id = ?)").get(uid) as { count: number };
+      const linkCount = isAdmin
+        ? db.prepare("SELECT COUNT(*) as count FROM memory_links").get() as { count: number }
+        : db.prepare("SELECT COUNT(*) as count FROM memory_links WHERE source_id IN (SELECT id FROM memories WHERE user_id = ?)").get(uid) as { count: number };
+      const embCount = db.prepare(`SELECT COUNT(*) as count FROM memories WHERE embedding IS NOT NULL${memWhere}`).get(...memParams) as { count: number };
+      const noEmbCount2 = isAdmin
+        ? (countNoEmbedding.get() as { count: number }).count
+        : (countNoEmbeddingForUser.get(uid) as { count: number }).count;
+      const forgottenCount = db.prepare(`SELECT COUNT(*) as count FROM memories WHERE is_forgotten = 1${memWhere}`).get(...memParams) as { count: number };
+      const staticCount = db.prepare(`SELECT COUNT(*) as count FROM memories WHERE is_static = 1 AND is_forgotten = 0${memWhere}`).get(...memParams) as { count: number };
+      const versionedCount = db.prepare(`SELECT COUNT(*) as count FROM memories WHERE version > 1${memWhere}`).get(...memParams) as { count: number };
+      const archivedCount = db.prepare(`SELECT COUNT(*) as count FROM memories WHERE is_archived = 1 AND is_forgotten = 0${memWhere}`).get(...memParams) as { count: number };
+      const pendingCount = db.prepare(`SELECT COUNT(*) as count FROM memories WHERE status = 'pending' AND is_forgotten = 0${memWhere}`).get(...memParams) as { count: number };
+      const rejectedCount = db.prepare(`SELECT COUNT(*) as count FROM memories WHERE status = 'rejected'${memWhere}`).get(...memParams) as { count: number };
+      const episodeCount = db.prepare(`SELECT COUNT(*) as count FROM episodes${ownedWhere}`).get(...ownedParams) as { count: number };
+      const consolidationCount = db.prepare(`SELECT COUNT(*) as count FROM consolidations${ownedWhere}`).get(...ownedParams) as { count: number };
+      const taggedCount = db.prepare(`SELECT COUNT(*) as count FROM memories WHERE tags IS NOT NULL AND is_forgotten = 0${memWhere}`).get(...memParams) as { count: number };
+      const entityCount = db.prepare(`SELECT COUNT(*) as count FROM entities${ownedWhere}`).get(...ownedParams) as { count: number };
+      const projectCount = db.prepare(`SELECT COUNT(*) as count FROM projects${ownedWhere}`).get(...ownedParams) as { count: number };
+      const agentCount = db.prepare(`SELECT COUNT(*) as count FROM agents WHERE is_active = 1${isAdmin ? "" : " AND user_id = ?"}`).get(...(isAdmin ? [] : [uid])) as { count: number };
+      const scopedMemCount = db.prepare(`SELECT COUNT(*) as count FROM memories WHERE 1=1${memWhere}`).get(...memParams) as { count: number };
       const dbSize = statSync(DB_PATH).size;
       return json({
         status: "ok",
-        version: "5.7.1",
-        memories: memCount.count,
+        version: "5.7.2",
+        memories: scopedMemCount.count,
         embedded: embCount.count,
         unembedded: noEmbCount2,
         links: linkCount.count,
@@ -695,8 +755,119 @@ async function fetchHandler(req: Request): Promise<Response> {
           trust_scoring: true,
           execution_signing: true,
         },
-        db_size_mb: Math.round(dbSize / 1048576 * 100) / 100,
+        ...(isAdmin ? { db_size_mb: Math.round(dbSize / 1048576 * 100) / 100 } : {}),
       });
+    }
+
+    if (url.pathname === "/scratch" && method === "GET") {
+      if (!hasScope(auth, "read")) return errorResponse("Read scope required", 403);
+      try {
+        const agentFilter = url.searchParams.get("agent");
+        const modelFilter = url.searchParams.get("model");
+        const sessionFilter = url.searchParams.get("session");
+        const rows = listScratchEntries.all(
+          auth.user_id,
+          agentFilter, agentFilter,
+          modelFilter, modelFilter,
+          sessionFilter, sessionFilter,
+        ) as ScratchEntryRow[];
+        return json({
+          entries: rows.map((row) => ({
+            session: row.session,
+            agent: row.agent,
+            model: row.model,
+            key: row.entry_key,
+            value: row.value,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            expires_at: row.expires_at,
+          })),
+          count: rows.length,
+        });
+      } catch (e: any) {
+        return safeError("Scratch list", e);
+      }
+    }
+
+    if (url.pathname === "/scratch" && method === "PUT") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const body = await req.json() as any;
+        const session = String(body.session || "").trim();
+        const agent = String(body.agent || "").trim();
+        const model = String(body.model || "").trim();
+        const entries = Array.isArray(body.entries) ? body.entries : [];
+        if (!session) return errorResponse("session is required");
+        if (!agent) return errorResponse("agent is required");
+        if (!model) return errorResponse("model is required");
+        if (entries.length === 0) return errorResponse("entries array is required");
+        if (entries.length > 50) return errorResponse("too many scratch entries (max 50)");
+
+        const cleaned = entries.map((entry: any) => ({
+          key: String(entry?.key || "").trim(),
+          value: entry?.value == null ? "" : String(entry.value),
+        }));
+        if (cleaned.some((entry: any) => !entry.key)) return errorResponse("each scratch entry needs a key");
+
+        const tx = db.transaction(() => {
+          for (const entry of cleaned) {
+            upsertScratchEntry.run(auth.user_id, session, agent, model, entry.key, entry.value);
+          }
+        });
+        tx();
+
+        audit(auth.user_id, "scratch_put", "scratchpad", null, JSON.stringify({ session, entries: cleaned.length }), clientIp, requestId, auth.agent_id ?? null);
+        const rows = listScratchEntries.all(
+          auth.user_id,
+          null, null,
+          null, null,
+          session, session,
+        ) as ScratchEntryRow[];
+        return json({
+          stored: true,
+          session,
+          count: rows.length,
+          entries: rows.map((row) => ({
+            session: row.session,
+            agent: row.agent,
+            model: row.model,
+            key: row.entry_key,
+            value: row.value,
+            updated_at: row.updated_at,
+            expires_at: row.expires_at,
+          })),
+        });
+      } catch (e: any) {
+        return safeError("Scratch put", e);
+      }
+    }
+
+    if (url.pathname.match(/^\/scratch\/[^/]+$/) && method === "DELETE") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const session = decodeURIComponent(url.pathname.split("/")[2] || "").trim();
+        if (!session) return errorResponse("session is required");
+        deleteScratchSession.run(auth.user_id, session);
+        audit(auth.user_id, "scratch_delete_session", "scratchpad", null, JSON.stringify({ session }), clientIp, requestId, auth.agent_id ?? null);
+        return json({ deleted: true, session });
+      } catch (e: any) {
+        return safeError("Scratch delete", e);
+      }
+    }
+
+    if (url.pathname.match(/^\/scratch\/[^/]+\/[^/]+$/) && method === "DELETE") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const parts = url.pathname.split("/");
+        const session = decodeURIComponent(parts[2] || "").trim();
+        const key = decodeURIComponent(parts[3] || "").trim();
+        if (!session || !key) return errorResponse("session and key are required");
+        deleteScratchSessionKey.run(auth.user_id, session, key);
+        audit(auth.user_id, "scratch_delete_key", "scratchpad", null, JSON.stringify({ session, key }), clientIp, requestId, auth.agent_id ?? null);
+        return json({ deleted: true, session, key });
+      } catch (e: any) {
+        return safeError("Scratch delete key", e);
+      }
     }
 
     // ========================================================================
@@ -820,19 +991,19 @@ If no meaningful facts, return {"facts": []}`;
             "UPDATE memories SET user_id = ?, space_id = ?, tags = ?, episode_id = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
           ).run(auth.user_id, auth.space_id || null, tagsJson, episodeId || null, syncId, result.id);
 
-          // Link to entities/projects
-          if (entityIds) for (const eid of entityIds) linkMemoryEntity.run(result.id, eid);
-          if (projectIds) for (const pid of projectIds) linkMemoryProject.run(result.id, pid);
+        // Link to entities/projects
+        for (const eid of getOwnedEntityIds(entityIds, auth)) linkMemoryEntity.run(result.id, eid);
+        for (const pid of getOwnedProjectIds(projectIds, auth)) linkMemoryProject.run(result.id, pid);
 
           // Auto-link
-          if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray); }
+          if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray, auth.user_id); }
 
           // Queue async fact extraction (for relationship detection)
           if (LLM_API_KEY) {
             (async () => {
               try {
                 // S4 FIX: extractFacts takes (content, category, similarMemories), not (id, content, embedding)
-                const allMems = getCachedEmbeddings(true);
+                const allMems = getCachedEmbeddings(true, auth.user_id);
                 const sims: Array<{ id: number; content: string; category: string; score: number }> = [];
                 if (embArray) {
                   for (const mem of allMems) {
@@ -848,7 +1019,7 @@ If no meaningful facts, return {"facts": []}`;
                   if (isCorrection && extraction.relation_to_existing.existing_memory_id && extraction.relation_to_existing.type !== "corrects") {
                     extraction.relation_to_existing.type = "corrects";
                   }
-                  processExtractionResult(result.id, extraction, embArray);
+                  processExtractionResult(result.id, extraction, embArray, auth.user_id);
                 }
               } catch {}
             })();
@@ -1079,16 +1250,16 @@ Return JSON:
               "UPDATE memories SET user_id = ?, space_id = ?, tags = ?, episode_id = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
             ).run(auth.user_id, auth.space_id || null, tags, episode_id || null, syncId, result.id);
 
-            if (entity_ids) for (const eid of entity_ids) linkMemoryEntity.run(result.id, eid);
-            if (project_ids) for (const pid of project_ids) linkMemoryProject.run(result.id, pid);
+            for (const eid of getOwnedEntityIds(entity_ids, auth)) linkMemoryEntity.run(result.id, eid);
+            for (const pid of getOwnedProjectIds(project_ids, auth)) linkMemoryProject.run(result.id, pid);
 
-            if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray); }
+            if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray, auth.user_id); }
 
             if (LLM_API_KEY) {
               (async () => {
                 try {
                   // S4 FIX: extractFacts takes (content, category, similarMemories)
-                  const allMems = getCachedEmbeddings(true);
+                  const allMems = getCachedEmbeddings(true, auth.user_id);
                   const sims: Array<{ id: number; content: string; category: string; score: number }> = [];
                   if (embArray) {
                     for (const mem of allMems) {
@@ -1099,7 +1270,7 @@ Return JSON:
                     sims.sort((a, b) => b.score - a.score);
                   }
                   const extraction = await extractFacts(fact.content.trim(), fact.category || "general", sims.slice(0, 3));
-                  if (extraction) processExtractionResult(result.id, extraction, embArray);
+                  if (extraction) processExtractionResult(result.id, extraction, embArray, auth.user_id);
                 } catch {}
               })();
             }
@@ -1144,9 +1315,9 @@ Return JSON:
            FROM memory_links ml
            JOIN memories ms ON ml.source_id = ms.id
            JOIN memories mt ON ml.target_id = mt.id
-           WHERE ml.type = 'contradicts' AND ms.is_forgotten = 0 AND mt.is_forgotten = 0
+           WHERE ml.type = 'contradicts' AND ms.user_id = ? AND mt.user_id = ? AND ms.is_forgotten = 0 AND mt.is_forgotten = 0
            ORDER BY ml.created_at DESC LIMIT ?`
-        ).all(limitParam) as any[];
+        ).all(auth.user_id, auth.user_id, limitParam) as any[];
 
         const contradictions: Array<{
           memory_a: { id: number; content: string; category: string; created_at: string };
@@ -1170,7 +1341,7 @@ Return JSON:
         // Scan for potential contradictions: high similarity but different content patterns
         // Same category memories with high embedding similarity often contain updates/contradictions
         if (contradictions.length < limitParam) {
-          const allMems = getCachedEmbeddings(true);
+          const allMems = getCachedEmbeddings(true, auth.user_id);
 
           const seenPairs = new Set(contradictions.map(c =>
             `${Math.min(c.memory_a.id, c.memory_b.id)}-${Math.max(c.memory_a.id, c.memory_b.id)}`
@@ -1288,9 +1459,10 @@ Only include pairs that are actual contradictions.`;
           return errorResponse("memory_a_id, memory_b_id, and resolution (keep_a|keep_b|keep_both|merge) required");
         }
 
-        const memA = getMemory.get(memory_a_id) as any;
-        const memB = getMemory.get(memory_b_id) as any;
+        const memA = getMemoryWithoutEmbedding.get(memory_a_id) as any;
+        const memB = getMemoryWithoutEmbedding.get(memory_b_id) as any;
         if (!memA || !memB) return errorResponse("One or both memories not found", 404);
+        if (!canAccessOwnedRow(memA, auth) || !canAccessOwnedRow(memB, auth)) return errorResponse("Forbidden", 403);
 
         if (resolution === "keep_a") {
           markArchived.run(memory_b_id);
@@ -1329,9 +1501,11 @@ Only include pairs that are actual contradictions.`;
           const result = insertMemory.get(
             merged.content, merged.category || memA.category, "contradiction-merge", null,
             Math.max(memA.importance, memB.importance), embBuffer,
-            1, 1, null, null, (memA.source_count || 1) + (memB.source_count || 1), 0, 0, null, null, 0
+            1, 1, null, null, (memA.source_count || 1) + (memB.source_count || 1), 0, 0, null, null, 0,
+            memB.model || memA.model || null
           ) as { id: number; created_at: string };
-          db.prepare("UPDATE memories SET user_id = ? WHERE id = ?").run(auth.user_id, result.id);
+          db.prepare("UPDATE memories SET user_id = ?, tags = ?, episode_id = ?, confidence = ? WHERE id = ?")
+            .run(auth.user_id, memB.tags || memA.tags || null, memB.episode_id || memA.episode_id || null, Math.max(memA.confidence ?? 0, memB.confidence ?? 0, 1.0), result.id);
 
           markArchived.run(memory_a_id);
           markArchived.run(memory_b_id);
@@ -1339,7 +1513,7 @@ Only include pairs that are actual contradictions.`;
           insertLink.run(result.id, memory_b_id, 1.0, "resolves");
           db.prepare("DELETE FROM memory_links WHERE type = 'contradicts' AND ((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))").run(memory_a_id, memory_b_id, memory_b_id, memory_a_id);
 
-          if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray); }
+          if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray, auth.user_id); }
 
           return json({ resolved: true, merged_memory_id: result.id, content: merged.content, archived: [memory_a_id, memory_b_id] });
         }
@@ -1492,6 +1666,7 @@ Only include pairs that are actual contradictions.`;
         const includeStatic = include_static !== false;
         const includeRecent = include_recent !== false;
         const contextStrategy = strategy || "balanced"; // balanced | precision | breadth
+        const workingMemorySession = typeof body.session === "string" && body.session.trim() ? body.session.trim() : null;
 
         const estimateTokens = (text: string) => Math.ceil(text.length / 4);
         const MAX_MEMORY_TOKENS = 600;
@@ -1512,6 +1687,8 @@ Only include pairs that are actual contradictions.`;
           source: string;
           tokens: number;
           created_at?: string;
+          model?: string | null;
+          origin?: string | null;
         }
 
         const blocks: ContextBlock[] = [];
@@ -1523,7 +1700,7 @@ Only include pairs that are actual contradictions.`;
         try { queryEmb = await embed(query); } catch {}
 
         // Build embedding lookup for dedup + static ranking
-        const allCached = getCachedEmbeddings(true);
+        const allCached = getCachedEmbeddings(true, auth.user_id);
         const embMap = new Map<number, { embedding: Float32Array }>();
         for (const c of allCached) {
           if ((c as any).user_id === auth.user_id) embMap.set(c.id, c);
@@ -1553,6 +1730,7 @@ Only include pairs that are actual contradictions.`;
             blocks.push({
               id: mem.id, content: truncated, category: mem.category,
               score: relevance * 100, source: "static", tokens,
+              model: mem.model || null, origin: mem.source || null,
             });
             seenIds.add(mem.id);
             usedTokens += tokens;
@@ -1596,6 +1774,7 @@ Only include pairs that are actual contradictions.`;
           blocks.push({
             id: r.id, content: truncated, category: r.category,
             score, source: "semantic", tokens,
+            model: r.model || null, origin: r.source || null,
           });
           seenIds.add(r.id);
           usedTokens += tokens;
@@ -1610,7 +1789,7 @@ Only include pairs that are actual contradictions.`;
             const epId = mem?.episode_id;
             if (epId && !seenEpisodeIds.has(epId)) {
               seenEpisodeIds.add(epId);
-              const ep = getEpisode.get(epId) as any;
+              const ep = getEpisodeForUser.get(epId, auth.user_id) as any;
               if (ep?.summary) {
                 const truncated = truncateContent(ep.summary);
                 const tokens = estimateTokens(truncated);
@@ -1628,7 +1807,7 @@ Only include pairs that are actual contradictions.`;
           const semanticIds = blocks.filter(b => b.source === "semantic").slice(0, 5).map(b => b.id);
           for (const sid of semanticIds) {
             if (usedTokens >= tokenBudget * 0.85) break;
-            const linked = getLinksFor.all(sid, sid) as any[];
+            const linked = getLinksForUser.all(sid, auth.user_id, sid, auth.user_id) as any[];
             for (const l of linked) {
               if (seenIds.has(l.id) || l.is_forgotten) continue;
               const truncated = truncateContent(l.content);
@@ -1647,6 +1826,7 @@ Only include pairs that are actual contradictions.`;
               blocks.push({
                 id: l.id, content: truncated, category: l.category,
                 score: (l.similarity || 0) * 50, source: "linked", tokens,
+                model: l.model || null, origin: l.source || null,
               });
               seenIds.add(l.id);
               usedTokens += tokens;
@@ -1676,6 +1856,7 @@ Only include pairs that are actual contradictions.`;
             blocks.push({
               id: r.id, content: truncated, category: r.category,
               score: 10, source: "recent", tokens,
+              model: r.model || null, origin: r.source || null,
             });
             seenIds.add(r.id);
             usedTokens += tokens;
@@ -1711,6 +1892,12 @@ Only include pairs that are actual contradictions.`;
         const staticBlocks = blocks.filter(b => b.source === "static");
         const linkedBlocks = blocks.filter(b => b.source === "linked");
         const recentBlocks = blocks.filter(b => b.source === "recent");
+
+        try {
+          const scratchRows = listScratchEntriesForContext.all(auth.user_id, workingMemorySession, workingMemorySession) as ScratchEntryRow[];
+          const workingMemory = buildWorkingMemoryBlock(scratchRows);
+          if (workingMemory) contextParts.push(workingMemory);
+        } catch {}
 
         // Intelligence Layer: Current State (key-value pairs tracked over time)
         try {
@@ -1758,21 +1945,29 @@ Only include pairs that are actual contradictions.`;
           }
         } catch {}
 
+        // Attribution helper: produces "(by model via source)" tag for memory provenance
+        const attrib = (b: ContextBlock): string => {
+          const parts: string[] = [];
+          if (b.model) parts.push(b.model);
+          if (b.origin && b.origin !== "unknown") parts.push(`via ${b.origin}`);
+          return parts.length > 0 ? ` (by ${parts.join(" ")})` : "";
+        };
+
         if (staticBlocks.length > 0) {
-          contextParts.push("## Permanent Facts\n" + staticBlocks.map(b => `- ${b.content}`).join("\n"));
+          contextParts.push("## Permanent Facts\n" + staticBlocks.map(b => `- ${b.content}${attrib(b)}`).join("\n"));
         }
         if (semanticBlocks.length > 0) {
-          contextParts.push("## Relevant Memories\n" + semanticBlocks.map(b => `- [${b.category}] ${b.content}`).join("\n"));
+          contextParts.push("## Relevant Memories\n" + semanticBlocks.map(b => `- [${b.category}] ${b.content}${attrib(b)}`).join("\n"));
         }
         const episodeBlocks = blocks.filter(b => b.source === "episode");
         if (episodeBlocks.length > 0) {
-          contextParts.push("## Episode Context\n" + episodeBlocks.map(b => `- [${b.created_at || ""}] ${b.content}`).join("\n"));
+          contextParts.push("## Episode Context\n" + episodeBlocks.map(b => `- [${b.created_at || ""}] ${b.content}${attrib(b)}`).join("\n"));
         }
         if (linkedBlocks.length > 0) {
-          contextParts.push("## Related Context\n" + linkedBlocks.map(b => `- ${b.content}`).join("\n"));
+          contextParts.push("## Related Context\n" + linkedBlocks.map(b => `- ${b.content}${attrib(b)}`).join("\n"));
         }
         if (recentBlocks.length > 0) {
-          contextParts.push("## Recent Activity\n" + recentBlocks.map(b => `- [${b.created_at || ""}] ${b.content}`).join("\n"));
+          contextParts.push("## Recent Activity\n" + recentBlocks.map(b => `- [${b.created_at || ""}] ${b.content}${attrib(b)}`).join("\n"));
         }
         const inferenceBlocks = blocks.filter(b => b.source === "inference");
         if (inferenceBlocks.length > 0) {
@@ -1781,7 +1976,7 @@ Only include pairs that are actual contradictions.`;
 
         return json({
           context: contextParts.join("\n\n"),
-          blocks: blocks.map(b => ({ id: b.id, category: b.category, source: b.source, score: Math.round(b.score * 100) / 100, tokens: b.tokens })),
+          blocks: blocks.map(b => ({ id: b.id, category: b.category, source: b.source, model: b.model || null, origin: b.origin || null, score: Math.round(b.score * 100) / 100, tokens: b.tokens })),
           token_estimate: usedTokens,
           token_budget: tokenBudget,
           utilization: Math.round(usedTokens / tokenBudget * 100) / 100,
@@ -1924,7 +2119,7 @@ Return JSON:
           JSON.stringify(["reflection", period, ...(result.themes || []).slice(0, 3)]),
           reflectionMem.id
         );
-        if (embArray) await autoLink(reflectionMem.id, embArray);
+        if (embArray) await autoLink(reflectionMem.id, embArray, auth.user_id);
 
         emitWebhookEvent("reflection.created", {
           id: reflectionId.id,
@@ -1977,9 +2172,9 @@ Return JSON:
         const body = await req.json() as any;
         const { webhook_url, webhook_secret, schedule, include_stats, include_new_memories, include_contradictions, include_reflections } = body;
 
-        if (!webhook_url || typeof webhook_url !== "string" || !webhook_url.match(/^https?:\/\//)) {
-          return errorResponse("webhook_url (valid http/https URL) required");
-        }
+        if (!webhook_url || typeof webhook_url !== "string") return errorResponse("webhook_url is required");
+        const webhookError = validatePublicWebhookUrl(webhook_url, "Webhook URL");
+        if (webhookError) return errorResponse(webhookError);
 
         const sched = ["hourly", "daily", "weekly"].includes(schedule) ? schedule : "daily";
 
@@ -2060,7 +2255,7 @@ Return JSON:
       if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const body = await req.json() as any;
-        const { content, category, source, session_id, importance, tags, episode } = body;
+        const { content, category, source, session_id, importance, tags, episode, model } = body;
         if (!content || typeof content !== "string" || content.trim().length === 0) {
           return errorResponse("content is required and must be a non-empty string");
         }
@@ -2117,7 +2312,8 @@ Return JSON:
           session_id || null,
           imp,
           embBuffer,
-          1, 1, null, null, 1, isStatic, 0, forgetAfter, forgetReason, isInference
+          1, 1, null, null, 1, isStatic, 0, forgetAfter, forgetReason, isInference,
+          (model && typeof model === "string") ? model.trim() : null
         ) as { id: number; created_at: string };
 
         // Set user_id, space_id, tags, episode_id, sync_id, confidence
@@ -2130,16 +2326,12 @@ Return JSON:
         // Link to entities and projects if provided
         const entityIds = body.entity_ids as number[] | undefined;
         const projectIds = body.project_ids as number[] | undefined;
-        if (entityIds && Array.isArray(entityIds)) {
-          for (const eid of entityIds) linkMemoryEntity.run(result.id, eid);
-        }
-        if (projectIds && Array.isArray(projectIds)) {
-          for (const pid of projectIds) linkMemoryProject.run(result.id, pid);
-        }
+        for (const eid of getOwnedEntityIds(entityIds, auth)) linkMemoryEntity.run(result.id, eid);
+        for (const pid of getOwnedProjectIds(projectIds, auth)) linkMemoryProject.run(result.id, pid);
 
         // Update episode memory count
         if (episodeId) {
-          updateEpisode.run(null, null, null, episodeId);
+          updateEpisodeForUser.run(null, null, null, episodeId, auth.user_id);
         }
 
         // Calculate initial decay score + FSRS state
@@ -2174,6 +2366,7 @@ Return JSON:
           decay_score: decayScore,
           fact_extraction: isLLMAvailable() ? "queued" : "disabled",
           status: memStatus,
+          model: (model && typeof model === "string") ? model.trim() : null,
         });
 
         audit(auth.user_id, "memory.store", "memory", result.id, (category || "general"), clientIp, requestId);
@@ -2201,13 +2394,13 @@ Return JSON:
 
               // 2. Auto-link to similar memories (in-memory cosine, <1ms)
               const _t2 = Date.now();
-              const linked = await autoLink(capturedMemId, capturedEmbArray);
+              const linked = await autoLink(capturedMemId, capturedEmbArray, auth.user_id);
               log.debug({ msg: "store_autoLink", id: capturedMemId, ms: Date.now() - _t2, linked });
 
               // 3. Fact extraction via LLM (slowest — external API call)
               if (LLM_API_KEY) {
                 try {
-                  const allMems = getCachedEmbeddings(true);
+                  const allMems = getCachedEmbeddings(true, auth.user_id);
                   const similarities: Array<{ id: number; content: string; category: string; score: number }> = [];
                   for (const mem of allMems) {
                     if (mem.id === capturedMemId) continue;
@@ -2221,7 +2414,7 @@ Return JSON:
 
                   const extraction = await extractFacts(capturedContent, capturedCategory, top3);
                   if (extraction) {
-                    processExtractionResult(capturedMemId, extraction, capturedEmbArray);
+                    processExtractionResult(capturedMemId, extraction, capturedEmbArray, auth.user_id);
                     log.debug({ msg: "fact_extraction_done", id: capturedMemId, relation: extraction.relation_to_existing.type });
                   }
                 } catch (e: any) {
@@ -2291,7 +2484,7 @@ Return JSON:
 
         // If still no memory found via search, try semantic search on the correction itself
         if (!correctedMemory && embArray) {
-          const allMems = getCachedEmbeddings(true);
+          const allMems = getCachedEmbeddings(true, auth.user_id);
           let bestSim = 0;
           let bestMem: any = null;
           for (const mem of allMems) {
@@ -2372,7 +2565,7 @@ Return JSON:
                 importance: imp, embedding: capturedEmb,
                 is_static: true, source_count: 1, is_latest: true, is_forgotten: false,
               });
-              autoLink(capturedId, capturedEmb).catch(() => {});
+              autoLink(capturedId, capturedEmb, auth.user_id).catch(() => {});
             } catch (e: any) {
               log.error({ msg: "correction_pipeline_failed", id: capturedId, error: e.message });
             }
@@ -2520,7 +2713,7 @@ Return JSON:
         const results = db.prepare(
           `SELECT id, content, category, source, session_id, importance, created_at,
              version, is_latest, parent_memory_id, root_memory_id, source_count,
-             is_static, is_forgotten, is_inference, forget_after, is_archived, status
+             is_static, is_forgotten, is_inference, forget_after, is_archived, status, model
            FROM memories WHERE source = ? AND is_forgotten = 0 AND is_archived = 0 AND status != 'pending' AND user_id = ?
            ${category ? "AND category = ?" : ""}
            ORDER BY created_at DESC LIMIT ?`
@@ -2585,11 +2778,13 @@ Return JSON:
     // ========================================================================
 
     if (url.pathname.match(/^\/memory\/\d+\/update$/) && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const id = Number(url.pathname.split("/")[2]);
         if (isNaN(id)) return errorResponse("Invalid id");
         const existing = getMemoryWithoutEmbedding.get(id) as any;
         if (!existing) return errorResponse("Not found", 404);
+        if (!canAccessOwnedRow(existing, auth)) return errorResponse("Forbidden", 403);
         if (existing.is_forgotten) return errorResponse("Cannot update a forgotten memory", 400);
 
         const body = await req.json() as any;
@@ -2631,12 +2826,16 @@ Return JSON:
           id,              // parent_memory_id
           rootId,          // root_memory_id
           existing.source_count || 1,
-          existing.is_static ? 1 : 0,
-          0,               // is_forgotten
-          null,            // forget_after
-          null,            // forget_reason
-          existing.is_inference ? 1 : 0
+           existing.is_static ? 1 : 0,
+           0,               // is_forgotten
+           null,            // forget_after
+           null,            // forget_reason
+           existing.is_inference ? 1 : 0,
+           existing.model || null
         ) as { id: number; created_at: string };
+
+        db.prepare("UPDATE memories SET user_id = ?, space_id = ?, tags = ?, episode_id = ?, confidence = ? WHERE id = ?")
+          .run(existing.user_id, auth.space_id || null, existing.tags || null, existing.episode_id || null, existing.confidence ?? 1.0, result.id);
 
         // Link old -> new as "updates"
         insertLink.run(result.id, id, 1.0, "updates");
@@ -2645,7 +2844,7 @@ Return JSON:
         let linked = 0;
         if (embArray) {
           writeVec(result.id, embArray);
-          linked = await autoLink(result.id, embArray);
+          linked = await autoLink(result.id, embArray, auth.user_id);
         }
 
         log.info({ msg: "memory_version_created", old_id: id, new_id: result.id, version: newVersion, root: rootId });
@@ -2673,7 +2872,7 @@ Return JSON:
         const threshold = Number(url.searchParams.get("threshold") || 0.85);
         const limitParam = Math.min(Number(url.searchParams.get("limit") || 50), 200);
 
-        const allMems = getCachedEmbeddings(true);
+        const allMems = getCachedEmbeddings(true, auth.user_id);
 
         // Find clusters of similar memories
         const clusters: Array<{
@@ -2727,13 +2926,14 @@ Return JSON:
     // ========================================================================
 
     if (url.pathname === "/deduplicate" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const body = await req.json() as any;
         const threshold = Number(body.threshold || 0.85);
         const dryRun = body.dry_run !== false; // default to dry run for safety
         const maxMerge = Math.min(Number(body.max_merge || 50), 500);
 
-        const allMems = getCachedEmbeddings(true);
+        const allMems = getCachedEmbeddings(true, auth.user_id);
 
         const merged: Array<{ kept: number; archived: number[]; similarity: number }> = [];
         const seen = new Set<number>();
@@ -2800,6 +3000,7 @@ Return JSON:
         const context = body.context || body.query || ""; // 'query' for BotMemory compat
         const limit = Math.min(Number(body.limit) || 20, 50);
         const includeTags = body.tags as string[] | undefined;
+        const workingMemorySession = typeof body.session === "string" && body.session.trim() ? body.session.trim() : null;
 
         const results: Map<number, { memory: any; score: number; source: string }> = new Map();
 
@@ -2874,7 +3075,7 @@ Return JSON:
           const mem = getMemoryWithoutEmbedding.get(s.memory.id) as any;
           if (mem?.episode_id && !seenEpisodes.has(mem.episode_id)) {
             seenEpisodes.add(mem.episode_id);
-            const ep = getEpisode.get(mem.episode_id) as any;
+            const ep = getEpisodeForUser.get(mem.episode_id, auth.user_id) as any;
             if (ep) {
               episodeContext.push({
                 episode_id: mem.episode_id,
@@ -2884,6 +3085,12 @@ Return JSON:
             }
           }
         }
+
+        let workingMemory = "";
+        try {
+          const scratchRows = listScratchEntriesForContext.all(auth.user_id, workingMemorySession, workingMemorySession) as ScratchEntryRow[];
+          workingMemory = buildWorkingMemoryBlock(scratchRows);
+        } catch {}
 
         return json({
           // Standard Engram format
@@ -2910,6 +3117,7 @@ Return JSON:
             id: s.memory.id, content: s.memory.content, category: s.memory.category,
             source: s.memory.source, score: s.score, createdAt: s.memory.created_at,
           })),
+          ...(workingMemory ? { working_memory: workingMemory } : {}),
           count: sorted.length,
         });
       } catch (e: any) {
@@ -2928,12 +3136,12 @@ Return JSON:
       // Track access
       trackAccessWithFSRS(id);
 
-      const links = getLinksFor.all(id, id) as Array<{
+      const links = getLinksForUser.all(id, auth.user_id, id, auth.user_id) as Array<{
         id: number; similarity: number; type: string; content: string; category: string;
       }>;
 
       const rootId = memory.root_memory_id || memory.id;
-      const chain = getVersionChain.all(rootId, rootId) as Array<{
+      const chain = getVersionChainForUser.all(rootId, rootId, auth.user_id) as Array<{
         id: number; content: string; version: number; is_latest: boolean;
         created_at: string; source_count: number;
       }>;
@@ -2943,7 +3151,7 @@ Return JSON:
       try { tags = memory.tags ? JSON.parse(memory.tags) : []; } catch {}
       let episode = null;
       if (memory.episode_id) {
-        episode = getEpisode.get(memory.episode_id) as any;
+        episode = getEpisodeForUser.get(memory.episode_id, auth.user_id) as any;
       }
 
       return json({
@@ -2977,11 +3185,12 @@ Return JSON:
     // ========================================================================
 
     if (url.pathname === "/backfill" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const body = await req.json().catch(() => ({}));
         const batch = Math.min(Number((body as any).batch) || 50, 200);
-        const count = await backfillEmbeddings(batch);
-        const remaining = (countNoEmbedding.get() as { count: number }).count;
+        const count = await backfillEmbeddings(batch, auth.user_id);
+        const remaining = (countNoEmbeddingForUser.get(auth.user_id) as { count: number }).count;
         return json({ backfilled: count, remaining });
       } catch (e: any) {
         return safeError("Backfill", e);
@@ -2995,7 +3204,9 @@ Return JSON:
     if (url.pathname.startsWith("/links/") && method === "GET") {
       const id = Number(url.pathname.split("/")[2]);
       if (isNaN(id)) return errorResponse("Invalid id");
-      const links = getLinksFor.all(id, id);
+      const mem = getMemoryWithoutEmbedding.get(id) as any;
+      if (!canAccessOwnedRow(mem, auth)) return errorResponse("Not found", 404);
+      const links = getLinksForUser.all(id, auth.user_id, id, auth.user_id);
       return json({ memory_id: id, links });
     }
 
@@ -3032,8 +3243,9 @@ Return JSON:
       if (isNaN(id)) return errorResponse("Invalid id");
       const mem = getMemoryWithoutEmbedding.get(id) as any;
       if (!mem) return errorResponse("Not found", 404);
+      if (!canAccessOwnedRow(mem, auth)) return errorResponse("Not found", 404);
       const rootId = mem.root_memory_id || mem.id;
-      const chain = getVersionChain.all(rootId, rootId);
+      const chain = getVersionChainForUser.all(rootId, rootId, auth.user_id);
       return json({ root_id: rootId, chain });
     }
 
@@ -3042,7 +3254,8 @@ Return JSON:
     // ========================================================================
 
     if (url.pathname === "/sweep" && method === "POST") {
-      const count = sweepExpiredMemories();
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      const count = sweepExpiredMemories(auth.user_id);
       return json({ swept: count });
     }
 
@@ -3051,15 +3264,16 @@ Return JSON:
     // ========================================================================
 
     if (url.pathname === "/conversations" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const body = await req.json() as any;
         const { agent, session_id, title, metadata } = body;
         if (!agent || typeof agent !== "string") return errorResponse("agent is required");
         const result = insertConversation.get(
           agent.trim(), session_id || null, title || null,
-          metadata ? JSON.stringify(metadata) : null
+          metadata ? JSON.stringify(metadata) : null,
+          auth.user_id
         ) as { id: number; started_at: string };
-        db.prepare("UPDATE conversations SET user_id = ? WHERE id = ?").run(auth.user_id, result.id);
         return json({ id: result.id, started_at: result.started_at });
       } catch (e: any) {
         return safeError("create conversation", e);
@@ -3070,14 +3284,14 @@ Return JSON:
       const limit = Math.min(Number(url.searchParams.get("limit") || 50), 500);
       const agent = url.searchParams.get("agent");
       const results = agent
-        ? listConversationsByAgent.all(agent, limit)
-        : listConversations.all(limit);
+        ? listConversationsByAgent.all(auth.user_id, agent, limit)
+        : listConversations.all(auth.user_id, limit);
       return json({ results });
     }
 
     if (/^\/conversations\/\d+$/.test(url.pathname) && method === "GET") {
       const id = Number(url.pathname.split("/")[2]);
-      const conv = getConversation.get(id);
+      const conv = getConversationForUser.get(id, auth.user_id) as any;
       if (!conv) return errorResponse("Not found", 404);
       const limit = Math.min(Number(url.searchParams.get("limit") || 10000), 100000);
       const offset = Number(url.searchParams.get("offset") || 0);
@@ -3086,13 +3300,17 @@ Return JSON:
     }
 
     if (/^\/conversations\/\d+$/.test(url.pathname) && method === "PATCH") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const id = Number(url.pathname.split("/")[2]);
+        const conv = getConversationForUser.get(id, auth.user_id) as any;
+        if (!conv) return errorResponse("Not found", 404);
         const body = await req.json() as any;
         updateConversation.run(
           body.title || null,
           body.metadata ? JSON.stringify(body.metadata) : null,
-          id
+          id,
+          auth.user_id
         );
         return json({ updated: true, id });
       } catch (e: any) {
@@ -3101,8 +3319,9 @@ Return JSON:
     }
 
     if (/^\/conversations\/\d+$/.test(url.pathname) && method === "DELETE") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       const id = Number(url.pathname.split("/")[2]);
-      deleteConversation.run(id);
+      deleteConversation.run(id, auth.user_id);
       return json({ deleted: true, id });
     }
 
@@ -3111,9 +3330,10 @@ Return JSON:
     // ========================================================================
 
     if (/^\/conversations\/\d+\/messages$/.test(url.pathname) && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const convId = Number(url.pathname.split("/")[2]);
-        const conv = getConversation.get(convId);
+        const conv = getConversationForUser.get(convId, auth.user_id);
         if (!conv) return errorResponse("Conversation not found", 404);
         const body = await req.json() as any;
         const msgs = Array.isArray(body) ? body : [body];
@@ -3137,6 +3357,7 @@ Return JSON:
     // ========================================================================
 
     if (url.pathname === "/conversations/bulk" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const body = await req.json() as any;
         const { agent, session_id, title, metadata, messages: msgs } = body;
@@ -3147,6 +3368,7 @@ Return JSON:
         const conv = bulkInsertConvo(
           agent.trim(), session_id || null, title || null,
           metadata ? JSON.stringify(metadata) : null,
+          auth.user_id,
           msgs.map((m: any) => ({
             role: m.role || "user",
             content: m.content || "",
@@ -3160,18 +3382,20 @@ Return JSON:
     }
 
     if (url.pathname === "/conversations/upsert" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const body = await req.json() as any;
         const { agent, session_id, title, metadata, messages: msgs } = body;
         if (!agent) return errorResponse("agent is required");
         if (!session_id) return errorResponse("session_id is required for upsert");
 
-        let conv = getConversationBySession.get(agent, session_id) as any;
+        let conv = getConversationBySession.get(agent, session_id, auth.user_id) as any;
         let created = false;
         if (!conv) {
           const result = insertConversation.get(
             agent, session_id, title || null,
-            metadata ? JSON.stringify(metadata) : null
+            metadata ? JSON.stringify(metadata) : null,
+            auth.user_id
           ) as { id: number; started_at: string };
           conv = { id: result.id };
           created = true;
@@ -3179,7 +3403,8 @@ Return JSON:
           updateConversation.run(
             title || null,
             metadata ? JSON.stringify(metadata) : null,
-            conv.id
+            conv.id,
+            auth.user_id
           );
         }
 
@@ -3212,7 +3437,7 @@ Return JSON:
         if (!query || typeof query !== "string") return errorResponse("query is required");
         const sanitized = sanitizeFTS(query);
         if (!sanitized) return json({ results: [] });
-        const results = searchMessages.all(sanitized, Math.min(limit || 30, 200));
+        const results = searchMessages.all(sanitized, auth.user_id, Math.min(limit || 30, 200));
         return json({ results });
       } catch (e: any) {
         return safeError("Search", e);
@@ -3252,7 +3477,7 @@ Return JSON:
             initFSRS2.last_review_at, result.id
           );
           writeVec(result.id, embArray);
-          await autoLink(result.id, embArray);
+          await autoLink(result.id, embArray, auth.user_id);
           return json({ created: true, id: result.id });
         } catch (e: any) {
           return safeError("Operation", e);
@@ -3389,7 +3614,7 @@ Return JSON:
 
         // Update with summary, timestamps, duration
         if (summary || body.ended_at) {
-          updateEpisode.run(body.title || null, summary, body.ended_at || null, ep.id);
+          updateEpisodeForUser.run(body.title || null, summary, body.ended_at || null, ep.id, auth.user_id);
         }
         if (body.started_at && body.ended_at) {
           const dur = Math.round((new Date(body.ended_at).getTime() - new Date(body.started_at).getTime()) / 1000);
@@ -3454,11 +3679,11 @@ Return JSON:
 
           scored.sort((a, b) => b.score - a.score);
           const topIds = scored.slice(0, limit).map(s => s.id);
-          const episodes = topIds.map(id => {
-            const ep = getEpisode.get(id) as any;
-            const s = scored.find(x => x.id === id);
-            return ep ? { ...ep, score: Math.round((s?.score || 0) * 1000) / 1000 } : null;
-          }).filter(Boolean);
+            const episodes = topIds.map(id => {
+              const ep = getEpisodeForUser.get(id, auth.user_id) as any;
+              const s = scored.find(x => x.id === id);
+              return ep ? { ...ep, score: Math.round((s?.score || 0) * 1000) / 1000 } : null;
+            }).filter(Boolean);
 
           return json({ episodes });
         } catch (e: any) {
@@ -3473,9 +3698,9 @@ Return JSON:
 
     if (/^\/episodes\/\d+$/.test(url.pathname) && method === "GET") {
       const id = Number(url.pathname.split("/")[2]);
-      const episode = getEpisode.get(id) as any;
+      const episode = getEpisodeForUser.get(id, auth.user_id) as any;
       if (!episode) return errorResponse("Episode not found", 404);
-      const memories = getEpisodeMemories.all(id) as any[];
+      const memories = getEpisodeMemories.all(id, auth.user_id) as any[];
       for (const m of memories) {
         try { m.tags = JSON.parse(m.tags); } catch { m.tags = []; }
       }
@@ -3486,8 +3711,10 @@ Return JSON:
       if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const id = Number(url.pathname.split("/")[2]);
+        const episode = getEpisodeForUser.get(id, auth.user_id) as any;
+        if (!episode) return errorResponse("Episode not found", 404);
         const body = await req.json() as any;
-        updateEpisode.run(body.title || null, body.summary || null, body.ended_at || null, id);
+        updateEpisodeForUser.run(body.title || null, body.summary || null, body.ended_at || null, id, auth.user_id);
         // Re-embed if summary changed
         if (body.summary) {
           try {
@@ -3507,15 +3734,19 @@ Return JSON:
       if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const episodeId = Number(url.pathname.split("/")[2]);
+        const episode = getEpisodeForUser.get(episodeId, auth.user_id) as any;
+        if (!episode) return errorResponse("Episode not found", 404);
         const body = await req.json() as any;
         const memoryIds = body.memory_ids;
         if (!Array.isArray(memoryIds)) return errorResponse("memory_ids array required");
         let assigned = 0;
         for (const mid of memoryIds) {
-          assignToEpisode.run(episodeId, mid);
+          const mem = getMemoryWithoutEmbedding.get(mid) as any;
+          if (!canAccessOwnedRow(mem, auth)) continue;
+          assignToEpisodeForUser.run(episodeId, mid, auth.user_id);
           assigned++;
         }
-        updateEpisode.run(null, null, null, episodeId);
+        updateEpisodeForUser.run(null, null, null, episodeId, auth.user_id);
         return json({ assigned, episode_id: episodeId });
       } catch (e: any) {
         return safeError("assign memories", e);
@@ -3527,10 +3758,10 @@ Return JSON:
       if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const episodeId = Number(url.pathname.split("/")[2]);
-        const ep = getEpisode.get(episodeId) as any;
+        const ep = getEpisodeForUser.get(episodeId, auth.user_id) as any;
         if (!ep) return errorResponse("Episode not found", 404);
 
-        const memories = getEpisodeMemories.all(episodeId) as Array<{ content: string; category: string; created_at: string }>;
+        const memories = getEpisodeMemories.all(episodeId, auth.user_id) as Array<{ content: string; category: string; created_at: string }>;
         if (memories.length === 0) return errorResponse("Episode has no memories", 400);
 
         let summary = ep.summary;
@@ -3552,7 +3783,7 @@ Return JSON:
         }
 
         const endedAt = new Date().toISOString().replace("T", " ").replace("Z", "");
-        updateEpisode.run(ep.title || `Session ${ep.session_id || ep.id}`, summary, endedAt, episodeId);
+        updateEpisodeForUser.run(ep.title || `Session ${ep.session_id || ep.id}`, summary, endedAt, episodeId, auth.user_id);
 
         // Calculate duration
         if (ep.started_at) {
@@ -3831,9 +4062,10 @@ Return JSON:
       const rows = db.prepare(
         `SELECT c.id, c.summary_memory_id, c.source_memory_ids, c.cluster_label, c.created_at,
           m.content as summary_content
-         FROM consolidations c JOIN memories m ON c.summary_memory_id = m.id
-         ORDER BY c.created_at DESC LIMIT 50`
-      ).all() as any[];
+          FROM consolidations c JOIN memories m ON c.summary_memory_id = m.id
+          WHERE c.user_id = ?
+          ORDER BY c.created_at DESC LIMIT 50`
+      ).all(auth.user_id) as any[];
       for (const r of rows) {
         try { r.source_memory_ids = JSON.parse(r.source_memory_ids); } catch {}
       }
@@ -3845,7 +4077,8 @@ Return JSON:
     // ========================================================================
 
     if (url.pathname === "/decay/refresh" && method === "POST") {
-      const updated = updateDecayScores();
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      const updated = updateDecayScores(auth.user_id);
       return json({ refreshed: updated });
     }
 
@@ -3857,21 +4090,24 @@ Return JSON:
            created_at, is_static, source_count, confidence,
            fsrs_stability, fsrs_difficulty, fsrs_storage_strength, fsrs_retrieval_strength,
            fsrs_learning_state, fsrs_reps, fsrs_lapses, fsrs_last_review_at
-         FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1
+         FROM memories WHERE user_id = ? AND is_forgotten = 0 AND is_archived = 0 AND is_latest = 1
          ORDER BY COALESCE(decay_score, importance) ${order} LIMIT ?`
-      ).all(limit) as any[];
+      ).all(auth.user_id, limit) as any[];
       return json({ memories: rows });
     }
 
     // FSRS-6 endpoints
     if (url.pathname === "/fsrs/review" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       try {
         const body = await req.json() as any;
         const id = Number(body.id);
         const grade = Number(body.grade || 3) as FSRSRating;
         if (!id || grade < 1 || grade > 4) return errorResponse("id required, grade 1-4", 400);
+        const mem = getMemoryWithoutEmbedding.get(id) as any;
+        if (!canAccessOwnedRow(mem, auth)) return errorResponse("not found", 404);
         trackAccessWithFSRS(id, grade);
-        const updated = getFSRS.get(id) as any;
+        const updated = getFSRSForUser.get(id, auth.user_id) as any;
         return json({ id, fsrs: updated });
       } catch (e: any) { return errorResponse(e.message, 400); }
     }
@@ -3879,7 +4115,7 @@ Return JSON:
     if (url.pathname === "/fsrs/state" && method === "GET") {
       const id = Number(url.searchParams.get("id"));
       if (!id) return errorResponse("id required", 400);
-      const row = getFSRS.get(id) as any;
+      const row = getFSRSForUser.get(id, auth.user_id) as any;
       if (!row) return errorResponse("not found", 404);
       const elapsed = row.fsrs_last_review_at
         ? (Date.now() - new Date(row.fsrs_last_review_at + "Z").getTime()) / 86400000
@@ -3894,10 +4130,11 @@ Return JSON:
     }
 
     if (url.pathname === "/fsrs/init" && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       // Backfill FSRS state for all memories that don't have it
       const uninitialized = db.prepare(
-        `SELECT id, created_at FROM memories WHERE fsrs_stability IS NULL AND is_forgotten = 0 AND is_latest = 1`
-      ).all() as any[];
+        `SELECT id, created_at FROM memories WHERE user_id = ? AND fsrs_stability IS NULL AND is_forgotten = 0 AND is_latest = 1`
+      ).all(auth.user_id) as any[];
       let count = 0;
       const batch = db.transaction(() => {
         for (const m of uninitialized) {
@@ -4084,6 +4321,86 @@ ${memoryBlock}
     }
 
     // ========================================================================
+    // HEADER — Universal prompt header for multi-model attribution
+    // ========================================================================
+
+    if (url.pathname === "/header" && method === "POST") {
+      try {
+        const body = await req.json() as any;
+        const actorModel = body.actor_model || "unknown";
+        const actorRole = body.actor_role || "assistant"; // audit | verify | fix | assistant
+        const taskContext = body.context || "";
+        const limit = Math.min(Number(body.limit) || 10, 30);
+
+        // Find recent memories from OTHER models to surface prior work
+        const recentAll = db.prepare(
+          `SELECT id, content, category, source, model, created_at, importance
+           FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1 AND user_id = ?
+           ORDER BY created_at DESC LIMIT ?`
+        ).all(auth.user_id, limit * 3) as any[];
+
+        const priorModels = new Set<string>();
+        const priorWork: any[] = [];
+        for (const m of recentAll) {
+          if (m.model && m.model !== actorModel) {
+            priorModels.add(m.model);
+            if (priorWork.length < limit) {
+              priorWork.push({ id: m.id, model: m.model, source: m.source, category: m.category, summary: m.content.slice(0, 200), created_at: m.created_at });
+            }
+          }
+        }
+
+        // Build structured header
+        const header: any = {
+          actor_model: actorModel,
+          actor_role: actorRole,
+          prior_models: Array.from(priorModels),
+          prior_work_count: priorWork.length,
+          prior_work: priorWork,
+          attribution_rule: "Memories tagged with a model field were stored by that model, not by you. Do not claim credit for work done by other models. When referencing prior work, attribute it to the model that performed it.",
+        };
+
+        // If context provided, find relevant attributed memories
+        if (taskContext.trim()) {
+          const relevant = await hybridSearch(taskContext, 10, false, true, false, auth.user_id);
+          header.relevant_attributed = relevant.map(r => ({
+            id: r.id, model: r.model || null, source: r.source, category: r.category,
+            summary: r.content.slice(0, 200), score: Math.round((r.score || 0) * 1000) / 1000,
+          }));
+        }
+
+        // Generate the text header for injection into system prompts
+        const lines = [
+          `# Engram Task Header`,
+          `actor_model: ${actorModel}`,
+          `actor_role: ${actorRole}`,
+          `prior_models: [${Array.from(priorModels).join(", ")}]`,
+          ``,
+          `## Attribution Rule`,
+          `You are ${actorModel}. Memories in Engram tagged with a different model were NOT created by you.`,
+          `When you see "(by X via Y)" on a memory, model X stored it via client Y.`,
+          `Do not take credit for prior work. Attribute it correctly when referencing it.`,
+        ];
+
+        if (priorWork.length > 0) {
+          lines.push(``, `## Recent Work by Other Models`);
+          for (const pw of priorWork.slice(0, 5)) {
+            lines.push(`- [${pw.model}] ${pw.summary}${pw.summary.length >= 200 ? "..." : ""}`);
+          }
+        }
+
+        return json({
+          header: header,
+          text: lines.join("\n"),
+          actor_model: actorModel,
+          prior_models: Array.from(priorModels),
+        });
+      } catch (e: any) {
+        return safeError("Header generation", e);
+      }
+    }
+
+    // ========================================================================
     // WEBHOOKS — v4.2
     // ========================================================================
 
@@ -4092,22 +4409,8 @@ ${memoryBlock}
       try {
         const body = await req.json() as any;
         if (!body.url) return errorResponse("url is required");
-        // S6 FIX: Validate webhook URL — block private/internal IPs (SSRF protection)
-        try {
-          const webhookUrl = new URL(body.url);
-          if (!["http:", "https:"].includes(webhookUrl.protocol)) return errorResponse("Webhook URL must be http or https");
-          const hostname = webhookUrl.hostname.toLowerCase();
-          // Block private/internal IPs
-          if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" ||
-              hostname === "0.0.0.0" || hostname.startsWith("10.") || hostname.startsWith("192.168.") ||
-              hostname.startsWith("172.16.") || hostname.startsWith("172.17.") || hostname.startsWith("172.18.") ||
-              hostname.startsWith("172.19.") || hostname.startsWith("172.2") || hostname.startsWith("172.30.") ||
-              hostname.startsWith("172.31.") || hostname.endsWith(".local") || hostname.endsWith(".internal") ||
-              hostname.startsWith("100.64.") || hostname.startsWith("169.254.") || hostname.startsWith("fc") ||
-              hostname.startsWith("fd") || hostname === "[::1]") {
-            return errorResponse("Webhook URL cannot point to private/internal addresses", 400);
-          }
-        } catch { return errorResponse("Invalid webhook URL", 400); }
+        const webhookError = validatePublicWebhookUrl(body.url, "Webhook URL");
+        if (webhookError) return errorResponse(webhookError, 400);
         const events = body.events || ["*"];
         const secret = body.secret || null;
         const result = insertWebhook.get(body.url, JSON.stringify(events), secret, auth.user_id) as { id: number; created_at: string };
@@ -4126,6 +4429,7 @@ ${memoryBlock}
     }
 
     if (url.pathname.match(/^\/webhooks\/\d+$/) && method === "DELETE") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
       const id = Number(url.pathname.split("/")[2]);
       deleteWebhook.run(id, auth.user_id);
       return json({ deleted: true, id });
@@ -4161,20 +4465,20 @@ ${memoryBlock}
         for (const mem of memories) {
           if (!mem.sync_id || !mem.content) { skipped++; continue; }
 
-          const existing = getMemoryBySyncId.get(mem.sync_id) as any;
+          const existing = getMemoryBySyncId.get(mem.sync_id, auth.user_id) as any;
           if (existing) {
             // Conflict resolution: last-write-wins
             if (mem.updated_at > existing.updated_at) {
               db.prepare(
                 `UPDATE memories SET content = ?, category = ?, importance = ?, tags = ?,
                  confidence = ?, is_static = ?, is_forgotten = ?, is_archived = ?,
-                 updated_at = ? WHERE id = ?`
+                 model = COALESCE(?, model), updated_at = ? WHERE id = ?`
               ).run(
                 mem.content, mem.category || "general", mem.importance || 5,
                 mem.tags ? JSON.stringify(mem.tags) : null,
                 mem.confidence ?? 1.0, mem.is_static ? 1 : 0,
                 mem.is_forgotten ? 1 : 0, mem.is_archived ? 1 : 0,
-                mem.updated_at, existing.id
+                mem.model || null, mem.updated_at, existing.id
               );
               // Re-embed on content change
               try {
@@ -4188,22 +4492,26 @@ ${memoryBlock}
           } else {
             // New memory from remote
             let embBuffer: Buffer | null = null;
-            try { embBuffer = embeddingToBuffer(await embed(mem.content)); } catch {}
+            let embArray: Float32Array | null = null;
+            try {
+              embArray = await embed(mem.content);
+              embBuffer = embeddingToBuffer(embArray);
+            } catch {}
             const result = insertMemory.get(
               mem.content, mem.category || "general", mem.source || "sync", mem.session_id || null,
               mem.importance || 5, embBuffer, mem.version || 1, 1, null, null, 1,
-              mem.is_static ? 1 : 0, mem.is_forgotten ? 1 : 0, null, null, 0
+              mem.is_static ? 1 : 0, mem.is_forgotten ? 1 : 0, null, null, 0,
+              mem.model || null
             ) as { id: number; created_at: string };
             db.prepare(
-              "UPDATE memories SET user_id = ?, sync_id = ?, tags = ?, confidence = ?, is_archived = ? WHERE id = ?"
+              "UPDATE memories SET user_id = ?, sync_id = ?, tags = ?, confidence = ?, is_archived = ?, model = COALESCE(?, model) WHERE id = ?"
             ).run(
               auth.user_id, mem.sync_id, mem.tags ? JSON.stringify(mem.tags) : null,
-              mem.confidence ?? 1.0, mem.is_archived ? 1 : 0, result.id
+              mem.confidence ?? 1.0, mem.is_archived ? 1 : 0, mem.model || null, result.id
             );
-            if (embBuffer) {
-              const embArray = await embed(mem.content);
+            if (embArray) {
               writeVec(result.id, embArray);
-              await autoLink(result.id, embArray);
+              await autoLink(result.id, embArray, auth.user_id);
             }
             created++;
           }
@@ -4325,7 +4633,7 @@ If no meaningful inferences, return {"derived": []}`;
             }
           }
 
-          if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray); }
+          if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray, auth.user_id); }
 
           emitWebhookEvent("memory.derived", {
             id: result.id, content: d.content.trim(), confidence: d.confidence,
@@ -4379,7 +4687,7 @@ If no meaningful inferences, return {"derived": []}`;
             "UPDATE memories SET user_id = ?, tags = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
           ).run(auth.user_id, JSON.stringify(tags), randomUUID(), result.id);
 
-          if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray); }
+          if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray, auth.user_id); }
           imported++;
         }
 
@@ -4452,7 +4760,7 @@ If no meaningful inferences, return {"derived": []}`;
             "UPDATE memories SET user_id = ?, tags = ?, sync_id = ?, confidence = 1.0 WHERE id = ?"
           ).run(auth.user_id, JSON.stringify([...new Set(tags)]), randomUUID(), result.id);
 
-          if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray); }
+          if (embArray) { writeVec(result.id, embArray); await autoLink(result.id, embArray, auth.user_id); }
           imported++;
         }
 
@@ -4495,8 +4803,12 @@ If no meaningful inferences, return {"derived": []}`;
             const ph = frontier.map(() => "?").join(",");
             const linked = db.prepare(
               `SELECT DISTINCT CASE WHEN source_id IN (${ph}) THEN target_id ELSE source_id END as linked_id
-               FROM memory_links WHERE source_id IN (${ph}) OR target_id IN (${ph})`
-            ).all(...frontier, ...frontier, ...frontier) as any[];
+               FROM memory_links ml
+               JOIN memories ms ON ms.id = ml.source_id
+               JOIN memories mt ON mt.id = ml.target_id
+               WHERE (source_id IN (${ph}) OR target_id IN (${ph}))
+                 AND ms.user_id = ? AND mt.user_id = ?`
+            ).all(...frontier, ...frontier, ...frontier, auth.user_id, auth.user_id) as any[];
             frontier = [];
             for (const r of linked) {
               if (!visited.has(r.linked_id) && visited.size < maxNodes) {
@@ -4533,8 +4845,8 @@ If no meaningful inferences, return {"derived": []}`;
             `SELECT id, content, category, source, importance, confidence, created_at,
                     is_static, is_forgotten, is_archived, parent_memory_id, source_count,
                     version, forget_after
-             FROM memories WHERE id IN (${ph}) AND is_forgotten = 0`
-          ).all(...chunk) as any[];
+             FROM memories WHERE id IN (${ph}) AND user_id = ? AND is_forgotten = 0`
+          ).all(...chunk, auth.user_id) as any[];
           allMems.push(...rows);
         }
 
@@ -4561,9 +4873,12 @@ If no meaningful inferences, return {"derived": []}`;
           // For links, both source and target must be in the full set
           // Use subquery for the full set if chunked
           const linkRows = db.prepare(
-            `SELECT source_id, target_id, similarity, type FROM memory_links
-             WHERE source_id IN (${ph}) OR target_id IN (${ph})`
-          ).all(...chunk, ...chunk) as any[];
+            `SELECT ml.source_id, ml.target_id, ml.similarity, ml.type FROM memory_links ml
+             JOIN memories ms ON ms.id = ml.source_id
+             JOIN memories mt ON mt.id = ml.target_id
+             WHERE (ml.source_id IN (${ph}) OR ml.target_id IN (${ph}))
+               AND ms.user_id = ? AND mt.user_id = ?`
+          ).all(...chunk, ...chunk, auth.user_id, auth.user_id) as any[];
           const validSet = new Set(validIds);
           for (const link of linkRows) {
             if (validSet.has(link.source_id) && validSet.has(link.target_id)) {
@@ -4582,8 +4897,8 @@ If no meaningful inferences, return {"derived": []}`;
             const ph = chunk.map(() => "?").join(",");
             const meRows = db.prepare(
               `SELECT me.memory_id, e.id, e.name, e.type FROM entities e
-               JOIN memory_entities me ON me.entity_id = e.id WHERE me.memory_id IN (${ph})`
-            ).all(...chunk) as any[];
+               JOIN memory_entities me ON me.entity_id = e.id WHERE me.memory_id IN (${ph}) AND e.user_id = ?`
+            ).all(...chunk, auth.user_id) as any[];
             for (const ent of meRows) {
               const entNodeId = `e${ent.id}`;
               if (!nodes.has(entNodeId)) {
@@ -4596,9 +4911,12 @@ If no meaningful inferences, return {"derived": []}`;
           if (entityIds.length > 0) {
             const eph = entityIds.map(() => "?").join(",");
             const rels = db.prepare(
-              `SELECT source_entity_id, target_entity_id, relationship FROM entity_relationships
-               WHERE source_entity_id IN (${eph}) OR target_entity_id IN (${eph})`
-            ).all(...entityIds, ...entityIds) as any[];
+              `SELECT er.source_entity_id, er.target_entity_id, er.relationship FROM entity_relationships er
+               JOIN entities es ON es.id = er.source_entity_id
+               JOIN entities et ON et.id = er.target_entity_id
+               WHERE (er.source_entity_id IN (${eph}) OR er.target_entity_id IN (${eph}))
+                 AND es.user_id = ? AND et.user_id = ?`
+            ).all(...entityIds, ...entityIds, auth.user_id, auth.user_id) as any[];
             for (const r of rels) {
               edges.push({ source: `e${r.source_entity_id}`, target: `e${r.target_entity_id}`, type: r.relationship, weight: 0.9 });
             }
@@ -4615,7 +4933,11 @@ If no meaningful inferences, return {"derived": []}`;
         for (const proj of projectNodes) {
           const projNodeId = `p${proj.id}`;
           nodes.set(projNodeId, { id: projNodeId, label: proj.name, type: "project", group: "project", size: 10 });
-          const projMems = db.prepare("SELECT memory_id FROM memory_projects WHERE project_id = ?").all(proj.id) as any[];
+           const projMems = db.prepare(
+             `SELECT mp.memory_id FROM memory_projects mp
+              JOIN memories m ON m.id = mp.memory_id
+              WHERE mp.project_id = ? AND m.user_id = ?`
+           ).all(proj.id, auth.user_id) as any[];
           for (const pm of projMems) {
             if (nodes.has(`m${(pm as any).memory_id}`)) {
               edges.push({ source: projNodeId, target: `m${(pm as any).memory_id}`, type: "contains", weight: 0.8 });
@@ -4634,8 +4956,8 @@ If no meaningful inferences, return {"derived": []}`;
 
         // Graph visualization page
     if (url.pathname === "/graph/view" && method === "GET") {
-      const graphHtml = await readFile(resolve(__dirname, "engram-graph.html"), "utf-8").catch(() => null);
-      if (!graphHtml) return errorResponse("Graph view not found. Place engram-graph.html alongside server-split.ts", 404);
+      const graphHtml = await readFile(resolve(DATA_DIR, "..", "engram-graph.html"), "utf-8").catch(() => null);
+      if (!graphHtml) return errorResponse("Graph view not found. Place engram-graph.html in the project root", 404);
       return new Response(graphHtml, { headers: { "Content-Type": "text/html" } });
     }
 
@@ -4684,13 +5006,14 @@ If no meaningful inferences, return {"derived": []}`;
     // Get single entity with details
     if (url.pathname.match(/^\/entities\/\d+$/) && method === "GET") {
       const id = Number(url.pathname.split("/")[2]);
-      const entity = getEntity.get(id) as any;
+      const entity = getEntityForUser.get(id, auth.user_id) as any;
       if (!entity) return errorResponse("Entity not found", 404);
       try { if (entity.metadata) entity.metadata = JSON.parse(entity.metadata); } catch {}
       entity.memory_ids = entity.memory_ids ? entity.memory_ids.split(",").map(Number) : [];
-      entity.relationships = getEntityRelationships.all(id, id, id, id, id) as any[];
+      entity.relationships = (getEntityRelationships.all(id, id, id, id, id) as any[])
+        .filter((rel) => !!getEntityForUser.get(rel.related_entity_id, auth.user_id));
       const limit = Math.min(Number(url.searchParams.get("limit") || 20), 100);
-      entity.memories = getEntityMemories.all(id, limit) as any[];
+      entity.memories = getEntityMemories.all(id, auth.user_id, limit) as any[];
       for (const m of entity.memories) {
         try { if (m.tags) m.tags = JSON.parse(m.tags); } catch { m.tags = []; }
       }
@@ -4728,6 +5051,9 @@ If no meaningful inferences, return {"derived": []}`;
       const parts = url.pathname.split("/");
       const entityId = Number(parts[2]);
       const memoryId = Number(parts[4]);
+      if (!getEntityForUser.get(entityId, auth.user_id)) return errorResponse("Entity not found", 404);
+      const mem = getMemoryWithoutEmbedding.get(memoryId) as any;
+      if (!canAccessOwnedRow(mem, auth)) return errorResponse("Memory not found", 404);
       linkMemoryEntity.run(memoryId, entityId);
       return json({ linked: true, entity_id: entityId, memory_id: memoryId });
     }
@@ -4738,6 +5064,9 @@ If no meaningful inferences, return {"derived": []}`;
       const parts = url.pathname.split("/");
       const entityId = Number(parts[2]);
       const memoryId = Number(parts[4]);
+      if (!getEntityForUser.get(entityId, auth.user_id)) return errorResponse("Entity not found", 404);
+      const mem = getMemoryWithoutEmbedding.get(memoryId) as any;
+      if (!canAccessOwnedRow(mem, auth)) return errorResponse("Memory not found", 404);
       unlinkMemoryEntity.run(memoryId, entityId);
       return json({ unlinked: true, entity_id: entityId, memory_id: memoryId });
     }
@@ -4749,6 +5078,9 @@ If no meaningful inferences, return {"derived": []}`;
         const entityId = Number(url.pathname.split("/")[2]);
         const body = await req.json() as any;
         if (!body.target_id || !body.relationship) return errorResponse("target_id and relationship required");
+        if (!getEntityForUser.get(entityId, auth.user_id) || !getEntityForUser.get(Number(body.target_id), auth.user_id)) {
+          return errorResponse("Entity not found", 404);
+        }
         insertEntityRelationship.run(entityId, body.target_id, body.relationship);
         return json({ linked: true, source: entityId, target: body.target_id, relationship: body.relationship });
       } catch (e: any) {
@@ -4762,6 +5094,9 @@ If no meaningful inferences, return {"derived": []}`;
         const entityId = Number(url.pathname.split("/")[2]);
         const body = await req.json() as any;
         if (!body.target_id || !body.relationship) return errorResponse("target_id and relationship required");
+        if (!getEntityForUser.get(entityId, auth.user_id) || !getEntityForUser.get(Number(body.target_id), auth.user_id)) {
+          return errorResponse("Entity not found", 404);
+        }
         deleteEntityRelationship.run(entityId, body.target_id, body.relationship);
         return json({ unlinked: true, source: entityId, target: body.target_id, relationship: body.relationship });
       } catch (e: any) {
@@ -4806,12 +5141,12 @@ If no meaningful inferences, return {"derived": []}`;
     // Get single project
     if (url.pathname.match(/^\/projects\/\d+$/) && method === "GET") {
       const id = Number(url.pathname.split("/")[2]);
-      const project = getProject.get(id) as any;
+      const project = getProjectForUser.get(id, auth.user_id) as any;
       if (!project) return errorResponse("Project not found", 404);
       try { if (project.metadata) project.metadata = JSON.parse(project.metadata); } catch {}
       project.memory_ids = project.memory_ids ? project.memory_ids.split(",").map(Number) : [];
       const limit = Math.min(Number(url.searchParams.get("limit") || 50), 200);
-      project.memories = getProjectMemories.all(id, limit) as any[];
+      project.memories = getProjectMemories.all(id, auth.user_id, limit) as any[];
       for (const m of project.memories) {
         try { if (m.tags) m.tags = JSON.parse(m.tags); } catch { m.tags = []; }
       }
@@ -4849,6 +5184,9 @@ If no meaningful inferences, return {"derived": []}`;
       const parts = url.pathname.split("/");
       const projectId = Number(parts[2]);
       const memoryId = Number(parts[4]);
+      if (!getProjectForUser.get(projectId, auth.user_id)) return errorResponse("Project not found", 404);
+      const mem = getMemoryWithoutEmbedding.get(memoryId) as any;
+      if (!canAccessOwnedRow(mem, auth)) return errorResponse("Memory not found", 404);
       linkMemoryProject.run(memoryId, projectId);
       return json({ linked: true, project_id: projectId, memory_id: memoryId });
     }
@@ -4859,6 +5197,9 @@ If no meaningful inferences, return {"derived": []}`;
       const parts = url.pathname.split("/");
       const projectId = Number(parts[2]);
       const memoryId = Number(parts[4]);
+      if (!getProjectForUser.get(projectId, auth.user_id)) return errorResponse("Project not found", 404);
+      const mem = getMemoryWithoutEmbedding.get(memoryId) as any;
+      if (!canAccessOwnedRow(mem, auth)) return errorResponse("Memory not found", 404);
       unlinkMemoryProject.run(memoryId, projectId);
       return json({ unlinked: true, project_id: projectId, memory_id: memoryId });
     }
@@ -4867,6 +5208,7 @@ If no meaningful inferences, return {"derived": []}`;
     if (url.pathname.match(/^\/projects\/\d+\/search$/) && method === "POST") {
       try {
         const projectId = Number(url.pathname.split("/")[2]);
+        if (!getProjectForUser.get(projectId, auth.user_id)) return errorResponse("Project not found", 404);
         const body = await req.json() as any;
         const query = body.query;
         if (!query) return errorResponse("query is required");
@@ -4874,8 +5216,10 @@ If no meaningful inferences, return {"derived": []}`;
 
         // Get all memory IDs in this project
         const projectMemIds = (db.prepare(
-          "SELECT memory_id FROM memory_projects WHERE project_id = ?"
-        ).all(projectId) as any[]).map(r => r.memory_id);
+          `SELECT mp.memory_id FROM memory_projects mp
+           JOIN memories m ON m.id = mp.memory_id
+           WHERE mp.project_id = ? AND m.user_id = ?`
+        ).all(projectId, auth.user_id) as any[]).map(r => r.memory_id);
 
         if (projectMemIds.length === 0) return json({ results: [], count: 0, project_id: projectId });
 
@@ -4893,14 +5237,17 @@ If no meaningful inferences, return {"derived": []}`;
     if (url.pathname.match(/^\/entities\/\d+\/search$/) && method === "POST") {
       try {
         const entityId = Number(url.pathname.split("/")[2]);
+        if (!getEntityForUser.get(entityId, auth.user_id)) return errorResponse("Entity not found", 404);
         const body = await req.json() as any;
         const query = body.query;
         if (!query) return errorResponse("query is required");
         const limit = Math.min(Number(body.limit || 20), 100);
 
         const entityMemIds = (db.prepare(
-          "SELECT memory_id FROM memory_entities WHERE entity_id = ?"
-        ).all(entityId) as any[]).map(r => r.memory_id);
+          `SELECT me.memory_id FROM memory_entities me
+           JOIN memories m ON m.id = me.memory_id
+           WHERE me.entity_id = ? AND m.user_id = ?`
+        ).all(entityId, auth.user_id) as any[]).map(r => r.memory_id);
 
         if (entityMemIds.length === 0) return json({ results: [], count: 0, entity_id: entityId });
 
@@ -4985,33 +5332,46 @@ If no meaningful inferences, return {"derived": []}`;
     }
 
         if (url.pathname === "/stats" && method === "GET") {
-      const memCount = db.prepare("SELECT COUNT(*) as count FROM memories").get() as { count: number };
-      const embCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE embedding IS NOT NULL").get() as { count: number };
-      const linkCount = db.prepare("SELECT COUNT(*) as count FROM memory_links").get() as { count: number };
-      const convCount = db.prepare("SELECT COUNT(*) as count FROM conversations").get() as { count: number };
-      const msgCount = db.prepare("SELECT COUNT(*) as count FROM messages").get() as { count: number };
-      const forgottenCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_forgotten = 1").get() as { count: number };
-      const staticCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_static = 1 AND is_forgotten = 0").get() as { count: number };
-      const dynamicCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_static = 0 AND is_forgotten = 0").get() as { count: number };
-      const versionedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE version > 1").get() as { count: number };
-      const archivedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_archived = 1 AND is_forgotten = 0").get() as { count: number };
-      const pendingCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE status = 'pending' AND is_forgotten = 0").get() as { count: number };
-      const rejectedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE status = 'rejected'").get() as { count: number };
-      const inferenceCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE is_inference = 1").get() as { count: number };
+      const memCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE user_id = ?").get(auth.user_id) as { count: number };
+      const embCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE user_id = ? AND embedding IS NOT NULL").get(auth.user_id) as { count: number };
+      const linkCount = db.prepare(
+        `SELECT COUNT(*) as count FROM memory_links ml
+         JOIN memories ms ON ms.id = ml.source_id
+         JOIN memories mt ON mt.id = ml.target_id
+         WHERE ms.user_id = ? AND mt.user_id = ?`
+      ).get(auth.user_id, auth.user_id) as { count: number };
+      const convCount = db.prepare("SELECT COUNT(*) as count FROM conversations WHERE user_id = ?").get(auth.user_id) as { count: number };
+      const msgCount = db.prepare(
+        `SELECT COUNT(*) as count FROM messages m
+         JOIN conversations c ON c.id = m.conversation_id
+         WHERE c.user_id = ?`
+      ).get(auth.user_id) as { count: number };
+      const forgottenCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE user_id = ? AND is_forgotten = 1").get(auth.user_id) as { count: number };
+      const staticCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE user_id = ? AND is_static = 1 AND is_forgotten = 0").get(auth.user_id) as { count: number };
+      const dynamicCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE user_id = ? AND is_static = 0 AND is_forgotten = 0").get(auth.user_id) as { count: number };
+      const versionedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE user_id = ? AND version > 1").get(auth.user_id) as { count: number };
+      const archivedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE user_id = ? AND is_archived = 1 AND is_forgotten = 0").get(auth.user_id) as { count: number };
+      const pendingCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE user_id = ? AND status = 'pending' AND is_forgotten = 0").get(auth.user_id) as { count: number };
+      const rejectedCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE user_id = ? AND status = 'rejected'").get(auth.user_id) as { count: number };
+      const inferenceCount = db.prepare("SELECT COUNT(*) as count FROM memories WHERE user_id = ? AND is_inference = 1").get(auth.user_id) as { count: number };
 
       const linkTypes = db.prepare(
-        `SELECT type, COUNT(*) as count FROM memory_links GROUP BY type ORDER BY count DESC`
-      ).all();
+        `SELECT ml.type, COUNT(*) as count FROM memory_links ml
+         JOIN memories ms ON ms.id = ml.source_id
+         JOIN memories mt ON mt.id = ml.target_id
+         WHERE ms.user_id = ? AND mt.user_id = ?
+         GROUP BY ml.type ORDER BY count DESC`
+      ).all(auth.user_id, auth.user_id);
 
       const categories = db.prepare(
-        `SELECT category, COUNT(*) as count FROM memories WHERE is_forgotten = 0 GROUP BY category ORDER BY count DESC`
-      ).all();
+        `SELECT category, COUNT(*) as count FROM memories WHERE user_id = ? AND is_forgotten = 0 GROUP BY category ORDER BY count DESC`
+      ).all(auth.user_id);
 
       const agents = db.prepare(
-        `SELECT agent, COUNT(*) as conversations,
-          (SELECT COUNT(*) FROM messages m JOIN conversations c2 ON m.conversation_id = c2.id WHERE c2.agent = c.agent) as total_messages
-         FROM conversations c GROUP BY agent ORDER BY total_messages DESC`
-      ).all();
+        `SELECT c.agent, COUNT(*) as conversations,
+          (SELECT COUNT(*) FROM messages m JOIN conversations c2 ON m.conversation_id = c2.id WHERE c2.agent = c.agent AND c2.user_id = ?) as total_messages
+         FROM conversations c WHERE c.user_id = ? GROUP BY c.agent ORDER BY total_messages DESC`
+      ).all(auth.user_id, auth.user_id);
 
       const dbSize = statSync(DB_PATH).size;
       return json({
@@ -5039,7 +5399,6 @@ If no meaningful inferences, return {"derived": []}`;
         llm_model: LLM_MODEL,
         llm_configured: isLLMAvailable(),
         db_size_mb: Math.round(dbSize / 1048576 * 100) / 100,
-        db_path: DB_PATH,
       });
     }
 
@@ -5065,6 +5424,7 @@ If no meaningful inferences, return {"derived": []}`;
       const id = Number(url.pathname.split("/")[2]);
       const mem = getMemoryWithoutEmbedding.get(id) as any;
       if (!mem) return errorResponse("Not found", 404);
+      if (!canAccessOwnedRow(mem, auth)) return errorResponse("Forbidden", 403);
       if (mem.status !== "pending") return errorResponse(`Memory is already ${mem.status}`, 400);
       approveMemory.run(id, auth.user_id);
       audit(auth.user_id, "inbox.approve", "memory", id, null, clientIp, requestId);
@@ -5078,6 +5438,7 @@ If no meaningful inferences, return {"derived": []}`;
       const id = Number(url.pathname.split("/")[2]);
       const mem = getMemoryWithoutEmbedding.get(id) as any;
       if (!mem) return errorResponse("Not found", 404);
+      if (!canAccessOwnedRow(mem, auth)) return errorResponse("Forbidden", 403);
       if (mem.status !== "pending") return errorResponse(`Memory is already ${mem.status}`, 400);
       const body = await req.json().catch(() => ({})) as any;
       rejectMemory.run(id, auth.user_id);
@@ -5096,6 +5457,7 @@ If no meaningful inferences, return {"derived": []}`;
         const id = Number(url.pathname.split("/")[2]);
         const mem = getMemoryWithoutEmbedding.get(id) as any;
         if (!mem) return errorResponse("Not found", 404);
+        if (!canAccessOwnedRow(mem, auth)) return errorResponse("Forbidden", 403);
         const body = await req.json() as any;
 
         const sets: string[] = ["status = 'approved'", "updated_at = datetime('now')"];

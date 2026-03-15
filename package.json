@@ -1,6 +1,6 @@
 {
   "name": "@zanfiel/engram",
-  "version": "5.7.0",
+  "version": "5.7.2",
   "type": "module",
   "repository": {
     "type": "git",
@@ -24,7 +24,9 @@
   ],
   "scripts": {
     "start": "node --experimental-strip-types server-split.ts",
-    "dev": "node --experimental-strip-types --watch server-split.ts"
+    "dev": "node --experimental-strip-types --watch server-split.ts",
+    "test": "node --test tests/api.test.mjs",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "onnxruntime-node": "^1.21.0",
