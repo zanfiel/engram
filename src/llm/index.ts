@@ -35,7 +35,16 @@ export function isLLMAvailable(): boolean {
 
 export async function callLLM(systemPrompt: string, userPrompt: string, model?: string): Promise<string> {
   const useModel = model || LLM_MODEL;
-  const isAnthropic = LLM_URL.includes("anthropic.com");
+  let isAnthropic = false;
+  try {
+    const parsed = new URL(LLM_URL);
+    const hostname = parsed.hostname.toLowerCase();
+    // Treat api.anthropic.com and its subdomains as Anthropic endpoints
+    isAnthropic = hostname === "api.anthropic.com" || hostname.endsWith(".api.anthropic.com");
+  } catch {
+    // If URL parsing fails, fall back to legacy substring check
+    isAnthropic = LLM_URL.includes("anthropic.com");
+  }
 
   if (isAnthropic) {
     if (!LLM_API_KEY) throw new Error("LLM_API_KEY required for Anthropic API");
