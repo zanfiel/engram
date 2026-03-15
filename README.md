@@ -12,6 +12,8 @@ fact extraction, versioning, deduplication, and graph visualization.
 
 [Quick Start](#quick-start) · [API Reference](#api-reference) · [SDKs](#sdks) · [MCP Server](#mcp-server) · [CLI](#cli) · [Self-Host](#self-hosting) · [GUI](#gui)
 
+[![License: Elastic-2.0](https://img.shields.io/badge/License-Elastic%202.0-blue)](https://www.elastic.co/licensing/elastic-license)
+
 </div>
 
 ---

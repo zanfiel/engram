@@ -117,4 +117,4 @@ We always need more coverage:
 
 ## License
 
-Elastic License 2.0 — see [LICENSE](LICENSE) for details.
+Elastic License 2.0 (ELv2) — see [LICENSE](LICENSE) for details.

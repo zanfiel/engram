@@ -151,3 +151,143 @@ export function generateSigningSecret(): string {
   crypto.getRandomValues(bytes);
   return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
 }
+
+// ── MCP Message Signing (nonce + timestamp replay protection) ─────
+
+export interface SignedEnvelope {
+  message: any;
+  agent_id: number;
+  nonce: string;
+  timestamp: string;
+  signature: string;
+}
+
+const DEFAULT_MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Wrap a JSON-RPC message in a signed envelope with nonce + timestamp.
+ */
+export function signMessage(secret: string, agentId: number, message: any): SignedEnvelope {
+  const nonce = randomUUID();
+  const timestamp = new Date().toISOString();
+  const payload = canonicalJSON({ agent_id: agentId, message, nonce, timestamp });
+  const signature = hmacSign(secret, payload);
+  return { message, agent_id: agentId, nonce, timestamp, signature };
+}
+
+/**
+ * Verify a signed envelope. Checks signature, timestamp window, and nonce replay.
+ * Pass a NonceTracker to enable replay protection.
+ */
+export function verifyMessage(
+  secret: string,
+  envelope: SignedEnvelope,
+  tracker?: NonceTracker,
+  maxAgeMs: number = DEFAULT_MAX_AGE_MS,
+): { valid: boolean; reason: string | null } {
+  // Check timestamp window
+  const msgTime = new Date(envelope.timestamp).getTime();
+  if (isNaN(msgTime)) return { valid: false, reason: "invalid_timestamp" };
+  const age = Date.now() - msgTime;
+  if (age > maxAgeMs) return { valid: false, reason: "expired" };
+  if (age < -30_000) return { valid: false, reason: "future_timestamp" }; // 30s clock skew tolerance
+
+  // Check nonce replay
+  if (tracker) {
+    if (tracker.seen(envelope.nonce)) return { valid: false, reason: "replay_detected" };
+    tracker.add(envelope.nonce);
+  }
+
+  // Verify signature
+  const payload = canonicalJSON({ agent_id: envelope.agent_id, message: envelope.message, nonce: envelope.nonce, timestamp: envelope.timestamp });
+  const sigValid = hmacVerify(secret, payload, envelope.signature);
+  if (!sigValid) return { valid: false, reason: "invalid_signature" };
+
+  return { valid: true, reason: null };
+}
+
+// ── Nonce Tracker (replay protection) ─────────────────────────────
+
+export class NonceTracker {
+  private nonces = new Map<string, number>(); // nonce → timestamp
+  private maxAgeMs: number;
+  private sweepInterval: ReturnType<typeof setInterval> | null = null;
+
+  constructor(maxAgeMs: number = DEFAULT_MAX_AGE_MS) {
+    this.maxAgeMs = maxAgeMs;
+    // Sweep expired nonces every minute
+    this.sweepInterval = setInterval(() => this.sweep(), 60_000);
+    if (this.sweepInterval.unref) this.sweepInterval.unref();
+  }
+
+  seen(nonce: string): boolean {
+    return this.nonces.has(nonce);
+  }
+
+  add(nonce: string): void {
+    this.nonces.set(nonce, Date.now());
+  }
+
+  sweep(): void {
+    const cutoff = Date.now() - this.maxAgeMs;
+    for (const [nonce, ts] of this.nonces) {
+      if (ts < cutoff) this.nonces.delete(nonce);
+    }
+  }
+
+  close(): void {
+    if (this.sweepInterval) clearInterval(this.sweepInterval);
+  }
+}
+
+// ── Tool Integrity Binding ────────────────────────────────────────
+
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: any;
+}
+
+export interface SignedToolManifest {
+  tools: Array<ToolDefinition & { hash: string }>;
+  manifest_hash: string;
+  signature: string;
+  signed_at: string;
+}
+
+/** Hash a single tool definition (name + description + schema) */
+export function hashTool(tool: ToolDefinition): string {
+  return sha256(canonicalJSON({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema }));
+}
+
+/**
+ * Sign a manifest of tool definitions.
+ * Clients can verify the manifest to detect tool poisoning.
+ */
+export function signToolManifest(secret: string, tools: ToolDefinition[]): SignedToolManifest {
+  const hashed = tools.map(t => ({ ...t, hash: hashTool(t) }));
+  const manifestHash = sha256(hashed.map(t => t.hash).join(":"));
+  const signedAt = new Date().toISOString();
+  const signature = hmacSign(secret, `${manifestHash}:${signedAt}`);
+  return { tools: hashed, manifest_hash: manifestHash, signature, signed_at: signedAt };
+}
+
+/** Verify a tool manifest hasn't been tampered with */
+export function verifyToolManifest(secret: string, manifest: SignedToolManifest): { valid: boolean; tampered: string[] } {
+  // Verify overall signature
+  const sigValid = hmacVerify(secret, `${manifest.manifest_hash}:${manifest.signed_at}`, manifest.signature);
+  if (!sigValid) return { valid: false, tampered: ["manifest_signature"] };
+
+  // Verify individual tool hashes
+  const tampered: string[] = [];
+  for (const tool of manifest.tools) {
+    const expected = hashTool(tool);
+    if (expected !== tool.hash) tampered.push(tool.name);
+  }
+
+  // Verify manifest hash
+  const expectedManifest = sha256(manifest.tools.map(t => t.hash).join(":"));
+  if (expectedManifest !== manifest.manifest_hash) tampered.push("manifest_hash");
+
+  return { valid: tampered.length === 0, tampered };
+}

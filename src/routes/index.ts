@@ -76,7 +76,7 @@ import { buildDigestPayload, sendDigestWebhook, calculateNextSend, processSchedu
 import { securityHeaders, json, errorResponse, safeError, sanitizeFTS } from "../helpers/index.ts";
 
 // Agent signing
-import { signExecution, verifyExecution, createPassport, verifyPassport, computeTrustScore, generateSigningSecret } from "../../sign/index.ts";
+import { signExecution, verifyExecution, createPassport, verifyPassport, computeTrustScore, generateSigningSecret, signMessage, verifyMessage, NonceTracker, verifyToolManifest } from "../../sign/index.ts";
 import { SIGNING_SECRET_FILE } from "../config/index.ts";
 
 // Auth
@@ -219,6 +219,9 @@ try {
   writeFileSync(SIGNING_SECRET_FILE, signingSecret, "utf8");
   log.info({ msg: "signing_secret_generated" });
 }
+
+// Nonce tracker for MCP message replay protection (5-min window)
+const nonceTracker = new NonceTracker();
 
 /** Update agent trust score from current stats */
 function refreshAgentTrust(agentId: number): void {
@@ -3695,7 +3698,15 @@ Return JSON:
           const valid = verifyExecution(signingSecret, body.execution);
           return json({ type: "execution", valid });
         }
-        return errorResponse("Provide 'passport' or 'execution' object to verify");
+        if (body.message) {
+          const result = verifyMessage(signingSecret, body.message, nonceTracker);
+          return json({ type: "message", ...result });
+        }
+        if (body.tool_manifest) {
+          const result = verifyToolManifest(signingSecret, body.tool_manifest);
+          return json({ type: "tool_manifest", ...result });
+        }
+        return errorResponse("Provide 'passport', 'execution', 'message', or 'tool_manifest' to verify");
       } catch (e: any) {
         return safeError("verify", e);
       }
