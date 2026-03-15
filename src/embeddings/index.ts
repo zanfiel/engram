@@ -48,7 +48,8 @@ interface CachedMem {
 let embeddingCache: CachedMem[] = [];
 export let embeddingCacheLatest: CachedMem[] = [];
 let embeddingCacheVersion = 0;
-let graphCache: { key: string; data: any; ts: number } | null = null;
+export let graphCache: { key: string; data: any; ts: number } | null = null;
+export function setGraphCache(val: typeof graphCache): void { graphCache = val; }
 
 export function refreshEmbeddingCache(): void {
   const t0 = Date.now();
@@ -91,7 +92,6 @@ export function embeddingToBuffer(emb: Float32Array): Buffer {
 
 export function bufferToEmbedding(buf: Buffer | Uint8Array | ArrayBuffer): Float32Array {
   if (buf instanceof ArrayBuffer) return new Float32Array(buf);
-  if (buf instanceof Uint8Array) return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
   return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
 }
 

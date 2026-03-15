@@ -7,7 +7,7 @@
 // Useful for personalization and understanding user satisfaction patterns.
 // ============================================================================
 
-import { updateValence } from "../db/index.ts";
+import { db, updateValence } from "../db/index.ts";
 import { log } from "../config/logger.ts";
 
 // Emotion lexicon — fast regex-based detection (no LLM needed)

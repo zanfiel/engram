@@ -2,7 +2,12 @@
 // MEMORY PROFILE — Dynamic user profile generation
 // ============================================================================
 
-import { db } from "../db/index.ts";
+import { db, getStaticMemories, getRecentDynamicMemories, getNoEmbedding, getMemory, updateMemoryEmbedding, updateMemoryVec, embeddingToVectorJSON } from "../db/index.ts";
+import { log } from "../config/logger.ts";
+import { LLM_API_KEY } from "../config/index.ts";
+import { callLLM } from "../llm/index.ts";
+import { embed, embeddingToBuffer, bufferToEmbedding } from "../embeddings/index.ts";
+import { autoLink } from "./search.ts";
 
 interface UserProfile {
   static_facts: Array<{ id: number; content: string; category: string; source_count: number }>;

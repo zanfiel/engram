@@ -8,6 +8,11 @@ import { fileURLToPath } from 'url';
 import { mkdirSync } from 'fs';
 import { log } from '../config/logger.ts';
 import { DB_PATH, DATA_DIR, DEFAULT_RATE_LIMIT, DEFAULT_IMPORTANCE } from '../config/index.ts';
+import { FSRSRating, FSRSMemoryState, fsrsProcessReview, calculateDecayScore } from '../fsrs/index.ts';
+
+export function embeddingToVectorJSON(emb: Float32Array): string {
+  return "[" + Array.from(emb).join(",") + "]";
+}
 
 mkdirSync(DATA_DIR, { recursive: true });
 
@@ -697,6 +702,30 @@ export function trackAccessWithFSRS(memoryId: number, grade: FSRSRating = FSRSRa
     newState.retrieval_strength, newState.learning_state, newState.reps, newState.lapses,
     newState.last_review_at, memoryId
   );
+}
+
+export function updateDecayScores(): number {
+  const memories = db.prepare(
+    `SELECT id, importance, created_at, access_count, last_accessed_at, is_static, source_count, fsrs_stability
+     FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1`
+  ).all() as Array<any>;
+
+  let updated = 0;
+  const updateDecay = db.prepare(`UPDATE memories SET decay_score = ? WHERE id = ?`);
+
+  const batch = db.transaction(() => {
+    for (const m of memories) {
+      const score = calculateDecayScore(
+        m.importance, m.created_at, m.access_count, m.last_accessed_at,
+        !!m.is_static, m.source_count, m.fsrs_stability
+      );
+      updateDecay.run(Math.round(score * 1000) / 1000, m.id);
+      updated++;
+    }
+  });
+  batch();
+
+  return updated;
 }
 
 // Tags

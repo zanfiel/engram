@@ -38,6 +38,7 @@ const FSRS_MAX_DIFFICULTY = 10.0;
 const FSRS_MAX_STORAGE = 10.0;
 
 export const FSRSRating = { Again: 1, Hard: 2, Good: 3, Easy: 4 } as const;
+export type FSRSRating = typeof FSRSRating[keyof typeof FSRSRating];
 const FSRSState = { New: 0, Learning: 1, Review: 2, Relearning: 3 } as const;
 
 /** Forgetting factor: 0.9^(-1/w20) - 1 */
@@ -137,7 +138,7 @@ function dualStrengthDecay(ds: DualStrength, elapsedDays: number, stability: num
 
 // --- Review processor: maps memory access events to FSRS state updates ---
 
-interface FSRSMemoryState {
+export interface FSRSMemoryState {
   stability: number;
   difficulty: number;
   storage_strength: number;
@@ -240,26 +241,3 @@ export function calculateDecayScore(
   return importance * R;
 }
 
-export function updateDecayScores(): number {
-  const memories = db.prepare(
-    `SELECT id, importance, created_at, access_count, last_accessed_at, is_static, source_count, fsrs_stability
-     FROM memories WHERE is_forgotten = 0 AND is_archived = 0 AND is_latest = 1`
-  ).all() as Array<any>;
-
-  let updated = 0;
-  const updateDecay = db.prepare(`UPDATE memories SET decay_score = ? WHERE id = ?`);
-
-  const batch = db.transaction(() => {
-    for (const m of memories) {
-      const score = calculateDecayScore(
-        m.importance, m.created_at, m.access_count, m.last_accessed_at,
-        !!m.is_static, m.source_count, m.fsrs_stability
-      );
-      updateDecay.run(Math.round(score * 1000) / 1000, m.id);
-      updated++;
-    }
-  });
-  batch();
-
-  return updated;
-}

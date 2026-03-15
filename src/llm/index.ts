@@ -17,7 +17,7 @@ interface FactExtractionResult {
     importance: number;
   }>;
   relation_to_existing: {
-    type: "none" | "updates" | "extends" | "duplicate" | "contradicts" | "caused_by" | "prerequisite_for";
+    type: "none" | "updates" | "extends" | "duplicate" | "contradicts" | "caused_by" | "prerequisite_for" | "corrects";
     existing_memory_id?: number | null;
     reason?: string;
   };
