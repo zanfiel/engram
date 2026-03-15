@@ -45,7 +45,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           content: { type: "string", description: "Memory content" },
           category: {
             type: "string",
-            enum: ["task", "discovery", "decision", "state", "issue"],
+            enum: ["task", "discovery", "decision", "state", "issue", "general", "reference"],
             description: "Category (default: task)",
           },
           importance: { type: "number", description: "Importance 1-10 (default: 5)" },
@@ -132,7 +132,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case "memory_context": {
         const result = await engram("/context", "POST", {
           query: args!.query,
-          token_budget: args!.token_budget ?? 6000,
+          max_tokens: args!.token_budget ?? 8000,
         });
         const ctx = typeof result === "string" ? result : result.context ?? JSON.stringify(result);
         return { content: [{ type: "text", text: ctx || "No context available." }] };
@@ -152,7 +152,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
 
       case "memory_delete": {
-        await engram(`/memories/${args!.id}`, "DELETE");
+        await engram(`/memory/${args!.id}`, "DELETE");
         return { content: [{ type: "text", text: `Deleted memory ${args!.id}` }] };
       }
 

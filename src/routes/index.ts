@@ -16,7 +16,7 @@ import {
   CONSOLIDATION_THRESHOLD, RATE_WINDOW_MS, OPEN_ACCESS_RATE_LIMIT, DEFAULT_RATE_LIMIT,
   GUI_AUTH_MAX_ATTEMPTS, GUI_AUTH_WINDOW_MS, GUI_AUTH_LOCKOUT_MS,
   ENABLE_CAUSAL_CHAINS, ENABLE_PREDICTIVE_RECALL, ENABLE_EMOTIONAL_VALENCE,
-  ENABLE_RECONSOLIDATION,
+  ENABLE_RECONSOLIDATION, SEARCH_MIN_SCORE,
 } from "../config/index.ts";
 import { log } from "../config/logger.ts";
 
@@ -28,13 +28,14 @@ import {
   getVersionChain, updateMemoryEmbedding, updateMemoryVec,
   getAllTags, getByTag, insertEpisode, getEpisode, getEpisodeBySession, getEpisodeMemories,
   listEpisodes, assignToEpisode, updateEpisode,
+  updateEpisodeEmbedding, updateEpisodeVec, searchEpisodesFTS, listEpisodesByTimeRange,
   insertConversation, getConversation, getConversationBySession, listConversations,
   listConversationsByAgent, touchConversation, updateConversation, deleteConversation,
   insertMessage, getMessages, searchMessages, bulkInsertConvo,
   getStaticMemories, getRecentDynamicMemories,
   getAllMemoriesForGraph, getAllLinksForGraph,
   countNoEmbedding, getMemoryWithoutEmbedding,
-  updateFSRS, getFSRS,
+  updateFSRS, getFSRS, trackAccessWithFSRS,
   insertWebhook, listWebhooks, deleteWebhook,
   getChangesSince, getMemoryBySyncId,
   insertEntity, listEntities, listEntitiesByType, getEntity, getEntityMemories,
@@ -50,7 +51,7 @@ import {
 import {
   embed, cosineSimilarity, getCachedEmbeddings, addToEmbeddingCache,
   invalidateEmbeddingCache, embeddingToBuffer, bufferToEmbedding, embeddingToVectorJSON,
-  graphCache, setGraphCache,
+  graphCache, setGraphCache, episodeCache, refreshEmbeddingCache,
 } from "../embeddings/index.ts";
 
 // Search + linking
@@ -154,29 +155,6 @@ function updateDecayScores(): number {
     updated++;
   }
   return updated;
-}
-
-// Track access with FSRS review
-function trackAccessWithFSRS(memoryId: number, grade: typeof FSRSRating[keyof typeof FSRSRating] = FSRSRating.Good): void {
-  try {
-    const state = getFSRS.get(memoryId) as any;
-    if (state) {
-      const now = Date.now();
-      const lastReview = state.fsrs_last_review_at || state.created_at;
-      let elapsedDays = 1;
-      if (lastReview) {
-        const refTime = new Date(lastReview + (lastReview.includes("Z") ? "" : "Z")).getTime();
-        if (!isNaN(refTime)) elapsedDays = Math.max(0, (now - refTime) / (1000 * 60 * 60 * 24));
-      }
-      const newState = fsrsProcessReview(state, grade, elapsedDays);
-      updateFSRS.run(
-        newState.difficulty, newState.stability,
-        newState.storage_strength, newState.retrieval_strength,
-        new Date().toISOString(), (state.review_count || 0) + 1,
-        memoryId
-      );
-    }
-  } catch {}
 }
 
 // Sweep expired memories
@@ -584,7 +562,7 @@ async function fetchHandler(req: Request): Promise<Response> {
       const isAuthed = !!maybeAuth;
       const memCount = db.prepare("SELECT COUNT(*) as count FROM memories").get() as { count: number };
       if (!isAuthed) {
-        return json({ status: "ok", version: 5.5, memories: memCount.count });
+        return json({ status: "ok", version: "5.7.1", memories: memCount.count });
       }
       // Full health for authenticated users
       const convCount = db.prepare("SELECT COUNT(*) as count FROM conversations").get() as { count: number };
@@ -606,7 +584,7 @@ async function fetchHandler(req: Request): Promise<Response> {
       const dbSize = statSync(DB_PATH).size;
       return json({
         status: "ok",
-        version: 5.5,
+        version: "5.7.1",
         memories: memCount.count,
         embedded: embCount.count,
         unembedded: noEmbCount2,
@@ -1446,106 +1424,233 @@ Only include pairs that are actual contradictions.`;
     if (url.pathname === "/context" && method === "POST") {
       try {
         const body = await req.json() as any;
-        const { query, max_tokens, include_static, include_recent, strategy } = body;
+        const { query, max_tokens, token_budget: tokenBudgetAlt, budget, include_static, include_recent, strategy } = body;
 
         if (!query || typeof query !== "string") return errorResponse("query (string) required");
 
-        const tokenBudget = Math.min(Number(max_tokens) || 4000, 32000);
-        const includeStatic = include_static !== false; // default true
-        const includeRecent = include_recent !== false; // default true
+        // Accept token_budget, budget, OR max_tokens (MCP sends token_budget)
+        const rawBudget = Number(max_tokens) || Number(tokenBudgetAlt) || Number(budget) || 8000;
+        const tokenBudget = Math.min(rawBudget, 64000);
+        const includeStatic = include_static !== false;
+        const includeRecent = include_recent !== false;
         const contextStrategy = strategy || "balanced"; // balanced | precision | breadth
 
-        // Rough token estimation: ~4 chars per token
         const estimateTokens = (text: string) => Math.ceil(text.length / 4);
+        const MAX_MEMORY_TOKENS = 600;
+
+        const truncateContent = (content: string): string => {
+          if (estimateTokens(content) <= MAX_MEMORY_TOKENS) return content;
+          const maxChars = MAX_MEMORY_TOKENS * 4;
+          const cutPoint = content.lastIndexOf(". ", maxChars);
+          if (cutPoint > maxChars * 0.6) return content.substring(0, cutPoint + 1) + " [truncated]";
+          return content.substring(0, maxChars) + "... [truncated]";
+        };
 
         interface ContextBlock {
           id: number;
           content: string;
           category: string;
           score: number;
-          source: string; // "static" | "semantic" | "recent" | "linked"
+          source: string;
           tokens: number;
           created_at?: string;
         }
 
         const blocks: ContextBlock[] = [];
         let usedTokens = 0;
+        const seenIds = new Set<number>();
 
-        // Phase 1: Static facts (always highest priority — these define identity/config)
+        // Embed query for ranking statics + dedup
+        let queryEmb: Float32Array | null = null;
+        try { queryEmb = await embed(query); } catch {}
+
+        // Build embedding lookup for dedup + static ranking
+        const allCached = getCachedEmbeddings(true);
+        const embMap = new Map<number, { embedding: Float32Array }>();
+        for (const c of allCached) {
+          if ((c as any).user_id === auth.user_id) embMap.set(c.id, c);
+        }
+        const blockEmbeddings: Float32Array[] = [];
+
+        // ---- Phase 1: Static facts, RANKED by query relevance ----
         if (includeStatic) {
           const statics = getStaticMemories.all(auth.user_id) as any[];
+          const scored: Array<{ mem: any; relevance: number }> = [];
           for (const s of statics) {
-            const tokens = estimateTokens(s.content);
-            if (usedTokens + tokens > tokenBudget * 0.4) break; // cap statics at 40% of budget
+            let relevance = 0.5;
+            if (queryEmb) {
+              const cached = embMap.get(s.id);
+              if (cached) relevance = cosineSimilarity(queryEmb, cached.embedding);
+            }
+            relevance += Math.min((s.source_count || 1) / 20, 0.1);
+            scored.push({ mem: s, relevance });
+          }
+          scored.sort((a, b) => b.relevance - a.relevance);
+
+          const staticBudget = contextStrategy === "precision" ? 0.2 : 0.3;
+          for (const { mem, relevance } of scored) {
+            const truncated = truncateContent(mem.content);
+            const tokens = estimateTokens(truncated);
+            if (usedTokens + tokens > tokenBudget * staticBudget) break;
             blocks.push({
-              id: s.id, content: s.content, category: s.category,
-              score: 100, source: "static", tokens,
+              id: mem.id, content: truncated, category: mem.category,
+              score: relevance * 100, source: "static", tokens,
             });
+            seenIds.add(mem.id);
             usedTokens += tokens;
+            const cached = embMap.get(mem.id);
+            if (cached) blockEmbeddings.push(cached.embedding);
           }
         }
 
-        // Phase 2: Semantic search (core relevance)
-        const semanticBudget = contextStrategy === "precision" ? 0.5 : contextStrategy === "breadth" ? 0.3 : 0.4;
-        const semanticLimit = contextStrategy === "precision" ? 30 : contextStrategy === "breadth" ? 50 : 40;
+        // ---- Phase 2: Semantic search (core relevance) ----
+        const semanticCeiling = contextStrategy === "precision" ? 0.75 : contextStrategy === "breadth" ? 0.65 : 0.70;
+        const semanticLimit = contextStrategy === "precision" ? 40 : contextStrategy === "breadth" ? 60 : 50;
         const semanticResults = await hybridSearch(query, semanticLimit, false, true, RERANKER_ENABLED && isLLMAvailable(), auth.user_id);
 
-        const seenIds = new Set(blocks.map(b => b.id));
         for (const r of semanticResults) {
           if (seenIds.has(r.id)) continue;
-          const tokens = estimateTokens(r.content);
-          if (usedTokens + tokens > tokenBudget * (0.4 + semanticBudget)) break;
+          const truncated = truncateContent(r.content);
+          const tokens = estimateTokens(truncated);
+          if (usedTokens + tokens > tokenBudget * semanticCeiling) break;
+
+          // Dedup: skip if >0.88 similar to already-included memory
+          const cached = embMap.get(r.id);
+          if (cached && blockEmbeddings.length > 0) {
+            let isDupe = false;
+            for (const existing of blockEmbeddings) {
+              if (cosineSimilarity(cached.embedding, existing) > 0.88) { isDupe = true; break; }
+            }
+            if (isDupe) continue;
+          }
+
+          // Minimum relevance threshold
+          const rawScore = r.combined_score || r.semantic_score || r.score || 0;
+          if (rawScore < 0.15) continue;
+
+          // Recency boost: last 48h get +10%
+          let score = rawScore;
+          if (r.created_at) {
+            const ageMs = Date.now() - new Date(r.created_at + "Z").getTime();
+            if (ageMs < 48 * 60 * 60 * 1000) score *= 1.10;
+          }
+
           blocks.push({
-            id: r.id, content: r.content, category: r.category,
-            score: r.combined_score || r.semantic_score || 0, source: "semantic", tokens,
+            id: r.id, content: truncated, category: r.category,
+            score, source: "semantic", tokens,
           });
           seenIds.add(r.id);
           usedTokens += tokens;
+          if (cached) blockEmbeddings.push(cached.embedding);
         }
 
-        // Phase 3: Linked memories (expand context graph)
-        if (contextStrategy !== "precision" && usedTokens < tokenBudget * 0.85) {
-          const semanticIds = blocks.filter(b => b.source === "semantic").slice(0, 5).map(b => b.id);
-          for (const sid of semanticIds) {
-            const linked = getLinksFor.all(sid, sid) as any[];
-            for (const l of linked) {
-              if (seenIds.has(l.id) || l.is_forgotten) continue;
-              const tokens = estimateTokens(l.content);
-              if (usedTokens + tokens > tokenBudget * 0.9) break;
-              blocks.push({
-                id: l.id, content: l.content, category: l.category,
-                score: l.similarity * 50, source: "linked", tokens,
-              });
-              seenIds.add(l.id);
-              usedTokens += tokens;
+        // ---- Phase 2.5: Episode context ----
+        const seenEpisodeIds = new Set<number>();
+        if (usedTokens < tokenBudget * 0.75) {
+          for (const b of blocks.filter(b => b.source === "semantic").slice(0, 5)) {
+            const mem = getMemoryWithoutEmbedding.get(b.id) as any;
+            const epId = mem?.episode_id;
+            if (epId && !seenEpisodeIds.has(epId)) {
+              seenEpisodeIds.add(epId);
+              const ep = getEpisode.get(epId) as any;
+              if (ep?.summary) {
+                const truncated = truncateContent(ep.summary);
+                const tokens = estimateTokens(truncated);
+                if (usedTokens + tokens <= tokenBudget * 0.8) {
+                  blocks.push({ id: -epId, content: truncated, category: "episode", score: 75, source: "episode", tokens, created_at: ep.started_at });
+                  usedTokens += tokens;
+                }
+              }
             }
           }
         }
 
-        // Phase 4: Recent memories (temporal context)
+        // ---- Phase 3: Linked memories (graph expansion) ----
+        if (contextStrategy !== "precision" && usedTokens < tokenBudget * 0.85) {
+          const semanticIds = blocks.filter(b => b.source === "semantic").slice(0, 5).map(b => b.id);
+          for (const sid of semanticIds) {
+            if (usedTokens >= tokenBudget * 0.85) break;
+            const linked = getLinksFor.all(sid, sid) as any[];
+            for (const l of linked) {
+              if (seenIds.has(l.id) || l.is_forgotten) continue;
+              const truncated = truncateContent(l.content);
+              const tokens = estimateTokens(truncated);
+              if (usedTokens + tokens > tokenBudget * 0.88) break;
+
+              const cachedL = embMap.get(l.id);
+              if (cachedL && blockEmbeddings.length > 0) {
+                let isDupe = false;
+                for (const existing of blockEmbeddings) {
+                  if (cosineSimilarity(cachedL.embedding, existing) > 0.88) { isDupe = true; break; }
+                }
+                if (isDupe) continue;
+              }
+
+              blocks.push({
+                id: l.id, content: truncated, category: l.category,
+                score: (l.similarity || 0) * 50, source: "linked", tokens,
+              });
+              seenIds.add(l.id);
+              usedTokens += tokens;
+              if (cachedL) blockEmbeddings.push(cachedL.embedding);
+            }
+          }
+        }
+
+        // ---- Phase 4: Recent memories (temporal context) ----
         if (includeRecent && usedTokens < tokenBudget * 0.95) {
           const recent = getRecentDynamicMemories.all(auth.user_id, 10) as any[];
           for (const r of recent) {
             if (seenIds.has(r.id)) continue;
-            const tokens = estimateTokens(r.content);
+            const truncated = truncateContent(r.content);
+            const tokens = estimateTokens(truncated);
             if (usedTokens + tokens > tokenBudget) break;
+
+            const cachedR = embMap.get(r.id);
+            if (cachedR && blockEmbeddings.length > 0) {
+              let isDupe = false;
+              for (const existing of blockEmbeddings) {
+                if (cosineSimilarity(cachedR.embedding, existing) > 0.88) { isDupe = true; break; }
+              }
+              if (isDupe) continue;
+            }
+
             blocks.push({
-              id: r.id, content: r.content, category: r.category,
+              id: r.id, content: truncated, category: r.category,
               score: 10, source: "recent", tokens,
             });
             seenIds.add(r.id);
             usedTokens += tokens;
+            if (cachedR) blockEmbeddings.push(cachedR.embedding);
           }
         }
 
+        // Phase 5: Implicit connection inference (LLM post-processing)
+        const semanticBlocks = blocks.filter(b => b.source === "semantic");
+        if (isLLMAvailable() && semanticBlocks.length >= 2 && usedTokens < tokenBudget * 0.95) {
+          try {
+            const topFacts = semanticBlocks.slice(0, 6).map(b => `[${b.id}] ${b.content}`).join("\n");
+            const inferenceResult = await callLLM(
+              `You find implicit connections between memories that aren't directly stated. Given these memories, identify 0-3 implicit connections. For each, write a single sentence stating the connection. If none exist, return "none". Be concise. Only state connections that are genuinely useful and non-obvious.`,
+              `Query: ${query}\n\nMemories:\n${topFacts}`
+            );
+            if (inferenceResult && !inferenceResult.toLowerCase().startsWith("none")) {
+              const tokens = estimateTokens(inferenceResult);
+              if (usedTokens + tokens <= tokenBudget) {
+                blocks.push({ id: 0, content: inferenceResult.trim(), category: "inference", score: 60, source: "inference", tokens });
+                usedTokens += tokens;
+              }
+            }
+          } catch {}
+        }
+
         // Defer access tracking to after response
-        const blockIds = blocks.map(b => b.id);
+        const blockIds = blocks.filter(b => b.id > 0).map(b => b.id);
         setTimeout(() => { try { const batch = db.transaction(() => { for (const id of blockIds) trackAccessWithFSRS(id); }); batch(); } catch {} }, 0);
 
         // Build formatted context string with intelligence layers
         const contextParts: string[] = [];
         const staticBlocks = blocks.filter(b => b.source === "static");
-        const semanticBlocks = blocks.filter(b => b.source === "semantic");
         const linkedBlocks = blocks.filter(b => b.source === "linked");
         const recentBlocks = blocks.filter(b => b.source === "recent");
 
@@ -1601,11 +1706,19 @@ Only include pairs that are actual contradictions.`;
         if (semanticBlocks.length > 0) {
           contextParts.push("## Relevant Memories\n" + semanticBlocks.map(b => `- [${b.category}] ${b.content}`).join("\n"));
         }
+        const episodeBlocks = blocks.filter(b => b.source === "episode");
+        if (episodeBlocks.length > 0) {
+          contextParts.push("## Episode Context\n" + episodeBlocks.map(b => `- [${b.created_at || ""}] ${b.content}`).join("\n"));
+        }
         if (linkedBlocks.length > 0) {
           contextParts.push("## Related Context\n" + linkedBlocks.map(b => `- ${b.content}`).join("\n"));
         }
         if (recentBlocks.length > 0) {
           contextParts.push("## Recent Activity\n" + recentBlocks.map(b => `- [${b.created_at || ""}] ${b.content}`).join("\n"));
+        }
+        const inferenceBlocks = blocks.filter(b => b.source === "inference");
+        if (inferenceBlocks.length > 0) {
+          contextParts.push("## Implicit Connections\n" + inferenceBlocks.map(b => b.content).join("\n"));
         }
 
         return json({
@@ -1618,8 +1731,10 @@ Only include pairs that are actual contradictions.`;
           breakdown: {
             static: staticBlocks.length,
             semantic: semanticBlocks.length,
+            episode: episodeBlocks.length,
             linked: linkedBlocks.length,
             recent: recentBlocks.length,
+            inference: inferenceBlocks.length,
           },
         });
       } catch (e: any) {
@@ -2237,7 +2352,7 @@ Return JSON:
       try {
         const _searchT0 = performance.now();
         const body = await req.json() as any;
-        const { query, limit, include_links, expand_relationships, latest_only, tag, episode_id: filterEpisode } = body;
+        const { query, limit, include_links, expand_relationships, latest_only, tag, episode_id: filterEpisode, temporal_sort } = body;
         if (!query || typeof query !== "string") return errorResponse("query is required");
         const _searchT1 = performance.now();
         let results = await hybridSearch(
@@ -2277,6 +2392,16 @@ Return JSON:
           results = results.slice(0, Math.min(limit || 10, 50));
         }
 
+        // Temporal sort: order by created_at instead of score (for "what happened first/before/after" queries)
+        if (temporal_sort) {
+          const dir = temporal_sort === "asc" ? 1 : -1;
+          results.sort((a, b) => {
+            const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+            const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+            return (ta - tb) * dir;
+          });
+        }
+
         // Defer access tracking to after response (non-blocking, batched in transaction)
         const resultIds = results.map(r => r.id);
         setTimeout(() => {
@@ -2288,14 +2413,35 @@ Return JSON:
           } catch {}
         }, 0);
 
-        // Lightweight: skip episodic expansion (available via /memory/:id)
-        const episodeContext: Array<{ episode_id: number; title: string; memories: any[] }> = [];
+        // Episode context: fetch episode summaries for results with episode_id
+        const episodeContext: Array<{ episode_id: number; title: string; summary: string; started_at: string }> = [];
+        if (body.include_episodes) {
+          const seenEpisodes = new Set<number>();
+          for (const r of results) {
+            const mem = getMemoryWithoutEmbedding.get(r.id) as any;
+            const epId = mem?.episode_id;
+            if (epId && !seenEpisodes.has(epId)) {
+              seenEpisodes.add(epId);
+              const ep = getEpisode.get(epId) as any;
+              if (ep?.summary) {
+                episodeContext.push({ episode_id: ep.id, title: ep.title || "", summary: ep.summary, started_at: ep.started_at });
+              }
+            }
+          }
+        }
 
         const _searchT3 = performance.now();
         log.info({ msg: "search_timing", total_ms: (_searchT3 - _searchT0).toFixed(1), hybrid_ms: (_searchT2 - _searchT1).toFixed(1), post_ms: (_searchT3 - _searchT2).toFixed(1), results: results.length });
 
+        const topScore = results.length > 0 ? results[0].score : 0;
+        const topSemanticScore = results.length > 0 ? (results[0].semantic_score || topScore) : 0;
+        const minScore = body.min_score ?? SEARCH_MIN_SCORE;
+        const abstained = results.length === 0 || topSemanticScore < minScore;
+
         return json({
-          results,
+          results: abstained ? [] : results,
+          abstained,
+          top_score: Math.round(topScore * 1000) / 1000,
           ...(episodeContext.length > 0 ? { episodes: episodeContext } : {}),
         });
       } catch (e: any) {
@@ -3169,7 +3315,43 @@ Return JSON:
         const ep = insertEpisode.get(
           body.title || null, body.session_id || null, body.agent || null, auth.user_id
         ) as { id: number; started_at: string };
-        return json({ created: true, id: ep.id, started_at: ep.started_at });
+
+        // If conversation text provided, generate narrative summary via LLM
+        let summary = body.summary || null;
+        if (body.conversation && isLLMAvailable() && !summary) {
+          try {
+            summary = await callLLM(
+              `You are a memory system. Summarize this conversation into a concise episodic narrative (1-3 paragraphs). Capture: what the user asked for, what the assistant did, key decisions made, problems solved, and outcomes. Include temporal flow ("first... then... finally..."). Write in past tense.`,
+              body.conversation.substring(0, 8000)
+            );
+          } catch (e: any) {
+            log.warn({ msg: "episode_summarization_failed", error: e.message });
+          }
+        }
+
+        // Update with summary, timestamps, duration
+        if (summary || body.ended_at) {
+          updateEpisode.run(body.title || null, summary, body.ended_at || null, ep.id);
+        }
+        if (body.started_at && body.ended_at) {
+          const dur = Math.round((new Date(body.ended_at).getTime() - new Date(body.started_at).getTime()) / 1000);
+          if (dur > 0) db.prepare("UPDATE episodes SET duration_seconds = ? WHERE id = ?").run(dur, ep.id);
+        }
+
+        // Embed the summary for semantic search
+        const textToEmbed = summary || body.title || body.conversation?.substring(0, 500) || "";
+        if (textToEmbed) {
+          try {
+            const embArray = await embed(textToEmbed);
+            updateEpisodeEmbedding.run(embeddingToBuffer(embArray), ep.id);
+            try { updateEpisodeVec.run(embeddingToVectorJSON(embArray), ep.id); } catch {}
+            refreshEmbeddingCache();
+          } catch (e: any) {
+            log.warn({ msg: "episode_embed_failed", error: e.message });
+          }
+        }
+
+        return json({ created: true, id: ep.id, started_at: ep.started_at, summary });
       } catch (e: any) {
         return safeError("create episode", e);
       }
@@ -3177,6 +3359,56 @@ Return JSON:
 
     if (url.pathname === "/episodes" && method === "GET") {
       const limit = Math.min(Number(url.searchParams.get("limit") || 20), 100);
+      const query = url.searchParams.get("query");
+      const after = url.searchParams.get("after");
+      const before = url.searchParams.get("before");
+
+      // Temporal search
+      if (after || before) {
+        const from = after || "2000-01-01";
+        const to = before || "2099-12-31";
+        const episodes = listEpisodesByTimeRange.all(auth.user_id, from, to, limit) as any[];
+        return json({ episodes });
+      }
+
+      // Semantic search over episodes
+      if (query) {
+        try {
+          const queryEmb = await embed(query);
+          const scored: Array<any & { score: number }> = [];
+
+          // Vector search over episode cache
+          for (const ep of episodeCache) {
+            if (ep.user_id !== auth.user_id) continue;
+            const sim = cosineSimilarity(queryEmb, ep.embedding);
+            if (sim > 0.3) scored.push({ id: ep.id, summary: ep.summary, score: sim });
+          }
+
+          // FTS search
+          try {
+            const ftsHits = searchEpisodesFTS.all(sanitizeFTS(query), auth.user_id, limit) as any[];
+            for (const hit of ftsHits) {
+              const existing = scored.find(s => s.id === hit.id);
+              if (existing) { existing.score += 0.2; }
+              else { scored.push({ ...hit, score: 0.3 }); }
+            }
+          } catch {}
+
+          scored.sort((a, b) => b.score - a.score);
+          const topIds = scored.slice(0, limit).map(s => s.id);
+          const episodes = topIds.map(id => {
+            const ep = getEpisode.get(id) as any;
+            const s = scored.find(x => x.id === id);
+            return ep ? { ...ep, score: Math.round((s?.score || 0) * 1000) / 1000 } : null;
+          }).filter(Boolean);
+
+          return json({ episodes });
+        } catch (e: any) {
+          return safeError("episode search", e);
+        }
+      }
+
+      // Default: list recent
       const episodes = listEpisodes.all(auth.user_id, limit) as any[];
       return json({ episodes });
     }
@@ -3198,6 +3430,15 @@ Return JSON:
         const id = Number(url.pathname.split("/")[2]);
         const body = await req.json() as any;
         updateEpisode.run(body.title || null, body.summary || null, body.ended_at || null, id);
+        // Re-embed if summary changed
+        if (body.summary) {
+          try {
+            const embArray = await embed(body.summary);
+            updateEpisodeEmbedding.run(embeddingToBuffer(embArray), id);
+            try { updateEpisodeVec.run(embeddingToVectorJSON(embArray), id); } catch {}
+            refreshEmbeddingCache();
+          } catch {}
+        }
         return json({ updated: true, id });
       } catch (e: any) {
         return safeError("update episode", e);
@@ -3220,6 +3461,126 @@ Return JSON:
         return json({ assigned, episode_id: episodeId });
       } catch (e: any) {
         return safeError("assign memories", e);
+      }
+    }
+
+    // Finalize episode: generate summary from memories, embed, set ended_at
+    if (/^\/episodes\/\d+\/finalize$/.test(url.pathname) && method === "POST") {
+      if (!hasScope(auth, "write")) return errorResponse("Write scope required", 403);
+      try {
+        const episodeId = Number(url.pathname.split("/")[2]);
+        const ep = getEpisode.get(episodeId) as any;
+        if (!ep) return errorResponse("Episode not found", 404);
+
+        const memories = getEpisodeMemories.all(episodeId) as Array<{ content: string; category: string; created_at: string }>;
+        if (memories.length === 0) return errorResponse("Episode has no memories", 400);
+
+        let summary = ep.summary;
+        if (!summary) {
+          if (isLLMAvailable()) {
+            try {
+              const memText = memories.map(m => `[${m.category}] ${m.content}`).join("\n").substring(0, 8000);
+              summary = await callLLM(
+                `You are a memory system. Summarize these memories from a single session into a concise episodic narrative (1-3 paragraphs). Capture: what the user asked for, what the assistant did, key decisions made, problems solved, and outcomes. Include temporal flow. Write in past tense.`,
+                memText
+              );
+            } catch (e: any) {
+              log.warn({ msg: "episode_llm_summary_failed", error: e.message });
+            }
+          }
+          if (!summary) {
+            summary = memories.map(m => m.content).join(" ").substring(0, 1000);
+          }
+        }
+
+        const endedAt = new Date().toISOString().replace("T", " ").replace("Z", "");
+        updateEpisode.run(ep.title || `Session ${ep.session_id || ep.id}`, summary, endedAt, episodeId);
+
+        // Calculate duration
+        if (ep.started_at) {
+          const dur = Math.round((Date.now() - new Date(ep.started_at).getTime()) / 1000);
+          if (dur > 0) db.prepare("UPDATE episodes SET duration_seconds = ? WHERE id = ?").run(dur, episodeId);
+        }
+
+        // Embed the summary
+        try {
+          const embArray = await embed(summary);
+          updateEpisodeEmbedding.run(embeddingToBuffer(embArray), episodeId);
+          try { updateEpisodeVec.run(embeddingToVectorJSON(embArray), episodeId); } catch {}
+          refreshEmbeddingCache();
+        } catch (e: any) {
+          log.warn({ msg: "episode_finalize_embed_failed", error: e.message });
+        }
+
+        return json({ finalized: true, id: episodeId, summary, memory_count: memories.length });
+      } catch (e: any) {
+        return safeError("finalize episode", e);
+      }
+    }
+
+    // ========================================================================
+    // GUARDRAILS — pre-action conflict check against stored rules
+    // ========================================================================
+
+    function heuristicGuard(action: string, rules: Array<{ content: string; score: number; importance: number }>): "allow" | "warn" | "block" {
+      for (const r of rules) {
+        const rl = r.content.toLowerCase();
+        const hasProhibition = /\bnever\b|\bdo not\b|\bdon't\b|\bcritical\b|\bnot\b.*\ballowed\b|\bno\s+(?:purple|blue|indigo)\b/.test(rl);
+        // Any importance-10 rule that matches at all = warn (these are critical rules)
+        if (r.importance >= 10) return "warn";
+        // Prohibition language in a static rule = warn
+        if (hasProhibition) return "warn";
+      }
+      return "allow";
+    }
+
+    if (url.pathname === "/guard" && method === "POST") {
+      try {
+        const body = await req.json() as any;
+        const action = body.action;
+        if (!action || typeof action !== "string") return errorResponse("action (string) required — describe what you are about to do");
+
+        // Search static high-importance memories for conflicts
+        const results = await hybridSearch(action, 20, false, false, true, auth.user_id);
+        const rules = results.filter(r => r.is_static && r.importance >= 8);
+
+        if (rules.length === 0) {
+          return json({ signal: "allow", action, rules: [], message: "No conflicting rules found." });
+        }
+
+        // Ask LLM if any rules conflict with the proposed action
+        let signal: "allow" | "warn" | "block" = "warn";
+        let message = "";
+
+        if (isLLMAvailable()) {
+          try {
+            const rulesText = rules.slice(0, 5).map((r, i) => `RULE ${i + 1} (importance ${r.importance}): ${r.content}`).join("\n\n");
+            const llmResult = await callLLM(
+              `You are a guardrail system. Given an agent's PROPOSED ACTION and a set of RULES from memory, determine if the action conflicts with any rule. Respond with ONLY one of: BLOCK (action directly violates a rule), WARN (action is related to a rule and should proceed with caution), or ALLOW (no conflict). After the signal word, write a brief explanation on the same line.`,
+              `PROPOSED ACTION: ${action}\n\nRULES:\n${rulesText}`
+            );
+            const first = llmResult.trim().split("\n")[0].toUpperCase();
+            if (first.startsWith("BLOCK")) { signal = "block"; message = llmResult.trim(); }
+            else if (first.startsWith("ALLOW")) { signal = "allow"; message = llmResult.trim(); }
+            else { signal = "warn"; message = llmResult.trim(); }
+          } catch {
+            // LLM unavailable — semantic + keyword heuristic
+            signal = heuristicGuard(action, rules);
+            message = signal !== "allow" ? "Rule conflict detected (semantic + keyword heuristic). Review the rules before proceeding." : "No conflicts detected (LLM unavailable for deeper analysis).";
+          }
+        } else {
+          signal = heuristicGuard(action, rules);
+          message = signal !== "allow" ? "Rule conflict detected (semantic + keyword heuristic). Review the rules before proceeding." : "No conflicts detected.";
+        }
+
+        return json({
+          signal,
+          action,
+          message,
+          rules: rules.slice(0, 5).map(r => ({ id: r.id, content: r.content, importance: r.importance })),
+        });
+      } catch (e: any) {
+        return safeError("guard check", e);
       }
     }
 
@@ -4054,7 +4415,7 @@ If no meaningful inferences, return {"derived": []}`;
         // Graph visualization page
     if (url.pathname === "/graph/view" && method === "GET") {
       const graphHtml = await readFile(resolve(__dirname, "engram-graph.html"), "utf-8").catch(() => null);
-      if (!graphHtml) return errorResponse("Graph view not found. Place engram-graph.html alongside server.ts", 404);
+      if (!graphHtml) return errorResponse("Graph view not found. Place engram-graph.html alongside server-split.ts", 404);
       return new Response(graphHtml, { headers: { "Content-Type": "text/html" } });
     }
 

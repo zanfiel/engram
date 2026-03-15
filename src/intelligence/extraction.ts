@@ -64,6 +64,12 @@ export function fastExtractFacts(content: string, memoryId: number, userId: numb
       try { insertSF.run(memoryId, "user", "earned", m[2] ? m[2].trim().substring(0, 200) : null, parseFloat(m[1].replace(",", "")), "dollars", dateRef, dateApprox, userId); factCount++; } catch {}
     }
 
+    // Pattern 8: Assistant/AI actions
+    const assistantPattern = /\b(?:the\s+)?(?:assistant|AI|Claude|Engram|I)\s+(recommended|suggested|implemented|created|fixed|diagnosed|configured|deployed|built|wrote|designed|refactored|migrated|upgraded|replaced|analyzed|discovered|resolved|identified)\s+(.+?)(?:\.|,|$)/gi;
+    for (const m of content.matchAll(assistantPattern)) {
+      try { insertSF.run(memoryId, "assistant", m[1].toLowerCase(), m[2].trim().substring(0, 200), null, null, dateRef, dateApprox, userId); factCount++; } catch {}
+    }
+
     // --- User Preferences ---
     const upsertPref = db.prepare(
       `INSERT INTO user_preferences (domain, preference, evidence_memory_id, user_id)
@@ -155,21 +161,5 @@ function inferDomain(text: string): string {
   if (/art|paint|draw|craft|photo/i.test(t)) return "art";
   if (/shop|buy|store|brand|wear|cloth/i.test(t)) return "shopping";
   return "general";
-}
-
-
-function embeddingToBuffer(emb: Float32Array): Buffer {
-  return Buffer.from(emb.buffer, emb.byteOffset, emb.byteLength);
-}
-
-function bufferToEmbedding(buf: Buffer | Uint8Array | ArrayBuffer): Float32Array {
-  if (buf instanceof ArrayBuffer) return new Float32Array(buf);
-  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-  return new Float32Array(ab);
-}
-
-/** Convert Float32Array to JSON string for libsql vector() function */
-function embeddingToVectorJSON(emb: Float32Array): string {
-  return "[" + Array.from(emb).join(",") + "]";
 }
 

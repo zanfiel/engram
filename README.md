@@ -7,6 +7,9 @@
 Store, search, recall, and link memories with automatic embeddings,
 fact extraction, versioning, deduplication, and graph visualization.
 
+[![License: Elastic-2.0](https://img.shields.io/badge/License-Elastic--2.0-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-5.7.0-gold.svg)](CHANGELOG.md)
+
 [Quick Start](#quick-start) · [API Reference](#api-reference) · [SDKs](#sdks) · [MCP Server](#mcp-server) · [CLI](#cli) · [Self-Host](#self-hosting) · [GUI](#gui)
 
 </div>
@@ -36,7 +39,7 @@ curl -X POST http://localhost:4200/recall \
 
 - 🧠 **FSRS-6 spaced repetition** — cognitive science-backed memory decay using power-law forgetting curves (ported from [open-spaced-repetition](https://github.com/open-spaced-repetition/fsrs4anki))
 - 💪 **Dual-strength memory model** — Bjork & Bjork (1992) storage strength (never decays) + retrieval strength (decays via power law)
-- 🧬 **Hybrid semantic + full-text search** — MiniLM embeddings (384-dim, runs locally) combined with FTS5 full-text search
+- 🧬 **Hybrid semantic + full-text search** — BGE-large 1024-dim embeddings via raw ONNX inference (no external APIs) combined with FTS5 full-text search
 - 🔗 **Auto-linking** — memories automatically connect via cosine similarity, forming a knowledge graph
 - 📊 **Graph visualization** — explore your memory space in a WebGL galaxy
 - 🔄 **Versioning** — update memories without losing history
@@ -52,6 +55,13 @@ curl -X POST http://localhost:4200/recall \
 - 🗜️ **Auto-consolidation** — summarize large memory clusters automatically
 - 🏆 **LLM reranker** — search results reranked for semantic precision (optional)
 - 👥 **Multi-tenant** — isolated memory per user with API keys
+- 📖 **Episodic memory** — store conversation episodes as embedded, searchable narratives with temporal + semantic search. Facts link to source episodes.
+- 🚫 **Abstention** — search returns `abstained: true` when confidence is below threshold. The system knows when it doesn't know.
+- 🤖 **Assistant recall** — extracts what the AI said/did, not just user facts. LLM + regex patterns for assistant actions.
+- ⏳ **Temporal search** — `temporal_sort` orders results chronologically. Episode search by date range.
+- 🔗 **2-hop graph traversal** — relationship expansion reaches 2 levels deep for multi-hop reasoning
+- 🧩 **Implicit connection inference** — LLM post-processing in /context finds unstated relationships between memories
+- 🛡️ **Guardrails** — `POST /guard` checks proposed actions against stored rules before execution. Returns allow/warn/block. Prevents repeated deployment mistakes, outdated references, and policy violations.
 - 📦 **Spaces, tags, episodes** — organize memories into named collections
 - 🧩 **Entities & projects** — track people, servers, tools, projects
 - 📬 **Webhooks & digests** — event hooks + scheduled HMAC-signed summaries
@@ -68,67 +78,51 @@ curl -X POST http://localhost:4200/recall \
 
 ---
 
-## What's New in v5.6
+## What's New in v5.7
 
-### Node.js 22 Runtime (Primary)
+### BGE-large 1024-dim Embeddings
+Replaced MiniLM-L6-v2 (384-dim) with **BGE-large-en-v1.5** (1024-dim) using raw `onnxruntime-node` and a hand-written BERT WordPiece tokenizer. 1024 dimensions, 512-token context, quantized INT8 (337MB, sub-200ms on CPU). Auto-migration re-embeds existing vectors on first startup.
 
-- **Node.js 22+ as primary runtime** — `node --experimental-strip-types` for native TypeScript support. Bun support maintained for compatibility.
-- **Optimized MCP server** — rewritten for Node.js, reduced from 529 to 168 lines. Faster startup, lower memory footprint.
-- **vitest test framework** — 76+ test cases covering API, FSRS, indexing, and CLI.
+### Episodic Memory
+Conversation episodes as first-class embedded, searchable objects — BGE-large embeddings, FTS5 search, temporal date-range queries, semantic search, `POST /episodes/:id/finalize` for narrative summaries, FSRS decay, and automatic `/context` injection.
 
-### Graph Intelligence Layer
+### Multi-Tenant Data Isolation
+Complete security audit of all cross-tenant boundaries. User-scoped embedding cache, ownership checks on all endpoints, conversation isolation, write scope enforcement, user-scoped stats, and user-filtered graph BFS.
 
-- **Graphology integration** — store memories as knowledge graph nodes with relationship edges.
-- **Auto-linking metrics** — compute centrality, shortest paths, community detection.
-- **Relationship inference** — LLM extracts "mentions", "depends_on", "causes", "related_to" edges from memory content.
-- **Graph visualization** — updated galaxy view shows relationship strength.
+### Guardrails
+`POST /guard` — agents submit proposed actions, Engram checks stored rules for conflicts. Returns `allow`, `warn`, or `block` with matched rule context.
 
-### MCP Server Improvements
+### Benchmark Features
+Abstention (`ENGRAM_SEARCH_MIN_SCORE`), assistant recall (LLM + regex extraction of AI actions), temporal sort, 2-hop graph traversal, implicit connection inference in `/context`.
 
-- **Better error handling** — detailed error context propagated to Claude Desktop.
-- **Streaming responses** — large memory exports use progress streams.
-- **Tool introspection** — dynamic tool discovery for client apps.
+### Architecture Refactor
+Monolith `server.ts` replaced by `server-split.ts` + modular `src/routes/`.
 
-### Security Hardening (v5.3+)
+<details>
+<summary><strong>Previous releases</strong></summary>
 
-- **Auth required by default** — unauthenticated requests are rejected. Set `ENGRAM_OPEN_ACCESS=1` for single-user mode.
-- **Rate limit fix** — rate-limited requests no longer escalate to admin privileges.
-- **Body size limits** — 1MB per request, 100KB per memory content (configurable).
-- **GUI auth rate limiting** — 5 attempts per minute, 10-minute lockout.
-- **Timing-safe password comparison** — `timingSafeEqual` for GUI auth.
-- **Security headers** — `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy` on every response.
-- **CORS origin pinning** — `ENGRAM_CORS_ORIGIN` instead of wildcard `*`.
-- **IP allowlisting** — `ENGRAM_ALLOWED_IPS` restricts access to specific addresses.
-- **Env var cleanup** — `ENGRAM_PORT`/`ENGRAM_HOST` (old `ZANMEMORY_*` still works with deprecation warning).
+#### v5.6 — Node.js 22, Graph Intelligence
+- Node.js 22+ as primary runtime (`--experimental-strip-types`), Bun maintained for compatibility
+- Optimized MCP server (529 → 168 lines), vitest framework (76+ tests)
+- Graphology knowledge graph — centrality, shortest paths, community detection, relationship inference
 
-### Audit Trail
+#### v5.5 — Intelligence Layer
+- LLM fact extraction, auto-tagging, relationship classification
+- Conversation extraction, URL ingest, reflections, derived memories, auto-consolidation
+- MCP server improvements — error handling, streaming, tool introspection
 
-Every mutation is logged to the `audit_log` table:
+#### v5.3 — Security Hardening
+- Auth required by default, rate limit fix, body size limits
+- GUI auth rate limiting, timing-safe password comparison
+- Security headers, CORS origin pinning, IP allowlisting
+- Audit trail, structured JSON logging
 
-```bash
-curl http://localhost:4200/audit?limit=5 \
-  -H "Authorization: Bearer eg_your_key"
-```
+#### v5.0 — FSRS-6 Spaced Repetition
+- 21-parameter power-law forgetting curve (ported from open-spaced-repetition/fsrs4anki)
+- Dual-strength model (Bjork & Bjork 1992): storage strength + retrieval strength
+- Formula: `R = (1 + factor * t/S)^(-w20)`
 
-### Structured Logging
-
-All output is JSON with configurable levels:
-
-```json
-{"level":"info","ts":"2026-03-10T09:32:06Z","msg":"server_started","version":"5.3","port":4200}
-```
-
-Levels: `debug`, `info`, `warn`, `error`, `none`. Set via `ENGRAM_LOG_LEVEL`.
-
-### FSRS-6 Spaced Repetition (v5.0)
-
-Replaces simple exponential decay with **FSRS-6** — a 21-parameter algorithm trained on millions of Anki reviews. Memory decay follows a **power-law forgetting curve**.
-
-**Key formula:** `R = (1 + factor × t/S)^(-w₂₀)` where S is stability (days until 90% recall probability).
-
-Every memory access is an implicit FSRS review. The **dual-strength model** (Bjork & Bjork 1992) tracks:
-- **Storage strength** — increases with each access, never decays (long-term consolidation)
-- **Retrieval strength** — decays via power law, reset on access (current accessibility)
+</details>
 
 ---
 
@@ -153,7 +147,7 @@ Engram is now running at `http://localhost:4200`.
 git clone https://github.com/zanfiel/engram.git
 cd engram
 npm install
-ENGRAM_GUI_PASSWORD=your-password node --experimental-strip-types server.ts
+ENGRAM_GUI_PASSWORD=your-password node --experimental-strip-types server-split.ts
 ```
 
 ### From source (Bun — legacy)
@@ -162,7 +156,7 @@ ENGRAM_GUI_PASSWORD=your-password node --experimental-strip-types server.ts
 git clone https://github.com/zanfiel/engram.git
 cd engram
 bun install
-ENGRAM_GUI_PASSWORD=your-password bun run server.ts
+ENGRAM_GUI_PASSWORD=your-password bun run server-split.ts
 ```
 
 ### Create an API key
@@ -414,6 +408,7 @@ Use `X-Space: space-name` (or `X-Engram-Space`) header to scope operations to a 
 |--------|------|-------------|
 | `POST` | `/add` | Extract memories from conversations |
 | `POST` | `/ingest` | Extract facts from URLs or text |
+| `POST` | `/guard` | Pre-action guardrail check (allow/warn/block) |
 | `POST` | `/derive` | Generate inferred memories |
 | `POST` | `/reflect` | Generate period reflection |
 | `GET` | `/reflections` | List past reflections |
@@ -506,7 +501,7 @@ Use `X-Space: space-name` (or `X-Engram-Space`) header to scope operations to a 
 
 ### Memory Lifecycle
 
-1. **Store** — Memory content is embedded using MiniLM (384-dim vectors, runs locally via ONNX) and stored in libsql with FTS5 full-text indexing.
+1. **Store** — Memory content is embedded using BGE-large-en-v1.5 (1024-dim vectors, runs locally via ONNX) and stored in libsql with FTS5 full-text indexing.
 
 2. **Auto-link** — New memories are compared against existing ones via in-memory cosine similarity. Memories above 0.7 similarity are linked with typed relationships (similarity, updates, extends, contradicts, caused_by, prerequisite_for).
 
@@ -539,19 +534,19 @@ Use `X-Space: space-name` (or `X-Engram-Space`) header to scope operations to a 
 │       │              │              │        │
 │  ┌────┴──────────────┴──────────────┴────┐  │
 │  │    libsql (SQLite + vector columns)   │  │
-│  │       FLOAT32(384) + FTS5             │  │
+│  │      FLOAT32(1024) + FTS5             │  │
 │  └───────────────────────────────────────┘  │
 │                                              │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
-│  │  MiniLM  │  │  LLM     │  │  Graph   │  │
+│  │ BGE-large│  │  LLM     │  │  Graph   │  │
 │  │  Embedder │  │  (opt.)  │  │  Engine  │  │
 │  └──────────┘  └──────────┘  └──────────┘  │
 └─────────────────────────────────────────────┘
 ```
 
-- **Runtime:** Bun (primary) or Node.js 22+ (with `--experimental-strip-types`)
+- **Runtime:** Node.js 22+ (primary, with `--experimental-strip-types`) or Bun
 - **Database:** libsql (SQLite fork with vector column support)
-- **Embeddings:** Xenova/all-MiniLM-L6-v2 (384-dim, runs locally via ONNX)
+- **Embeddings:** BGE-large-en-v1.5 (1024-dim, runs locally via raw ONNX inference)
 - **Search:** In-memory cosine similarity + FTS5 full-text hybrid
 - **LLM:** Optional, for fact extraction / reranking / consolidation
 - **Decay:** FSRS-6 (21-parameter power-law forgetting curve)
@@ -595,7 +590,7 @@ Engram includes a WebGL graph visualization at `/gui`. Login with your `ENGRAM_G
 
 ### Storage
 
-All data lives in a single libsql database (`data/memory.db`). Vector embeddings are stored as `FLOAT32(384)` columns.
+All data lives in a single libsql database (`data/memory.db`). Vector embeddings are stored as `FLOAT32(1024)` columns.
 
 **Backup:** `GET /backup` returns a downloadable copy (admin required). WAL checkpoints every 5 minutes and on graceful shutdown. Manual checkpoint via `POST /checkpoint`.
 
@@ -664,8 +659,7 @@ server {
 ```bash
 # Start the server, then:
 cd engram
-node --test tests/api.test.mjs
-# 38 tests, 12 suites, 0 failures
+npx vitest run
 ```
 
 ---

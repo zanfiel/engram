@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import { mkdirSync } from 'fs';
 import { log } from '../config/logger.ts';
 import { DB_PATH, DATA_DIR, DEFAULT_RATE_LIMIT, DEFAULT_IMPORTANCE } from '../config/index.ts';
-import { FSRSRating, FSRSMemoryState, fsrsProcessReview, calculateDecayScore } from '../fsrs/index.ts';
+import { FSRSRating, type FSRSMemoryState, fsrsProcessReview, calculateDecayScore } from '../fsrs/index.ts';
 
 export function embeddingToVectorJSON(emb: Float32Array): string {
   return "[" + Array.from(emb).join(",") + "]";
@@ -149,6 +149,34 @@ migrate(`
   `);
 
 
+// v5.7 — Episode embeddings, FSRS, FTS
+migrate("ALTER TABLE episodes ADD COLUMN embedding BLOB");
+migrate("ALTER TABLE episodes ADD COLUMN embedding_vec_1024 FLOAT32(1024)");
+migrate("ALTER TABLE episodes ADD COLUMN duration_seconds INTEGER");
+migrate("ALTER TABLE episodes ADD COLUMN fsrs_stability REAL");
+migrate("ALTER TABLE episodes ADD COLUMN fsrs_difficulty REAL");
+migrate("ALTER TABLE episodes ADD COLUMN fsrs_last_review_at TEXT");
+migrate("ALTER TABLE episodes ADD COLUMN fsrs_reps INTEGER DEFAULT 0");
+migrate("ALTER TABLE episodes ADD COLUMN decay_score REAL DEFAULT 1.0");
+
+migrate(`CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(
+  title, summary, content='episodes', content_rowid='id',
+  tokenize='porter unicode61'
+)`);
+
+migrate(`CREATE TRIGGER IF NOT EXISTS episodes_fts_ai AFTER INSERT ON episodes BEGIN
+  INSERT INTO episodes_fts(rowid, title, summary) VALUES (new.id, new.title, new.summary);
+END`);
+migrate(`CREATE TRIGGER IF NOT EXISTS episodes_fts_ad AFTER DELETE ON episodes BEGIN
+  INSERT INTO episodes_fts(episodes_fts, rowid, title, summary) VALUES ('delete', old.id, old.title, old.summary);
+END`);
+migrate(`CREATE TRIGGER IF NOT EXISTS episodes_fts_au AFTER UPDATE ON episodes BEGIN
+  INSERT INTO episodes_fts(episodes_fts, rowid, title, summary) VALUES ('delete', old.id, old.title, old.summary);
+  INSERT INTO episodes_fts(rowid, title, summary) VALUES (new.id, new.title, new.summary);
+END`);
+
+migrate("CREATE INDEX IF NOT EXISTS episodes_vec_1024_idx ON episodes(libsql_vector_idx(embedding_vec_1024))");
+
 // Consolidation tracking
 migrate(`
     CREATE TABLE IF NOT EXISTS consolidations (
@@ -194,6 +222,10 @@ migrate("CREATE INDEX IF NOT EXISTS idx_memories_fsrs_stability ON memories(fsrs
 // v5.0 — Native vector column (libsql FLOAT32)
 migrate("ALTER TABLE memories ADD COLUMN embedding_vec FLOAT32(384)");
 migrate("CREATE INDEX IF NOT EXISTS memories_vec_idx ON memories(libsql_vector_idx(embedding_vec))");
+
+// v5.7 — BGE-large 1024-dim vector column
+migrate("ALTER TABLE memories ADD COLUMN embedding_vec_1024 FLOAT32(1024)");
+migrate("CREATE INDEX IF NOT EXISTS memories_vec_1024_idx ON memories(libsql_vector_idx(embedding_vec_1024))");
 
 // Webhooks table
 migrate(`
@@ -542,7 +574,7 @@ export const updateMemoryEmbedding = db.prepare(
 );
 
 export const updateMemoryVec = db.prepare(
-  `UPDATE memories SET embedding_vec = vector(?) WHERE id = ?`
+  `UPDATE memories SET embedding_vec_1024 = vector(?) WHERE id = ?`
 );
 
 /** Write vector column for a newly inserted memory (call after insertMemory) */
@@ -777,6 +809,24 @@ export const getEpisodeMemories = db.prepare(
 );
 export const assignToEpisode = db.prepare(
   `UPDATE memories SET episode_id = ? WHERE id = ?`
+);
+
+// Episode embedding + search
+export const updateEpisodeEmbedding = db.prepare(
+  `UPDATE episodes SET embedding = ? WHERE id = ?`
+);
+export const updateEpisodeVec = db.prepare(
+  `UPDATE episodes SET embedding_vec_1024 = vector(?) WHERE id = ?`
+);
+export const searchEpisodesFTS = db.prepare(
+  `SELECT e.*, rank FROM episodes_fts f JOIN episodes e ON e.id = f.rowid
+   WHERE episodes_fts MATCH ? AND e.user_id = ? ORDER BY rank LIMIT ?`
+);
+export const listEpisodesByTimeRange = db.prepare(
+  `SELECT * FROM episodes WHERE user_id = ? AND started_at >= ? AND started_at <= ? ORDER BY started_at DESC LIMIT ?`
+);
+export const getAllEpisodeEmbeddings = db.prepare(
+  `SELECT id, user_id, summary, embedding FROM episodes WHERE embedding IS NOT NULL`
 );
 
 // Consolidation queries

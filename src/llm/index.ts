@@ -126,6 +126,7 @@ Rules:
 - "none" = no meaningful relation
 - For forget_after: ISO 8601 datetime. Permanent facts = null.
 - 1-3 key facts per content
+- Extract BOTH user facts AND assistant actions. If the assistant recommended, implemented, fixed, diagnosed, or produced something, extract that as a fact too (e.g. "assistant implemented FSRS-6 spaced repetition", "assistant recommended using WAL mode").
 - Include "tags": 2-5 lowercase keywords
 - Include "structured_facts", "preferences", "state_updates" if applicable`;
 
@@ -161,10 +162,41 @@ export async function extractFacts(
 // ============================================================================
 
 import {
-  db, getMemoryWithoutEmbedding, insertLink, markSuperseded,
+  db, getMemoryWithoutEmbedding, insertLink, markSuperseded, updateConfidence,
 } from "../db/index.ts";
+import { emitWebhookEvent } from "../platform/webhooks.ts";
 
-function propagateConfidence(_newId: number, _type: string, _existingId: number): void {}
+function propagateConfidence(memoryId: number, relationType: string, existingMemoryId: number): void {
+  if (relationType === "updates") {
+    // Old memory's confidence drops — it's been superseded
+    updateConfidence.run(0.3, existingMemoryId);
+  } else if (relationType === "contradicts") {
+    // Both memories get reduced confidence — conflict needs resolution
+    const existing = getMemoryWithoutEmbedding.get(existingMemoryId) as any;
+    const current = getMemoryWithoutEmbedding.get(memoryId) as any;
+    if (existing) {
+      const newConf = Math.max(0.2, (existing.confidence || 1.0) * 0.6);
+      updateConfidence.run(newConf, existingMemoryId);
+    }
+    if (current) {
+      updateConfidence.run(0.7, memoryId); // newer info gets slight benefit of doubt
+    }
+
+    emitWebhookEvent("contradiction.detected", {
+      memory_id: memoryId,
+      contradicts_memory_id: existingMemoryId,
+      memory_content: current?.content,
+      existing_content: existing?.content,
+    });
+  } else if (relationType === "extends") {
+    // Extended memory gets a small confidence boost — it's been corroborated
+    const existing = getMemoryWithoutEmbedding.get(existingMemoryId) as any;
+    if (existing) {
+      const newConf = Math.min(1.0, (existing.confidence || 1.0) * 1.05);
+      updateConfidence.run(newConf, existingMemoryId);
+    }
+  }
+}
 const incrementSourceCount = db.prepare("UPDATE memories SET source_count = source_count + 1 WHERE id = ?");
 
 export function processExtractionResult(

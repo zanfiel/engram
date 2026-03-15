@@ -21,21 +21,21 @@ npm run dev
 
 **Requirements:**
 - Node.js ≥ 22.0.0
-- ~200MB disk for embedding model (auto-downloaded on first run)
+- ~350MB disk for embedding model (BGE-large-en-v1.5, auto-downloaded on first run)
 
 ## Architecture
 
 Engram is a single-process TypeScript server with zero external service dependencies.
 
 ```
-server.ts          — Monolith server (~7400 lines, legacy — use server-split.ts)
+archive/server.ts.legacy-monolith — Archived monolith server (~7400 lines, do not use)
 server-split.ts    — Modular entrypoint (imports from src/)
 mcp-server.ts      — MCP server (JSON-RPC 2.0 stdio transport)
 src/
 ├── auth/          — API keys, GUI cookies, RBAC
 ├── config/        — Environment and runtime configuration
 ├── db/            — libsql with FTS5 + FLOAT32 vectors
-├── embeddings/    — Xenova/all-MiniLM-L6-v2 via @huggingface/transformers
+├── embeddings/    — BGE-large-en-v1.5 (1024-dim) via raw onnxruntime-node
 ├── fsrs/          — FSRS-6 spaced repetition (21 trained weights)
 ├── graph/         — Graphology-based knowledge graph + community detection
 ├── gui/           — GUI route handlers
@@ -43,10 +43,11 @@ src/
 ├── intelligence/  — Fact extraction, consolidation, reflections, contradiction detection
 ├── llm/           — LLM client (optional, OpenAI-compatible)
 ├── memory/        — Core memory CRUD + versioning
+├── memory/        — Core search (hybrid vector+FTS) and profile generation
 ├── organization/  — Tags, episodes, entities, projects, spaces
 ├── platform/      — Webhooks, digests, sync, import/export
 ├── routes/        — HTTP route definitions
-└── tier4/         — Advanced features (time-travel, derived memories, reranker)
+└── tier4/         — Advanced features (causal chains, predictive recall, valence)
 
 engram-gui.html    — WebGL galaxy visualization (standalone HTML)
 engram-login.html  — Login page
@@ -55,15 +56,21 @@ landing.html       — Marketing landing page
 
 ### Key Design Decisions
 
-1. **Modular architecture**: The server has been split from a monolith (`server.ts`, ~7400 lines) into `src/` modules. The modular entrypoint is `server-split.ts`. Both work, but new development targets `src/`.
+1. **Modular architecture**: The server was split from a monolith (`archive/server.ts.legacy-monolith`, ~7400 lines) into `src/` modules. The only supported entrypoint is `server-split.ts`.
 
 2. **libsql, not better-sqlite3**: We use libsql for native FLOAT32 vector columns and HNSW index support. This gives us vector search without an external service.
 
-3. **In-memory embedding cache**: All embeddings are loaded into RAM on startup (~1.5KB per memory). This makes vector search sub-millisecond for thousands of memories. The tradeoff is O(n) memory usage.
+3. **In-memory embedding cache**: All embeddings (memories + episodes) are loaded into RAM on startup (~4KB per memory at 1024-dim). This makes vector search sub-millisecond for thousands of memories. The tradeoff is O(n) memory usage.
 
 4. **FSRS-6 over exponential decay**: Every other memory system uses exponential decay. We use the FSRS-6 algorithm (power-law forgetting curve) with 21 weights trained on millions of Anki reviews. This is mathematically more accurate and gives us features nobody else has (dual-strength model, same-day review handling, optimal review intervals).
 
-5. **Node.js HTTP, not Express/Hono**: Zero framework dependency. The server uses `createServer` with a Web Request/Response adapter. Core dependencies: libsql, @huggingface/transformers, graphology, and @modelcontextprotocol/sdk.
+5. **Node.js HTTP, not Express/Hono**: Zero framework dependency. The server uses `createServer` with a Web Request/Response adapter. Core dependencies: libsql, onnxruntime-node, graphology, and @modelcontextprotocol/sdk.
+
+6. **Raw ONNX inference**: Embeddings use onnxruntime-node directly with a hand-written BERT WordPiece tokenizer — no @huggingface/transformers wrapper. Model files (tokenizer.json + quantized ONNX) are auto-downloaded from HuggingFace on first run.
+
+7. **Episodic memory**: Conversations are stored as episodes with narrative summaries, embedded for semantic search, and linked to extracted facts. This enables temporal queries ("what did I work on last week?") and contextual recall ("why was this decision made?").
+
+8. **Abstention**: Search returns an `abstained` flag when top result confidence is below a configurable threshold. This prevents false positives — the system knows when it doesn't have relevant information.
 
 ## Code Style
 
@@ -75,15 +82,22 @@ landing.html       — Marketing landing page
 
 ## Testing
 
-Uses [vitest](https://vitest.dev/). Run with:
+API tests use Node.js built-in test runner. Start the server, then:
 
 ```bash
-npx vitest run
+# Run against localhost:4200 (default)
+node --test tests/api.test.mjs
+
+# Or specify a different URL
+ENGRAM_URL=http://localhost:4201 node --test tests/api.test.mjs
 ```
+
+33 tests across 14 suites covering core API, multi-tenant isolation, CRUD, FSRS, and more.
 
 We always need more coverage:
 - [ ] Benchmark suite for search latency vs competitors
 - [ ] Stress tests for large memory sets (10k+ memories)
+- [ ] Multi-user isolation tests (two API keys, verify data separation)
 
 ## Pull Request Process
 
