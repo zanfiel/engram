@@ -7,6 +7,7 @@ import { readFileSync, writeFileSync, statSync, copyFileSync, existsSync, unlink
 import { readFile } from "fs/promises";
 import { randomUUID, timingSafeEqual } from "crypto";
 import { resolve } from "path";
+import { htmlToText } from "html-to-text";
 
 // Config
 import {
@@ -1189,27 +1190,19 @@ If no meaningful facts, return {"facts": []}`;
               const titleMatch = raw.match(/<title[^>]*>([^<]+)<\/title>/i);
               title = titleMatch ? titleMatch[1].trim() : new URL(ingestUrl).hostname;
 
-              // Strip HTML to text
-              rawText = raw
-                .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-                .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-                .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, "")
-                .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, "")
-                .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, "")
-                .replace(/<aside[^>]*>[\s\S]*?<\/aside>/gi, "")
-                .replace(/<!--[\s\S]*?-->/g, "")
-                .replace(/<br\s*\/?>/gi, "\n")
-                .replace(/<\/p>/gi, "\n\n")
-                .replace(/<\/div>/gi, "\n")
-                .replace(/<\/li>/gi, "\n")
-                .replace(/<\/h[1-6]>/gi, "\n\n")
-                .replace(/<[^>]+>/g, " ")
-                .replace(/&nbsp;/g, " ")
-                .replace(/&amp;/g, "&")
-                .replace(/&lt;/g, "<")
-                .replace(/&gt;/g, ">")
-                .replace(/&quot;/g, '"')
-                .replace(/&#39;/g, "'")
+              // Strip HTML to text using a robust HTML-to-text converter
+              const extractedText = htmlToText(raw, {
+                wordwrap: false,
+                selectors: [
+                  { selector: "script", format: "skip" },
+                  { selector: "style", format: "skip" },
+                  { selector: "nav", format: "skip" },
+                  { selector: "footer", format: "skip" },
+                  { selector: "header", format: "skip" },
+                  { selector: "aside", format: "skip" },
+                ],
+              });
+              rawText = extractedText
                 .replace(/\n{3,}/g, "\n\n")
                 .replace(/ {2,}/g, " ")
                 .trim();

@@ -35,7 +35,8 @@
     "graphology-communities-louvain": "^2.0.2",
     "graphology-metrics": "^2.4.0",
     "graphology-shortest-path": "^2.1.0",
-    "libsql": "^0.5.22"
+    "libsql": "^0.5.22",
+    "html-to-text": "^9.0.5"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
