@@ -1,0 +1,34 @@
+data/
+node_modules/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+.env
+.hmac_secret
+dist/
+*.bak
+*.backup
+server.ts.pre-audit-backup
+server.ts.bun-backup
+sync.log
+.DS_Store
+Thumbs.db
+
+# Old/backup code
+src.old/
+server.ts.monolith
+server.ts.pre-intelligence-bak
+server.new.ts
+split.ts
+query.js
+query.mjs
+query.ts
+
+# Local scripts
+*.bat
+*.ps1
+*.vbs
+*.cmd
+sync-to-fallback.sh
+import-opencode.py
