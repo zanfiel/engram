@@ -1,6 +1,6 @@
 // ============================================================================
 // LLM — Client, fact extraction, reranker
-// Supports: Anthropic API key, OpenAI-compatible (Ollama, LiteLLM, vLLM)
+// Supports: Anthropic, MiniMax, OpenAI-compatible (Ollama, LiteLLM, vLLM)
 // Set via env: LLM_API_KEY, LLM_URL, LLM_MODEL
 // ============================================================================
 
@@ -36,6 +36,7 @@ export function isLLMAvailable(): boolean {
 export async function callLLM(systemPrompt: string, userPrompt: string, model?: string): Promise<string> {
   const useModel = model || LLM_MODEL;
   const isAnthropic = LLM_URL.includes("anthropic.com");
+  const isMiniMax = LLM_URL.includes("minimax.io");
 
   if (isAnthropic) {
     if (!LLM_API_KEY) throw new Error("LLM_API_KEY required for Anthropic API");
@@ -59,6 +60,33 @@ export async function callLLM(systemPrompt: string, userPrompt: string, model?: 
     }
     const data = await resp.json() as any;
     return data.content?.[0]?.text || "";
+  }
+
+  // MiniMax API (OpenAI-compatible with temperature constraint)
+  if (isMiniMax) {
+    if (!LLM_API_KEY) throw new Error("LLM_API_KEY required for MiniMax API");
+    const resp = await fetch(LLM_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${LLM_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: useModel,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        max_tokens: 2000,
+        temperature: 0.1,
+      }),
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`MiniMax request failed (${resp.status}): ${text}`);
+    }
+    const data = await resp.json() as any;
+    return data.choices?.[0]?.message?.content || "";
   }
 
   // OpenAI-compatible format (Ollama, LiteLLM, vLLM, etc.)
