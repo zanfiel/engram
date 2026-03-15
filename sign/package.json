@@ -1,0 +1,10 @@
+{
+  "name": "@zanverse/sign",
+  "version": "1.0.0",
+  "description": "Cryptographic identity & execution signing for AI agents",
+  "main": "index.ts",
+  "types": "index.ts",
+  "type": "module",
+  "license": "Elastic-2.0",
+  "engines": { "node": ">=18" }
+}

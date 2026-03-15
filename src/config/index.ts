@@ -62,6 +62,9 @@ export const GUI_AUTH_WINDOW_MS = 60_000;
 export const GUI_AUTH_LOCKOUT_MS = 600_000;
 export const OPEN_ACCESS_RATE_LIMIT = Number(process.env.ENGRAM_OPEN_RATE_LIMIT || 120);
 
+// Agent identity & signing config
+export const SIGNING_SECRET_FILE = resolve(DATA_DIR, ".signing_secret");
+
 // Logging config
 export const LOG_LEVEL_MAP: Record<string, number> = { debug: 0, info: 1, warn: 2, error: 3, none: 4 };
 export const LOG_LEVEL = LOG_LEVEL_MAP[process.env.ENGRAM_LOG_LEVEL || "info"] ?? 1;
